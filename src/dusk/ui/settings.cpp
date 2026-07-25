@@ -555,7 +555,7 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                     .getValue =
                         [] {
                             const auto& state = prelaunch_state();
-                            if (!state.configuredDiscCanLaunch || !state.configuredDiscInfo.isPal) {
+                            if (!state.configuredDiscCanLaunch || state.configuredDiscInfo.region != iso::Region::Europe) {
                                 return kLanguageNames[0];
                             }
                             const u8 idx = static_cast<u8>(getSettings().game.language.getValue());
@@ -565,7 +565,7 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                         [] {
                             const auto& state = prelaunch_state();
                             return !state.configuredDiscCanLaunch ||
-                                   !state.configuredDiscInfo.isPal;
+                                   state.configuredDiscInfo.region != iso::Region::Europe;
                         },
                     .isModified =
                         [] {

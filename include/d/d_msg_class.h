@@ -7,7 +7,11 @@
 #include "helpers/endian.h"
 #include "helpers/string.hpp"
 
-#if REGION_JPN
+#if TARGET_PC
+#define D_MSG_CLASS_PAGE_CNT_MAX 40
+#define D_MSG_CLASS_CHAR_CNT_MAX 0x210
+#define D_MSG_CLASS_LINE_MAX 12
+#elif REGION_JPN
 #define D_MSG_CLASS_PAGE_CNT_MAX 30
 #define D_MSG_CLASS_CHAR_CNT_MAX 0x210
 #define D_MSG_CLASS_LINE_MAX 9

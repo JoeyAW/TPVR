@@ -17,6 +17,18 @@ enum class ValidationError : u8 {
     Success
 };
 
+enum class Platform : u8 {
+    GameCube,
+    Wii,
+};
+
+enum class Region : u8 {
+    NorthAmerica,
+    Europe,
+    Japan,
+    Korea,
+};
+
 struct VerificationStatus {
     std::atomic_size_t bytesRead = 0;
     std::atomic_size_t bytesTotal = 0;
@@ -25,7 +37,8 @@ struct VerificationStatus {
 };
 
 struct DiscInfo {
-    bool isPal = false;
+    Platform platform = Platform::GameCube;
+    Region region = Region::NorthAmerica;
 };
 
 ValidationError inspect(const char* path, DiscInfo& info);

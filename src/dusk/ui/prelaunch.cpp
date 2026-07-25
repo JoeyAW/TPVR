@@ -885,8 +885,36 @@ void Prelaunch::update() {
     if (mDiscDetail != nullptr) {
         if (activeDiscLoaded) {
             mDiscDetail->SetProperty(Rml::PropertyId::Display, Rml::Style::Display::Block);
-            Rml::String innerRML = "GameCube • ";
-            innerRML += state.activeDiscInfo.isPal ? "EUR" : "USA";
+            Rml::String innerRML = "";
+
+            switch (state.activeDiscInfo.platform) {
+                case iso::Platform::GameCube:
+                    innerRML += "GameCube";
+                    break;
+                case iso::Platform::Wii:
+                    innerRML += "Wii";
+                    break;
+            }
+
+            innerRML += " • ";
+
+            switch (state.activeDiscInfo.region) {
+                case iso::Region::Japan:
+                    innerRML += "JPN";
+                    break;
+                case iso::Region::Europe:
+                    innerRML += "EUR";
+                    break;
+                case iso::Region::NorthAmerica:
+                    innerRML += "USA";
+                    break;
+                case iso::Region::Korea:
+                    innerRML += "KOR";
+                    break;
+                default:
+                    innerRML += "Unknown";
+                    break;
+            }
             mDiscDetail->SetInnerRML(innerRML);
         } else {
             mDiscDetail->SetProperty(Rml::PropertyId::Display, Rml::Style::Display::None);

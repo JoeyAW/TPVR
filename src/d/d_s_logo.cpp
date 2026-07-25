@@ -967,7 +967,14 @@ dScnLogo_c::~dScnLogo_c() {
     mDoExt_getRubyFont();
     mDoExt_setAraCacheSize(free_size - aram_heap->getTotalFreeSize());
 
-#if VERSION == VERSION_GCN_JPN
+#if TARGET_PC
+    if (getGameVersion() == GameVersion::GcnJpn) {
+        if (dComIfGp_getFontArchive() != NULL) {
+            dComIfGp_getFontArchive()->unmount();
+            dComIfGp_setFontArchive(NULL);
+        }
+    }
+#elif VERSION == VERSION_GCN_JPN
     if (dComIfGp_getFontArchive() != NULL) {
         dComIfGp_getFontArchive()->unmount();
         dComIfGp_setFontArchive(NULL);

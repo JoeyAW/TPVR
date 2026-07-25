@@ -1016,7 +1016,12 @@ void dSv_player_info_c::init() {
 }
 
 void dSv_player_config_c::init() {
-#if VERSION == VERSION_GCN_JPN
+#if TARGET_PC
+   if (dusk::version::isRegionJpn())
+       mRuby = 0;
+   else
+       mRuby = 1;
+#elif VERSION == VERSION_GCN_JPN
     mRuby = 0;
 #else
     mRuby = 1;

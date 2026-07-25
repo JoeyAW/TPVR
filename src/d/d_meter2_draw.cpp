@@ -23,6 +23,8 @@
 #include "dusk/frame_interpolation.h"
 #include <cstring>
 
+#include "dusk/version.hpp"
+
 #if TARGET_PC
 #include "dusk/settings.h"
 #include "dusk/ui/icon_provider.hpp"
@@ -59,6 +61,27 @@ void dAnchorHudScale(CPaneMgr* i_pane, HudCorner i_corner, f32* io_x, f32* io_y,
 #endif
 
 dMeter2Draw_c::dMeter2Draw_c(JKRExpHeap* mp_heap) {
+#if TARGET_PC
+    // correct hio data here because we can't do runtime disc checks in sinit data constructors
+    if (dusk::version::isRegionJpn()) {
+        g_drawHIO.mButtonATextSpacing = -2.0f;
+        for (int i = 0; i < 6; i++) {
+            static f32 const finfoPosX_jpn[6] = {-27.0f, 0.0f, -12.0f, 0.0f, -12.0f, -32.8f};
+            static f32 const fishnPosX_jpn[6] = {-27.0f, 0.0f, -12.0f, 0.0f, -12.0f, -32.8f};
+            g_drawHIO.mFishListScreen.mFishCountSizePosX[i] = finfoPosX_jpn[i];
+            g_drawHIO.mFishListScreen.mFishInfoPosX[i] = fishnPosX_jpn[i];
+        }
+    } else {
+        g_drawHIO.mButtonATextSpacing = 1.0f;
+        for (int i = 0; i < 6; i++) {
+            static f32 const finfoPosX[6] = {-17.0f, 0.0f, -14.0f, 0.0f, -12.0f, -32.8f};
+            static f32 const fishnPosX[6] = {-17.0f, 0.0f, -14.0f, 0.0f, -12.0f, -32.8f};
+            g_drawHIO.mFishListScreen.mFishCountSizePosX[i] = finfoPosX[i];
+            g_drawHIO.mFishListScreen.mFishInfoPosX[i] = fishnPosX[i];
+        }
+    }
+#endif
+
     OS_REPORT("enter dMeter2Draw_c::dMeter2Draw_c(JKRExpHeap *mp_heap)\n");
 
     heap = mp_heap;
@@ -161,7 +184,8 @@ dMeter2Draw_c::dMeter2Draw_c(JKRExpHeap* mp_heap) {
     }
 
     J2DTextBox::TFontSize font_size;
-#if VERSION != VERSION_GCN_JPN
+#if TARGET_PC || VERSION != VERSION_GCN_JPN
+    IF_DUSK_BLOCK(!dusk::version::isRegionJpn())
     font_size.mSizeX = 17.0f;
     font_size.mSizeY = 20.0f;
     for (int i = 0; i < 5; i++) {
@@ -171,6 +195,7 @@ dMeter2Draw_c::dMeter2Draw_c(JKRExpHeap* mp_heap) {
         static_cast<J2DTextBox*>(mpXYText[i][1]->getPanePtr())->setFontSize(font_size);
         static_cast<J2DTextBox*>(mpXYText[i][2]->getPanePtr())->setFontSize(font_size);
     }
+    IF_DUSK_BLOCK_END
 #endif
 
     init();

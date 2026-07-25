@@ -314,6 +314,13 @@ dMsgObject_HIO_c::dMsgObject_HIO_c() {
 }
 
 int dMsgObject_c::_create(msg_class* param_1) {
+#if TARGET_PC
+    if (dusk::version::isRegionJpn())
+        g_MsgObject_HIO_c.mBoxTalkScaleX = 1.1f;
+    else
+        g_MsgObject_HIO_c.mBoxTalkScaleX = 1.2f;
+#endif
+
     field_0x124 = NULL;
     field_0x100 = param_1;
     field_0x16c = -1;

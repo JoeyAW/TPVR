@@ -60,18 +60,6 @@ const char* verification_state_name(dusk::DiscVerificationState state) noexcept 
 
 namespace dusk::iso {
 
-enum class Platform : u8 {
-    GameCube,
-    Wii,
-};
-
-enum class Region : u8 {
-    NorthAmerica,
-    Europe,
-    Japan,
-    Korea,
-};
-
 struct KnownDisc {
     std::string_view id;
     Platform platform;
@@ -88,7 +76,7 @@ struct KnownDisc {
 
 constexpr auto KNOWN_DISCS = std::to_array<KnownDisc>({
     {"GZ2E01", Platform::GameCube, Region::NorthAmerica, "14e886f08e548a000afde98a3195e788"},
-    {"GZ2J01", Platform::GameCube, Region::Japan},
+    {"GZ2J01", Platform::GameCube, Region::Japan, "5967dc7a6a553652f4d2050aeef6f368"},
     {"GZ2P01", Platform::GameCube, Region::Europe, "9ef597588b0035ca9e91b333fa9a8a7e"},
     {"RZDE01", Platform::Wii, Region::NorthAmerica},
     {"RZDJ01", Platform::Wii, Region::Japan},
@@ -216,7 +204,9 @@ ValidationError validate(const char* path, VerificationStatus& status, DiscInfo&
         return ValidationError::WrongGame;
     }
     status.knownDisc = knownDisc;
-    info.isPal = knownDisc->region == Region::Europe;
+
+    info.platform = knownDisc->platform;
+    info.region = knownDisc->region;
     if (!knownDisc->supported) {
         return ValidationError::WrongVersion;
     }
@@ -251,7 +241,9 @@ ValidationError inspect(const char* path, DiscInfo& info) {
     if (!knownDisc) {
         return ValidationError::WrongGame;
     }
-    info.isPal = knownDisc->region == Region::Europe;
+
+    info.platform = knownDisc->platform;
+    info.region = knownDisc->region;
     if (!knownDisc->supported) {
         return ValidationError::WrongVersion;
     }
@@ -260,7 +252,7 @@ ValidationError inspect(const char* path, DiscInfo& info) {
 
 bool isPal(const char* path) {
     DiscInfo info{};
-    return inspect(path, info) == ValidationError::Success && info.isPal;
+    return inspect(path, info) == ValidationError::Success && info.region == Region::Europe;
 }
 
 void log_verification_state(std::string_view path, DiscVerificationState state) {

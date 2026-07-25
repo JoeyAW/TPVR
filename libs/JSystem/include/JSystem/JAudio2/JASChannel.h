@@ -166,6 +166,18 @@ public:
         u32 field_0x104;
     };
 
+#if TARGET_PC
+    /**
+     * Memory address at which this sound effect should consider ARAM to start.
+     *
+     * By changing this, sound effects can effectively be played back from anywhere in memory,
+     * rather than just the emulated ARAM space.
+     *
+     * If nullptr, the regular emulated ARAM is used.
+     */
+    void const* mAramBaseAddress;
+#endif
+
     static DUSK_GAME_DATA OSMessageQueue sBankDisposeMsgQ;
     static DUSK_GAME_DATA OSMessage sBankDisposeMsg[16];
     static DUSK_GAME_DATA OSMessage sBankDisposeList[16];

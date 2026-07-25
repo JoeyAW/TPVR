@@ -26,6 +26,9 @@ JASChannel::JASChannel(Callback i_callback, void* i_callbackData) :
     mCallback(i_callback),
     mCallbackData(i_callbackData),
     mUpdateTimer(0),
+#if TARGET_PC
+    mAramBaseAddress(nullptr),
+#endif
     mBankDisposeID(NULL),
     mKey(0),
     mVelocity(0x7f),
@@ -256,6 +259,9 @@ s32 JASChannel::initialUpdateDSPChannel(JASDsp::TChannel* i_channel) {
     switch (field_0xdc.mChannelType) {
     case 0:
         i_channel->setWaveInfo(field_0xdc.mWaveInfo, mWaveAramAddress, mSkipSamples);
+#if TARGET_PC
+        i_channel->mAramBaseAddress = mAramBaseAddress;
+#endif
         break;
     case 2:
         i_channel->setOscInfo(mOscillatorSomething);

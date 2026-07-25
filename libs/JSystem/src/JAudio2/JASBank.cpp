@@ -33,7 +33,7 @@ JASChannel* JASBank::noteOn(JASBank const* param_0, int param_1, u8 param_2, u8 
         return NULL;
     }
     intptr_t wavePtr = waveHandle->getWavePtr();
-    if (!wavePtr) {
+    if (!wavePtr IF_DUSK(&& !waveHandle->getAramBaseAddress())) {
         return NULL;
     }
 
@@ -44,6 +44,9 @@ JASChannel* JASBank::noteOn(JASBank const* param_0, int param_1, u8 param_2, u8 
     channel->setPriority(param_4);
     channel->field_0xdc.mWaveInfo = *waveInfo;
     channel->mWaveAramAddress = wavePtr;
+#if TARGET_PC
+    channel->mAramBaseAddress = waveHandle->getAramBaseAddress();
+#endif
     channel->field_0xdc.mChannelType = stack_60.field_0x1c;
     channel->setBankDisposeID(param_0);
     channel->setInitPitch(stack_60.mPitch * (waveInfo->mSampleRate / JASDriver::getDacRate()));

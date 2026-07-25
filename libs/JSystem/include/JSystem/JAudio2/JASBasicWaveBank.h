@@ -13,6 +13,12 @@ struct JASBasicWaveBank : public JASWaveBank {
         TWaveHandle() { mHeap = NULL; }
         virtual intptr_t getWavePtr() const;
         virtual const JASWaveInfo* getWaveInfo() const { return &mWaveInfo; }
+#if TARGET_PC
+        /**
+         * @see JASChannel::mAramBaseAddress
+         */
+        [[nodiscard]] void const* getAramBaseAddress() const override { return nullptr; }
+#endif
         bool compareHeap(JASHeap* heap) const { return mHeap == heap;}
 
         /* 0x04 */ JASWaveInfo mWaveInfo;

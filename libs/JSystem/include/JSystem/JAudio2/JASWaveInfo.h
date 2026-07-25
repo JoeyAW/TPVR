@@ -45,6 +45,12 @@ public:
     virtual ~JASWaveHandle() {}
     virtual const JASWaveInfo* getWaveInfo() const = 0;
     virtual intptr_t getWavePtr() const = 0;
+#if TARGET_PC
+    /**
+     * @see JASChannel::mAramBaseAddress
+     */
+    [[nodiscard]] virtual void const* getAramBaseAddress() const = 0;
+#endif
 };
 
 /**

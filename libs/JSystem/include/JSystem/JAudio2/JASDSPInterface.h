@@ -179,6 +179,20 @@ namespace JASDsp {
         /* 0x130 */ u8 _unused9[0x148 - 0x130];
         /* 0x148 */ s16 iir_filter_params[8];
         /* 0x158 */ u8 _unused10[0x180 - 0x158];
+#endif
+
+#if TARGET_PC
+        /**
+         * Memory address at which this sound effect should consider ARAM to start.
+         * This means fields like mWaveAramAddress will be relative to this pointer instead.
+         *
+         * By changing this, sound effects can effectively be played back from anywhere in memory,
+         * rather than just the emulated ARAM space.
+         *
+         * If nullptr, the regular emulated ARAM is used.
+         */
+        void const* mAramBaseAddress;
+#endif
     };
 
     void boot(void (*)(void*));

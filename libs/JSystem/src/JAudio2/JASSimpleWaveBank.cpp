@@ -28,7 +28,7 @@ JASWaveHandle* JASSimpleWaveBank::getWaveHandle(u32 no) const {
 
 void JASSimpleWaveBank::setWaveInfo(u32 no, JASWaveInfo const& waveInfo) {
     mWaveTable[no].mWaveInfo = waveInfo;
-    mWaveTable[no].mWaveInfo.field_0x20 = &_48;
+    mWaveTable[no].mWaveInfo.mpLoaded = &mCurrentlyLoaded;
     mWaveTable[no].mHeap = &mHeap;
 }
 

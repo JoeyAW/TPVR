@@ -60,7 +60,7 @@ JASBasicWaveBank* JASWSParser::createBasicWaveBank(void const* stream, JKRHeap* 
             wave_info.mpLast = wave->mpLast;
             wave_info.mpPenult = wave->mpPenult;
             TCtrlWave* ctrl_wave = ctrl->mCtrlWaveOffsets[j].ptr(header);
-            u16 local_74 = JSULoHalf(ctrl_wave->_00);
+            u16 local_74 = JSULoHalf(ctrl_wave->mWaveAndGroupId);
             wave_bank->setWaveInfo(wave_group, j, local_74, wave_info);
         }
         wave_group->setFileName(archive->mFileName);
@@ -94,7 +94,7 @@ JASSimpleWaveBank* JASWSParser::createSimpleWaveBank(void const* stream, JKRHeap
     TWaveArchive* archive = archiveBank->mArchiveOffsets[0].ptr(header);
     for (int i = 0; i < ctrl->mWaveCount; i++) {
         TCtrlWave* ctrlWave = ctrl->mCtrlWaveOffsets[i].ptr(header);
-        u32 tmp = JSULoHalf(ctrlWave->_00);
+        u32 tmp = JSULoHalf(ctrlWave->mWaveAndGroupId);
         if (max < tmp) {
             max = tmp;
         }
@@ -116,8 +116,8 @@ JASSimpleWaveBank* JASWSParser::createSimpleWaveBank(void const* stream, JKRHeap
         wave_info.mpLast = wave->mpLast;
         wave_info.mpPenult = wave->mpPenult;
         TCtrlWave* ctrl_wave = ctrl->mCtrlWaveOffsets[i].ptr(header);
-        u32 tmp = JSULoHalf(ctrl_wave->_00);
-        wave_bank->setWaveInfo(tmp, wave_info);
+        u32 waveId = JSULoHalf(ctrl_wave->mWaveAndGroupId);
+        wave_bank->setWaveInfo(waveId, wave_info);
     }
     wave_bank->setFileName(archive->mFileName);
 

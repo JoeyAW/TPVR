@@ -24,23 +24,25 @@ struct JAUSoundTableItem {
 template<typename Root, typename Section, typename Group, typename Typename_0>
 struct JAUSoundTable_ {
     JAUSoundTable_() {
-        field_0x0 = NULL;
-        field_0x4 = 0;
+        mData = NULL;
+        mRoot = 0;
     }
 
     void reset() {
-        field_0x0 = NULL;
-        field_0x4 = NULL;
+        mData = NULL;
+        mRoot = NULL;
     }
 
     void init(const void* param_0) {
-        field_0x0 = param_0;
+        mData = param_0;
         // magic number is not in debug rom. I'm not sure what this comparison is (maybe some sort of '' number?)
         // I also do not know how it is different between JAUSoundTable and JAUSoundNameTable
-        if (*(BE(u32)*)field_0x0 + 0xbdad0000 != Root::magicNumber()) {
-            field_0x0 = NULL;
+        // Future person here: This is checking for either "BST " or "BSTN", with the second two letters in Root::magicNumber().
+        // Idk why the operations here are all weird but I can't use objdiff right now.
+        if (*(BE(u32)*)mData + 0xbdad0000 != Root::magicNumber()) {
+            mData = NULL;
         } else {
-            field_0x4 = (Root*)((u8*)field_0x0 + *((BE(u32)*)field_0x0 + 3));
+            mRoot = (Root*)((u8*)mData + *((BE(u32)*)mData + 3));
         }
     }
 
@@ -48,14 +50,14 @@ struct JAUSoundTable_ {
         if (index < 0) {
             return NULL;
         }
-        if ((u32)index >= field_0x4->mSectionNumber) {
+        if ((u32)index >= mRoot->mSectionNumber) {
             return NULL;
         }
-        u32 offset = field_0x4->mSectionOffsets[index];
+        u32 offset = mRoot->mSectionOffsets[index];
         if (offset == 0) {
             return NULL;
         } 
-        return (Section*)((u8*)field_0x0 + offset);
+        return (Section*)((u8*)mData + offset);
     }
 
     Group* getGroup(Section* param_1, int index) const {
@@ -71,11 +73,11 @@ struct JAUSoundTable_ {
         if (offset == 0) {
             return NULL;
         } 
-        return (Group*)((u8*)field_0x0 + offset);
+        return (Group*)((u8*)mData + offset);
     }
 
-    const void* field_0x0;
-    Root* field_0x4;
+    const void* mData;
+    Root* mRoot;
 };
 
 /**
@@ -83,7 +85,7 @@ struct JAUSoundTable_ {
  * 
  */
 struct JAUSoundTableRoot {
-    static inline u32 magicNumber() { return 0x5420; }
+    static inline u32 magicNumber() { return 'T '; } // Second half of "BST "
     BE(u32) mSectionNumber;
     BE(u32) mSectionOffsets[0];
 };
@@ -134,7 +136,7 @@ struct JAUSoundTableGroup {
 
     BE(u32) mNumItems;
     BE(u32) field_0x4;
-    u8 mTypeIds[0];
+    u8 mTypeIds[0]; // TODO: Should probably be BE(u32), but I can't objdiff rn.
 };
 
 /**
@@ -142,7 +144,7 @@ struct JAUSoundTableGroup {
  * 
  */
 struct JAUSoundTable : public JASGlobalInstance<JAUSoundTable> {
-    JAUSoundTable(bool param_0) : JASGlobalInstance<JAUSoundTable>(param_0) {
+    JAUSoundTable(bool setInstance) : JASGlobalInstance<JAUSoundTable>(setInstance) {
     }
     ~JAUSoundTable() {}
     
@@ -157,11 +159,11 @@ struct JAUSoundTable : public JASGlobalInstance<JAUSoundTable> {
         if (offset == 0) {
             return NULL;
         }
-        return (JAUSoundTableItem*)((u8*)field_0x0.field_0x0 + offset);
+        return (JAUSoundTableItem*)((u8*)field_0x0.mData + offset);
     }
 
-    const void* getResource() const { return field_0x0.field_0x0; }
-    bool isValid() const { return field_0x0.field_0x0 != NULL; }
+    const void* getResource() const { return field_0x0.mData; }
+    bool isValid() const { return field_0x0.mData != NULL; }
 
     JAUSoundTable_<JAUSoundTableRoot,JAUSoundTableSection,JAUSoundTableGroup,void> field_0x0;
 };
@@ -171,7 +173,7 @@ struct JAUSoundTable : public JASGlobalInstance<JAUSoundTable> {
  * 
  */
 struct JAUSoundNameTableRoot {
-    static inline u32 magicNumber() { return 0x544e; }
+    static inline u32 magicNumber() { return 'TN'; } // Second half of "BSTN"
     BE(u32) mSectionNumber;
     BE(u32) mSectionOffsets[0];
 };

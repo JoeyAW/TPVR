@@ -17,7 +17,7 @@ struct JASWaveArc;
 struct JASWaveInfo {
     JASWaveInfo() {
         mBaseKey = 0x3c;
-        field_0x20 = &one;
+        mpLoaded = &one;
     }
 
     /* 0x00 */ u8 mWaveFormat;
@@ -31,7 +31,7 @@ struct JASWaveInfo {
     /* 0x18 */ int mSampleCount;
     /* 0x1C */ s16 mpLast;
     /* 0x1E */ s16 mpPenult;
-    /* 0x20 */ const u32* field_0x20;
+    /* 0x20 */ const u32* mpLoaded;
 
     static DUSK_GAME_DATA u32 one;
 };

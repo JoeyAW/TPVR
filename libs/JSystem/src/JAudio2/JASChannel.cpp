@@ -237,7 +237,7 @@ s32 JASChannel::initialUpdateDSPChannel(JASDsp::TChannel* i_channel) {
         mCallback(CB_START, this, i_channel, mCallbackData);
     }
 
-    if (field_0xdc.mWaveInfo.field_0x20[0] == 0) {
+    if (field_0xdc.mWaveInfo.mpLoaded[0] == 0) {
         JUT_WARN_DEVICE(346, 2, "%s", "Lost wave data while playing");
         mDspCh->free();
         mDspCh = NULL;
@@ -315,7 +315,7 @@ s32 JASChannel::updateDSPChannel(JASDsp::TChannel* i_channel) {
         mCallback(CB_PLAY, this, i_channel, mCallbackData);
     }
 
-    if (field_0xdc.mWaveInfo.field_0x20[0] == 0) {
+    if (field_0xdc.mWaveInfo.mpLoaded[0] == 0) {
         JUT_WARN_DEVICE(456, 2, "%s","Lost wave data while playing");
         mDspCh->free();
         mDspCh = NULL;

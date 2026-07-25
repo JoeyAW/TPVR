@@ -1,10 +1,14 @@
 #include "JSystem/JSystem.h" // IWYU pragma: keep
 
 #include "JSystem/JAudio2/JASBank.h"
+
+#include "dusk/mods/svc/audio_res/audio_res.hpp"
 #include "JSystem/JAudio2/JASAiCtrl.h"
 #include "JSystem/JAudio2/JASBasicInst.h"
 #include "JSystem/JAudio2/JASBasicWaveBank.h"
 #include "JSystem/JAudio2/JASChannel.h"
+
+using namespace dusk::mods::svc::audio_res;
 
 // NONMATCHING JASPoolAllocObject_MultiThreaded<_> locations
 JASChannel* JASBank::noteOn(JASBank const* param_0, int param_1, u8 param_2, u8 param_3, u16 param_4,
@@ -28,6 +32,13 @@ JASChannel* JASBank::noteOn(JASBank const* param_0, int param_1, u8 param_2, u8 
     if (!waveHandle) {
         return NULL;
     }
+#if TARGET_PC
+    auto const found_replacement = s_replacements.find(AudioWaveKey(SoundEffects, stack_60.field_0x1a));
+    if (found_replacement != s_replacements.end()) {
+        waveHandle = found_replacement->second.get();
+    }
+#endif
+
     const JASWaveInfo* waveInfo = waveHandle->getWaveInfo();
     if (!waveInfo) {
         return NULL;

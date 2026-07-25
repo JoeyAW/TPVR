@@ -1581,6 +1581,7 @@ set(DUSK_FILES
         src/helpers/endian.cpp
         src/helpers/offset_ptr.cpp
         src/helpers/string.cpp
+        src/helpers/cast.cpp
 )
 
 set(DUSK_HTTP_BACKEND_FILES

@@ -38,6 +38,8 @@ JASChannel* JASBank::noteOn(JASBank const* param_0, int param_1, u8 param_2, u8 
     if (found_replacement != s_replacements.end()) {
         waveHandle = found_replacement->second.get();
     }
+
+    auto const aramBase = waveHandle->getAramBaseAddress();
 #endif
 
     const JASWaveInfo* waveInfo = waveHandle->getWaveInfo();
@@ -45,7 +47,7 @@ JASChannel* JASBank::noteOn(JASBank const* param_0, int param_1, u8 param_2, u8 
         return NULL;
     }
     intptr_t wavePtr = waveHandle->getWavePtr();
-    if (!wavePtr IF_DUSK(&& !waveHandle->getAramBaseAddress())) {
+    if (!wavePtr IF_DUSK(&& !aramBase)) {
         return NULL;
     }
 
@@ -57,7 +59,8 @@ JASChannel* JASBank::noteOn(JASBank const* param_0, int param_1, u8 param_2, u8 
     channel->field_0xdc.mWaveInfo = *waveInfo;
     channel->mWaveAramAddress = wavePtr;
 #if TARGET_PC
-    channel->mAramBaseAddress = waveHandle->getAramBaseAddress();
+    channel->mAramBaseAddress = aramBase;
+    channel->mSampleReference = waveHandle->getSampleReference();
 #endif
     channel->field_0xdc.mChannelType = stack_60.field_0x1c;
     channel->setBankDisposeID(param_0);

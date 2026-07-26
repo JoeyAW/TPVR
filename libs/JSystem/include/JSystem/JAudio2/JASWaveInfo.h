@@ -2,6 +2,11 @@
 #define JASWAVEINFO_H
 
 #include <types.h>
+#include <memory>
+
+#if TARGET_PC
+struct JASSampleDataReference;
+#endif
 
 struct JASWaveArc;
 
@@ -50,6 +55,11 @@ public:
      * @see JASChannel::mAramBaseAddress
      */
     [[nodiscard]] virtual void const* getAramBaseAddress() const = 0;
+
+    /**
+     * Create a @ref JASSampleDataReference to keep the sample data for this wave alive.
+     */
+    [[nodiscard]] virtual std::unique_ptr<JASSampleDataReference> getSampleReference() const { return nullptr; }
 #endif
 };
 

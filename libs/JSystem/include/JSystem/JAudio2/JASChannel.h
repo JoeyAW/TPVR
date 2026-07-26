@@ -8,12 +8,27 @@
 #include "JSystem/JAudio2/JASWaveInfo.h"
 #include "JSystem/JAudio2/JASDSPInterface.h"
 #include <os.h>
+#include <memory>
 
 struct JASDSPChannel;
 
 namespace JASDsp {
     struct TChannel;
 }
+
+#if TARGET_PC
+/**
+ * An object to manage the lifetime of the sample data pointed to by JASChannel.
+ *
+ * JASChannel can (optionally) accept an unique_ptr to an object to this type,
+ * in which case it will be destroyed when the JASChannel is done.
+ *
+ * @see JASChannel::mSampleReference
+ */
+struct JASSampleDataReference {
+    virtual ~JASSampleDataReference() = default;
+};
+#endif
 
 /**
  * @ingroup jsystem-jaudio
@@ -176,6 +191,11 @@ public:
      * If nullptr, the regular emulated ARAM is used.
      */
     void const* mAramBaseAddress;
+
+    /**
+     * @see JASSampleDataReference
+     */
+    std::unique_ptr<JASSampleDataReference> mSampleReference;
 #endif
 
     static DUSK_GAME_DATA OSMessageQueue sBankDisposeMsgQ;

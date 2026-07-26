@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include "JSystem/JAudio2/JASChannel.h"
 #include "JSystem/JAudio2/JASWaveInfo.h"
 #include "absl/container/flat_hash_map.h"
 #include "mods/svc/audio_res.h"
@@ -40,6 +41,12 @@ struct SampleDataU8 : SampleDataBuf {
     }
 };
 
+struct SampleReference : JASSampleDataReference {
+    explicit SampleReference(std::shared_ptr<SampleDataBuf> data) : data(std::move(data)) {}
+
+    std::shared_ptr<SampleDataBuf> data;
+};
+
 struct AudioWaveKey {
     AudioWaveBank bank;
     u32 wave_id;
@@ -59,6 +66,7 @@ struct AudioWaveReplacementValue : JASWaveHandle {
     [[nodiscard]] const JASWaveInfo* getWaveInfo() const override;
     [[nodiscard]] intptr_t getWavePtr() const override;
     [[nodiscard]] void const* getAramBaseAddress() const override;
+    [[nodiscard]] std::unique_ptr<JASSampleDataReference> getSampleReference() const override;
 
     JASWaveInfo wave_info;
     std::shared_ptr<SampleDataBuf> data;

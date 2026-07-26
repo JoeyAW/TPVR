@@ -201,6 +201,10 @@ intptr_t AudioWaveReplacementValue::getWavePtr() const {
     return 0;
 }
 
+std::unique_ptr<JASSampleDataReference> AudioWaveReplacementValue::getSampleReference() const {
+    return std::make_unique<SampleReference>(data);
+}
+
 void SampleDataPcm16::be_swap() {
     for (auto& sample : data) {
         ::be_swap(sample);

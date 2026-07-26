@@ -59,6 +59,12 @@ public:
  */
 class JASWaveBank {
 public:
+#if TARGET_PC
+    const u32 bankId;
+
+    JASWaveBank(u32 bankId) : bankId(bankId) { }
+#endif
+
     virtual ~JASWaveBank() {}
     virtual JASWaveHandle* getWaveHandle(u32) const = 0;
     virtual JASWaveArc* getWaveArc(u32) = 0;

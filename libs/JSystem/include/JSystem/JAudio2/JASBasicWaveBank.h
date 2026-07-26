@@ -50,7 +50,7 @@ struct JASBasicWaveBank : public JASWaveBank {
         u32 getWaveCount() const { return mWaveCount; }
     };
 
-    JASBasicWaveBank();
+    JASBasicWaveBank(IF_DUSK(u32 bankId));
     ~JASBasicWaveBank();
     TWaveGroup* getWaveGroup(u32);
     void setGroupCount(u32, JKRHeap*);

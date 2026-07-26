@@ -21,7 +21,7 @@ struct JASSimpleWaveBank : JASWaveBank, JASWaveArc {
         /* 0x28 */ JASHeap* mHeap;
     };
 
-    JASSimpleWaveBank();
+    JASSimpleWaveBank(IF_DUSK(u32 bankId));
     ~JASSimpleWaveBank();
     void setWaveTableSize(u32, JKRHeap*);
     JASWaveHandle* getWaveHandle(u32) const;

@@ -30,7 +30,7 @@ JASBasicWaveBank* JASWSParser::createBasicWaveBank(void const* stream, JKRHeap* 
     u32 free_size = heap->getFreeSize();
 
     THeader* header = (THeader*)stream;
-    JASBasicWaveBank* wave_bank = JKR_NEW_ARGS (heap, 0) JASBasicWaveBank;
+    JASBasicWaveBank* wave_bank = JKR_NEW_ARGS (heap, 0) JASBasicWaveBank IF_DUSK((header->mId));
     if (wave_bank == NULL) {
         return NULL;
     }
@@ -82,7 +82,7 @@ JASSimpleWaveBank* JASWSParser::createSimpleWaveBank(void const* stream, JKRHeap
         return NULL;
     }
 
-    JASSimpleWaveBank* wave_bank = JKR_NEW_ARGS (heap, 0) JASSimpleWaveBank;
+    JASSimpleWaveBank* wave_bank = JKR_NEW_ARGS (heap, 0) JASSimpleWaveBank IF_DUSK((header->mId));
     if (wave_bank == NULL) {
         return NULL;
     }

@@ -6,7 +6,7 @@
 #include "JSystem/JUtility/JUTAssert.h"
 #include <stdint.h>
 
-JASBasicWaveBank::JASBasicWaveBank() {
+JASBasicWaveBank::JASBasicWaveBank(IF_DUSK(u32 bankId)) IF_DUSK(: JASWaveBank(bankId)) {
     mWaveTable = NULL;
     mWaveGroupArray = NULL;
     mHandleCount = 0;

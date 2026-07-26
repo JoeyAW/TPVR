@@ -33,7 +33,8 @@ JASChannel* JASBank::noteOn(JASBank const* param_0, int param_1, u8 param_2, u8 
         return NULL;
     }
 #if TARGET_PC
-    auto const found_replacement = s_replacements.find(AudioWaveKey(SoundEffects, stack_60.field_0x1a));
+    auto const key = AudioWaveKey(static_cast<AudioWaveBank>(waveBank->bankId), stack_60.field_0x1a);
+    auto const found_replacement = s_replacements.find(key);
     if (found_replacement != s_replacements.end()) {
         waveHandle = found_replacement->second.get();
     }

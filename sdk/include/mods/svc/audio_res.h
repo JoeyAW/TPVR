@@ -51,6 +51,8 @@ typedef struct AudioResService {
         char const* file_name,
         AudioWaveInfo const* wave_info,
         AudioWaveHandle* out_handle);
+
+    ModResult (*remove_wave)(ModContext* ctx, AudioWaveHandle handle);
 } AudioResService;
 
 #ifdef __cplusplus

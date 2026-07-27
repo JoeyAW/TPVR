@@ -51,6 +51,8 @@ struct AudioWaveKey {
     AudioWaveBank bank;
     u32 wave_id;
 
+    AudioWaveKey(AudioWaveBank bank, u32 wave_id) : bank(bank), wave_id(wave_id) {};
+
     template <typename H>
     friend H AbslHashValue(H h, const AudioWaveKey& k) {
         return H::combine(std::move(h), k.bank, k.wave_id);
@@ -62,6 +64,7 @@ struct AudioWaveKey {
 };
 
 struct AudioWaveReplacementValue : JASWaveHandle {
+    AudioWaveReplacementValue(const JASWaveInfo& wave_info, std::shared_ptr<SampleDataBuf> data) : wave_info(wave_info), data(std::move(data)) {};
     ~AudioWaveReplacementValue() override;
     [[nodiscard]] const JASWaveInfo* getWaveInfo() const override;
     [[nodiscard]] intptr_t getWavePtr() const override;
@@ -72,7 +75,8 @@ struct AudioWaveReplacementValue : JASWaveHandle {
     std::shared_ptr<SampleDataBuf> data;
 };
 
-extern absl::flat_hash_map<AudioWaveKey, std::unique_ptr<AudioWaveReplacementValue>> s_replacements;
+extern absl::flat_hash_map<AudioWaveKey, AudioWaveReplacementValue> s_replacements;
+extern std::mutex s_replacements_mutex;
 
 struct RuntimeWaveReplacementSlot {
     std::string bundle_path;

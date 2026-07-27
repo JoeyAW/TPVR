@@ -6,6 +6,7 @@
 #include "../registry.hpp"
 #include "../slot_map.hpp"
 #include "aurora/lib/logging.hpp"
+#include "dusk/audio/DuskAudioSystem.h"
 #include "dusk/mods/loader/loader.hpp"
 
 namespace dusk::mods::svc {
@@ -14,6 +15,8 @@ namespace audio_res {
 namespace {
 
 using namespace dusk::helpers::cast;
+
+bool audio_replacements_dirty = false;
 
 aurora::Module Log("dusk::mods::svc::audio_res");
 
@@ -163,14 +166,7 @@ ModResult insert_replace_wave(
         slot.loop_end_sample = slot.sample_count;
     }
 
-    // TODO: Handle conflicts
-
-    audio_res::AudioWaveReplacementValue value;
-    value.data = slot.data;
-    value.wave_info = wave_info_from_slot(slot);
-    audio_res::s_replacements.emplace(
-        audio_res::AudioWaveKey{.bank = bank, .wave_id = wave_id},
-        std::make_unique<AudioWaveReplacementValue>(std::move(value)));
+    audio_replacements_dirty = true;
 
     const auto handle = s_waveReplacements.emplace(*mod, std::move(slot));
     if (out_handle) {
@@ -180,13 +176,64 @@ ModResult insert_replace_wave(
     return MOD_OK;
 }
 
+bool wave_remove(LoadedMod const& mod, AudioWaveHandle const handle) {
+    auto const result = s_waveReplacements.erase_owned(handle, mod);
+    audio_replacements_dirty |= result;
+    return result;
+}
+
+ModResult remove_wave(ModContext* ctx, AudioWaveHandle handle) {
+    auto* mod = mod_from_context(ctx);
+    if (mod == nullptr || handle == 0) {
+        return MOD_INVALID_ARGUMENT;
+    }
+    if (!wave_remove(*mod, handle)) {
+        Log.error("[{}] remove wave failed: unknown handle {}", mod->metadata.id, handle);
+        return MOD_INVALID_ARGUMENT;
+    }
+    return MOD_OK;
+}
+
 constexpr AudioResService s_audioResService{
     .header = SERVICE_HEADER(AudioResService, AUDIO_RES_SERVICE_MAJOR, AUDIO_RES_SERVICE_MINOR),
-    .replace_wave = &audio_res::insert_replace_wave};
+    .replace_wave = &insert_replace_wave,
+    .remove_wave = &remove_wave,
+};
+
+void sync_audio_replacements() {
+    audio_replacements_dirty = false;
+
+    absl::flat_hash_map<AudioWaveKey, AudioWaveReplacementValue> new_map;
+
+    for (auto const& mod : ModLoader::instance().active_mods()) {
+        for (auto const& slot : s_waveReplacements.take_all(mod)) {
+            auto const wave_info = wave_info_from_slot(slot.value);
+            new_map.emplace(
+                AudioWaveKey(slot.value.bank, slot.value.wave_id),
+                AudioWaveReplacementValue(wave_info, slot.value.data));
+        }
+    }
+
+    // Log.info("new: {}, old: {}", new_map.size(), s_replacements.size());
+
+    std::lock_guard lock(s_replacements_mutex);
+    // Note: new_map will contain the old contents, and is dropped *outside* the lock.
+    // As to avoid holding the lock any longer than necessary.
+    std::exchange(s_replacements, std::move(new_map));
+
+    // Log.info("new: {}, old: {}", new_map.size(), s_replacements.size());
+}
+
+void replacements_remove_mod(LoadedMod& mod) {
+    s_waveReplacements.erase_all(mod);
+
+    audio_replacements_dirty = true;
+}
 
 }
 
-absl::flat_hash_map<AudioWaveKey, std::unique_ptr<AudioWaveReplacementValue>> s_replacements;
+absl::flat_hash_map<AudioWaveKey, AudioWaveReplacementValue> s_replacements;
+std::mutex s_replacements_mutex;
 
 AudioWaveReplacementValue::~AudioWaveReplacementValue() = default;
 const JASWaveInfo* AudioWaveReplacementValue::getWaveInfo() const {
@@ -218,14 +265,14 @@ constinit const ServiceModule g_audioResModule{
     .majorVersion = AUDIO_RES_SERVICE_MAJOR,
     .minorVersion = AUDIO_RES_SERVICE_MINOR,
     .service = &audio_res::s_audioResService,
-    // .modDetached = overlay_remove_mod,
-    // .lifecycleApplied = overlay_sync_files,
-    // .frameEnd =
-    //     [] {
-    //         if (consume_overlays_dirty()) {
-    //             overlay_sync_files();
-    //         }
-    // },
+    .modDetached = audio_res::replacements_remove_mod,
+    .lifecycleApplied = audio_res::sync_audio_replacements,
+    .frameEnd =
+        [] {
+            if (audio_res::audio_replacements_dirty) {
+                audio_res::sync_audio_replacements();
+            }
+        }
+    };
 };
 
-}

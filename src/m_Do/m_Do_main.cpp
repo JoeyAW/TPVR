@@ -7,6 +7,7 @@
 #include "m_Do/m_Do_main.h"
 #include <dolphin/vi.h>
 #include <cstring>
+#include <windows.h>  // OutputDebugStringA (TEMP DIAGNOSTIC below)
 #include "DynamicLink.h"
 #include "JSystem/JAudio2/JASAudioThread.h"
 #include "JSystem/JAudio2/JAUSectionHeap.h"
@@ -297,6 +298,27 @@ void main01(void) {
         dusk::ui::update();
 
         const auto pacing = dusk::game_clock::advance_main_loop();
+        // TEMP DIAGNOSTIC (VR black-screen-after-save investigation): log
+        // only on a state CHANGE, not every frame -- dusk::vr::tick() is
+        // only reachable from the pacing.is_interpolating branch below, so
+        // if this ever flips to false while VR is active, tick() (and the
+        // whole XR frame loop) simply stops running, which would show up in
+        // the headset as exactly the reported black screen. Confirms or
+        // rules this out without guessing.
+        {
+            static bool loggedInitial = false;
+            static bool lastInterpolating = true;
+            if (!loggedInitial || pacing.is_interpolating != lastInterpolating) {
+                loggedInitial = true;
+                lastInterpolating = pacing.is_interpolating;
+                char msg[160];
+                _snprintf_s(msg, _TRUNCATE,
+                            "[dusk::main] pacing.is_interpolating -> %d (vr::isActive=%d)\n",
+                            pacing.is_interpolating ? 1 : 0,
+                            dusk::vr::isActive() ? 1 : 0);
+                OutputDebugStringA(msg);
+            }
+        }
         if (pacing.is_interpolating) {
             if (pacing.sim_ticks_to_run > 0) {
                 dusk::frame_interp::begin_frame(dusk::getSettings().game.enableFrameInterpolation, true, 0.0f);
@@ -331,10 +353,30 @@ void main01(void) {
             if (dusk::vr::isActive()) {
                 // vr::tick() calls fpcM_DrawIterater/cAPIGph_Painter itself,
                 // once per eye, plus the XR frame submit -- do not also call
-                // them here when it actually rendered.
-                dusk::vr::tick();
+                // them here when it actually rendered. Pass the pacing
+                // already computed above -- tick() used to call
+                // advance_main_loop() again itself, which corrupted the
+                // shared clock state (see vr_main.hpp's tick() comment).
+                dusk::vr::tick(pacing);
             }
             if (!dusk::vr::isActive() || !dusk::vr::isRenderingToHeadset()) {
+                fpcM_DrawIterater((fpcM_DrawIteraterFunc)fpcM_Draw);
+                cAPIGph_Painter();
+            }
+            // TEMP DEBUG MIRROR (VR camera-position/culling investigation):
+            // when tick() actually rendered stereo eyes, this window's own
+            // on-screen pass is otherwise never drawn into this frame (see
+            // the branch above), which is why the desktop goes black while
+            // VR is active. view->viewMtx/projMtx are still exactly what the
+            // LAST eye tick() processed set them to (beginEye() for that eye
+            // is the last thing to touch them), and endEye() already
+            // restored the on-screen EFB pass as current -- so drawing again
+            // right here, with no VR-specific setup, reuses that eye's
+            // camera and lands the same picture the headset just saw onto
+            // the desktop window, screenshot-able normally. Doubles this
+            // frame's draw cost (debug-only) -- remove this block once no
+            // longer needed for headset-visibility comparisons.
+            else {
                 fpcM_DrawIterater((fpcM_DrawIteraterFunc)fpcM_Draw);
                 cAPIGph_Painter();
             }

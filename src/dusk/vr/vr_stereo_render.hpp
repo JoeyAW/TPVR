@@ -204,9 +204,32 @@ inline void eyeFovToProjMtx(Mtx44 dest, const XrFovf& fov, float nearZ, float fa
     // values into the positions GXSetProjection actually reads.
     dest[0][2] = (tr + tl) * rw;  // horizontal center offset
     dest[1][2] = (tu + td) * rh;  // vertical center offset
-    dest[2][2] = farZ / (farZ - nearZ);
-    dest[2][3] = 1.f;               // w-from-z (left-handed, +z forward)
-    dest[3][2] = -(farZ * nearZ) / (farZ - nearZ);
+    // ROOT-CAUSED this session ("pillars/geometry render through terrain
+    // that should occlude them" -- screenshot showed a near grassy cliff
+    // failing to hide bridge pillars that are geometrically behind it):
+    // these three cells used to be dest[2][2]=farZ/(farZ-nearZ) (wrong sign
+    // AND wrong term), dest[2][3]=1.f (a bare constant with NO dependence
+    // on near/far at all), and dest[3][2]=-(farZ*nearZ)/(farZ-nearZ) (a
+    // cell GXSetProjection never even reads -- row 3 is hardware-fixed to
+    // [0,0,-1,0], confirmed by the real SDK below). None of that was
+    // derived from anything -- compare against extern/aurora/lib/dolphin/mtx/
+    // mtx44.c's real C_MTXPerspective(), the exact function every other
+    // camera in the game (frame_interpolation.cpp included) calls for this:
+    //   tmp = 1 / (f - n);
+    //   m[2][2] = (-n * tmp);
+    //   m[2][3] = (tmp * -(f * n));
+    //   m[3][2] = -1;
+    // Depth terms don't depend on the frustum being symmetric or not (only
+    // the X/Y off-center terms above do), so this is just that formula
+    // directly. The previous values produced a depth mapping unrelated to
+    // the real near/far range -- non-monotonic/degenerate enough to explain
+    // both near geometry failing to occlude far geometry (this bug) and
+    // plausibly some of the earlier culling symptoms, since GX's hardware
+    // near/far clip also relies on this same clip.z being sane.
+    const float depthTmp = 1.f / (farZ - nearZ);
+    dest[2][2] = -nearZ * depthTmp;
+    dest[2][3] = depthTmp * -(farZ * nearZ);
+    dest[3][2] = -1.f;
 }
 
 // ---------------------------------------------------------------------------

@@ -137,11 +137,28 @@ inline XrGraphicsDevice createXrGraphicsDevice(const Bootstrap& boot) {
     return gfx;
 }
 
-// Creates the XrSession bound to the XR-side D3D12 device above, and the
-// LOCAL reference space used for tracking. dusk::vr::Session
+// Creates the XrSession bound to the XR-side D3D12 device above, plus the
+// LOCAL reference space used for tracking and a VIEW reference space used
+// as the head-center reference for per-eye stereo offsets (see
+// vr_stereo_render.hpp's eyePoseToViewMtx). dusk::vr::Session
 // (vr_xr_submit.hpp) is constructed from the outputs of this call.
+//
+// ROOT-CAUSED this session (torn/wrong-distance geometry after the
+// camera-anchor fix): outViewSpace used to not exist at all -- vr_main.cpp's
+// g_viewSpace was a bare global that NOTHING ever assigned, so it stayed
+// XR_NULL_HANDLE for the whole session and locateSpace() silently fell back
+// to an identity pose {0,0,0} every single frame (see the pre-existing TODO
+// comment above its declaration: "Until fixed, hands/head render at
+// tracking-space origin"). Once the camera's position started being
+// computed as a delta from that fake always-zero "head reference" instead
+// of used as an absolute position directly, the per-eye offset became the
+// eye's full raw LOCAL-space position (not a true small head-relative
+// stereo/IPD offset) -- accumulating however far the player's real head had
+// drifted from the tracking origin, independently per moment, producing the
+// reported shearing/wrong-distance artifacts. Actually creating and using a
+// real, continuously-tracked VIEW space here fixes that at the source.
 inline XrSession createXrSession(const Bootstrap& boot, const XrGraphicsDevice& gfx,
-                                  XrSpace* outLocalSpace) {
+                                  XrSpace* outLocalSpace, XrSpace* outViewSpace) {
     XrGraphicsBindingD3D12KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D12_KHR};
     binding.device = gfx.device.Get();
     binding.queue = gfx.commandQueue.Get();
@@ -158,6 +175,12 @@ inline XrSession createXrSession(const Bootstrap& boot, const XrGraphicsDevice& 
     spaceInfo.poseInReferenceSpace = XrPosef{{0, 0, 0, 1}, {0, 0, 0}};
     checkResult(xrCreateReferenceSpace(session, &spaceInfo, outLocalSpace),
                 "xrCreateReferenceSpace(LOCAL)");
+
+    XrReferenceSpaceCreateInfo viewSpaceInfo{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+    viewSpaceInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+    viewSpaceInfo.poseInReferenceSpace = XrPosef{{0, 0, 0, 1}, {0, 0, 0}};
+    checkResult(xrCreateReferenceSpace(session, &viewSpaceInfo, outViewSpace),
+                "xrCreateReferenceSpace(VIEW)");
 
     return session;
 }

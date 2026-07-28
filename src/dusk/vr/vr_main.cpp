@@ -15,6 +15,7 @@
 #include <openxr/openxr.h>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <vector>
 
@@ -40,6 +41,32 @@ vr_combat::SwingDetector g_rightSwing;
 // xrPollEvent without needing Session to expose its private instance_.
 // Set once in startup() alongside g_ownedSession.
 XrInstance g_xrInstance = XR_NULL_HANDLE;
+
+// ROOT-CAUSED this session ("VR stops updating after creating a save file"):
+// true once xrBeginSession() has actually succeeded and false once the
+// runtime has told us to stop (XR_SESSION_STATE_STOPPING) -- distinct from
+// g_session being null, which now only happens on genuine teardown
+// (EXITING/LOSS_PENDING). Lets tick() keep polling events and resume
+// rendering when READY comes back around, instead of the old behaviour of
+// nulling g_session on STOPPING and never touching the session again.
+bool g_sessionRunning = false;
+
+// TEMP DIAGNOSTIC (VR black-screen-after-save investigation continued --
+// pacing.is_interpolating stayed true throughout, ruling that theory out).
+// Logs the reason tick() took each frame ONLY when it changes from the
+// previous frame, so a single test run pinpoints exactly which exit path
+// starts firing persistently once the headset goes black after a save,
+// without spamming every frame in the common/expected case.
+const char* g_lastTickReason = "";
+void logTickReasonOnChange(const char* reason) {
+    if (std::strcmp(g_lastTickReason, reason) == 0) {
+        return;
+    }
+    g_lastTickReason = reason;
+    char msg[128];
+    _snprintf_s(msg, _TRUNCATE, "[dusk::vr::tick] reason -> %s\n", reason);
+    OutputDebugStringA(msg);
+}
 
 // NEW this session: backs isRenderingToHeadset(). tick() has several early-
 // return paths (no session, session just went STOPPING/EXITING, xrWaitFrame/
@@ -81,10 +108,12 @@ struct PendingFrameSubmit {
 };
 PendingFrameSubmit g_pendingSubmit;
 
-// TODO: these XrSpace handles need real xrCreateActionSpace (grip poses,
-// needs action set setup -- NOT YET WRITTEN ANYWHERE) and
-// xrCreateReferenceSpace(VIEW) calls. Until fixed, hands/head render at
-// tracking-space origin.
+// TODO: the grip spaces still need real xrCreateActionSpace calls (needs
+// action set setup -- NOT YET WRITTEN ANYWHERE). Until fixed, hands render
+// at tracking-space origin (rightPose/leftPose in tick() below). g_viewSpace
+// no longer has this problem -- startup() now assigns it a real
+// xrCreateReferenceSpace(VIEW) handle (see vr_xr_bootstrap.hpp), so hmdPose
+// in tick() reflects genuine head tracking.
 XrSpace g_rightGripSpace = XR_NULL_HANDLE;
 XrSpace g_leftGripSpace = XR_NULL_HANDLE;
 XrSpace g_viewSpace = XR_NULL_HANDLE;
@@ -156,6 +185,7 @@ bool waitForSessionReadyAndBegin(XrInstance instance, XrSession session) {
 
 void initSession(Session* session) {
     g_session = session;
+    g_sessionRunning = true;
     // TODO: call once, after an aurora::gfx device exists:
     // g_handDrawState.typeId = aurora::gfx::register_draw_type(vr_render::handDrawDescriptor());
 }
@@ -184,7 +214,13 @@ bool startup() {
         vr_xr::XrGraphicsDevice gfx = vr_xr::createXrGraphicsDevice(boot);
 
         XrSpace localSpace = XR_NULL_HANDLE;
-        XrSession session = vr_xr::createXrSession(boot, gfx, &localSpace);
+        XrSpace viewSpace = XR_NULL_HANDLE;
+        XrSession session = vr_xr::createXrSession(boot, gfx, &localSpace, &viewSpace);
+        // FIXED this session: g_viewSpace used to stay XR_NULL_HANDLE for the
+        // whole session (nothing ever assigned it) -- see createXrSession's
+        // updated comment. Real head tracking now flows into hmdPose in
+        // tick() below.
+        g_viewSpace = viewSpace;
 
         g_ownedSession = std::make_unique<Session>(boot.instance, boot.systemId, session, localSpace, gfx.device, gfx.commandQueue);
         // Registers the encoder task type backing encodeEyeCopy()'s Dawn-side
@@ -300,7 +336,7 @@ static XrPosef locateSpace(XrSpace space, XrSpace base, XrTime time) {
     return loc.pose;
 }
 
-void tick() {
+void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     // Reset up front: every early-return below (no session, session just
     // stopped, XR wait/begin failure, shouldRender==false, no ready
     // gameplay view) means no stereo draw happened this frame. Only the
@@ -308,17 +344,18 @@ void tick() {
     g_renderedToHeadsetThisFrame = false;
 
     if (!g_session) {
+        logTickReasonOnChange("no-session");
         return;
     }
 
-    // NEW this session: pump XR events every frame, not just once at
-    // startup. A session can transition state mid-session (headset taken
-    // off -> STOPPING; runtime shutting down -> EXITING / LOSS_PENDING) and
-    // nothing was polling for that before now either. On STOPPING we must
-    // call xrEndSession() per spec before dropping the session; on
-    // EXITING/LOSS_PENDING the runtime is already tearing down, so we just
-    // stop touching it. Either way we clear g_session so isActive() goes
-    // false and the caller falls back to the flatscreen path next frame.
+    // Pump XR events every frame, not just once at startup. A session can
+    // transition state mid-session (headset taken off / system overlay
+    // taking focus -> STOPPING, resumable; runtime shutting down -> EXITING
+    // / LOSS_PENDING, not resumable). STOPPING calls xrEndSession() per spec
+    // and marks the session not-running but keeps it alive so a later READY
+    // can resume it (see the STOPPING/READY cases below); only genuine
+    // teardown (EXITING/LOSS_PENDING) clears g_session so isActive() goes
+    // false and the caller falls back permanently to the flatscreen path.
     for (;;) {
         XrEventDataBuffer event{XR_TYPE_EVENT_DATA_BUFFER};
         if (xrPollEvent(g_xrInstance, &event) != XR_SUCCESS) {
@@ -328,22 +365,52 @@ void tick() {
             const auto& stateEvent =
                 *reinterpret_cast<const XrEventDataSessionStateChanged*>(&event);
             if (stateEvent.state == XR_SESSION_STATE_STOPPING) {
+                // FIXED this session: STOPPING is not permanent per the
+                // OpenXR spec -- it just means "stop submitting frames and
+                // call xrEndSession() for now", e.g. a system
+                // overlay/dashboard taking focus (plausibly triggered by the
+                // save-file UI's hitch). Used to null g_session here, which
+                // made the `if (!g_session) return;` above stop this whole
+                // loop from ever running again -- so a later READY was never
+                // even seen and VR died silently while the flatscreen path
+                // kept going untouched. Now we just mark it stopped and keep
+                // the session/swapchain alive so READY (below) can resume it.
                 xrEndSession(g_session->session());
+                g_sessionRunning = false;
+            } else if (stateEvent.state == XR_SESSION_STATE_READY) {
+                // Mirror of waitForSessionReadyAndBegin()'s startup case --
+                // the runtime wants us to (re)begin rendering.
+                if (!g_sessionRunning) {
+                    XrSessionBeginInfo resumeInfo{XR_TYPE_SESSION_BEGIN_INFO};
+                    resumeInfo.primaryViewConfigurationType =
+                        XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+                    g_sessionRunning =
+                        XR_SUCCEEDED(xrBeginSession(g_session->session(), &resumeInfo));
+                }
+            } else if (stateEvent.state == XR_SESSION_STATE_EXITING ||
+                       stateEvent.state == XR_SESSION_STATE_LOSS_PENDING) {
+                // Genuine teardown -- the runtime is not coming back for
+                // this session.
                 g_session = nullptr;
-                return;
-            }
-            if (stateEvent.state == XR_SESSION_STATE_EXITING ||
-                stateEvent.state == XR_SESSION_STATE_LOSS_PENDING) {
-                g_session = nullptr;
+                g_sessionRunning = false;
                 return;
             }
         }
+    }
+
+    if (!g_session || !g_sessionRunning) {
+        // Session exists but is currently stopped (between STOPPING and the
+        // next READY) -- nothing to render this frame, but keep coming back
+        // so the event pump above keeps running and can see READY.
+        logTickReasonOnChange("session-not-running");
+        return;
     }
 
     // --- wait for the runtime to tell us the predicted display time for this frame ---
     XrFrameWaitInfo waitInfo{XR_TYPE_FRAME_WAIT_INFO};
     XrFrameState frameState{XR_TYPE_FRAME_STATE};
     if (XR_FAILED(xrWaitFrame(g_session->session(), &waitInfo, &frameState))) {
+        logTickReasonOnChange("xrWaitFrame-failed");
         OutputDebugStringA("[dusk::vr::tick] FAILED: xrWaitFrame\n");
         return;
     }
@@ -351,6 +418,7 @@ void tick() {
 
     XrFrameBeginInfo beginInfo{XR_TYPE_FRAME_BEGIN_INFO};
     if (XR_FAILED(xrBeginFrame(g_session->session(), &beginInfo))) {
+        logTickReasonOnChange("xrBeginFrame-failed");
         OutputDebugStringA("[dusk::vr::tick] FAILED: xrBeginFrame\n");
         return;
     }
@@ -358,6 +426,7 @@ void tick() {
     // shouldRender: runtime may ask us to skip rendering (e.g. headset not worn)
     // but we must still call xrEndFrame with layerCount=0 to keep the frame loop alive.
     if (!frameState.shouldRender) {
+        logTickReasonOnChange("shouldRender-false");
         XrFrameEndInfo endInfo{XR_TYPE_FRAME_END_INFO};
         endInfo.displayTime = frameState.predictedDisplayTime;
         endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
@@ -375,6 +444,7 @@ void tick() {
     // empty-frame pattern as the shouldRender==false case above -- keep
     // the XR frame loop alive, just don't render anything yet.
     if (!vr_render::isViewReady()) {
+        logTickReasonOnChange("view-not-ready");
         // TEMP DIAGNOSTIC (v8, remove once confirmed working): log once so
         // we can confirm this is really what's happening rather than
         // inferring it from the crash site alone.
@@ -394,9 +464,8 @@ void tick() {
 
     // Past this point isViewReady() already returned true (see the check
     // above), so this frame really is drawing stereo eyes into the headset.
+    logTickReasonOnChange("rendering-normally");
     g_renderedToHeadsetThisFrame = true;
-
-    dusk::game_clock::MainLoopPacer pacing = dusk::game_clock::advance_main_loop();
 
     const XrTime time = g_session->predictedDisplayTime();
     const XrSpace base = g_session->localSpace();

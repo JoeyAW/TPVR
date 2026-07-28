@@ -73,35 +73,91 @@ namespace vr_render {
 // We convert here rather than in the XR bootstrap to keep the math next to
 // where it's used.
 
-// Build a Nintendo-style Mtx (3 rows × 4 cols, row-major) view matrix from
-// an XrPosef (the eye pose in LOCAL_SPACE). This is the inverse of the eye's
-// world transform, identical in math to the existing mDoMtx_lookAt path but
-// taken directly from the HMD pose instead of the follow-camera target point.
+// Game units per metre of physical HMD/controller movement. Must match
+// vr_link_visibility.hpp's vr_link::VR_SCALE_FACTOR (TP's Link is ~170 game
+// units tall / ~1.7 m real) -- kept as a separate constant here rather than
+// including that actor-visibility header (heavier dependency, unrelated
+// concern) into this rendering-only header.
+inline constexpr float kEyePosScale = 100.0f;
+
+// ROOT-CAUSED this session (cutscene out-of-bounds / "no skybox, only edges
+// render" culling investigation): this used to build the view matrix
+// directly from `pose` -- the raw OpenXR LOCAL-space pose -- treating its
+// `position` as an ABSOLUTE game-world position. LOCAL space's origin is an
+// arbitrary point (wherever the headset was when the XR session started,
+// see vr_xr_bootstrap.hpp's poseInReferenceSpace = identity), in metres,
+// with zero relationship to where Link/the game camera actually is. During
+// normal gameplay this could coincidentally look plausible if a level's
+// local coordinate origin happened to sit near the player; during a
+// cutscene with an author-placed camera potentially far from world origin,
+// the eye was rendering from close to empty space -- exactly matching the
+// reported "no skybox, scene only visible at the edges" symptom (mDoLib_clipper
+// culling everything near that near-origin point correctly; the actual
+// bug was the camera's fed-in position, not the culling math).
+//
+// Fixed the same way vr_link_visibility.hpp's buildHandMtx() already
+// anchors controllers to game-world space: take the DELTA of this eye's
+// pose from the head-center pose (hmdRefPos -- both in the same XR tracking
+// space, so the arbitrary origin cancels out), scale metres -> game units,
+// flip Z (OpenXR Z-back -> TP game Z-forward, same comment as buildHandMtx),
+// and add that onto `linkEyeGame` (view->lookat.eye -- the game's own
+// current camera eye position for this frame, correct whether that's normal
+// follow-cam or an authored cutscene camera). Orientation still comes
+// directly from the eye's absolute pose (Z-flipped to match), so full head
+// look-around still works -- only position is anchored/scaled instead of
+// used as a raw absolute coordinate.
 // Result goes into view->viewMtx.
-inline void eyePoseToViewMtx(Mtx dest, const XrPosef& pose) {
+inline void eyePoseToViewMtx(
+    Mtx               dest,
+    const XrPosef&    pose,
+    const XrVector3f& hmdRefPos,
+    const cXyz&       linkEyeGame,
+    float             scale = kEyePosScale)
+{
     const auto& q = pose.orientation;
     const auto& p = pose.position;
 
+    // Offset of this eye from the head-center reference pose, in metres.
+    const float dx = p.x - hmdRefPos.x;
+    const float dy = p.y - hmdRefPos.y;
+    const float dz = p.z - hmdRefPos.z;
+
+    // Scale to game units and flip Z, then anchor to Link's actual game-world
+    // eye position for this frame (matches buildHandMtx's convention).
+    const float wx_ = linkEyeGame.x + dx * scale;
+    const float wy_ = linkEyeGame.y + dy * scale;
+    const float wz_ = linkEyeGame.z - dz * scale;
+
+    // Orientation: use the eye's raw quaternion UNFLIPPED. Confirmed this
+    // session -- flipping qz here (mirroring buildHandMtx's convention,
+    // which is right for hand POSITION/mesh-space, not this) inverted pitch
+    // and roll (looking down looked up, tilting left looked right). The
+    // pre-existing (pre-anchor-fix) code already used the raw quaternion
+    // directly and head look-around was already confirmed correct back
+    // then -- only the POSITION needed the anchor+flip treatment above, the
+    // rotation matrix build below was never broken.
+    const float qx = q.x, qy = q.y, qz = q.z, qw = q.w;
+
     // Quaternion → rotation (row-major 3x3)
-    const float xx = q.x*q.x, yy = q.y*q.y, zz = q.z*q.z;
-    const float xy = q.x*q.y, xz = q.x*q.z, yz = q.y*q.z;
-    const float wx = q.w*q.x, wy = q.w*q.y, wz = q.w*q.z;
+    const float xx = qx*qx, yy = qy*qy, zz = qz*qz;
+    const float xy = qx*qy, xz = qx*qz, yz = qy*qz;
+    const float wxq = qw*qx, wyq = qw*qy, wzq = qw*qz;
 
     // Rows are the camera's local X, Y, Z axes in world space.
     // View matrix = transpose(R) | -transpose(R)*t
-    const float r00 = 1.f - 2.f*(yy+zz), r01 = 2.f*(xy+wz), r02 = 2.f*(xz-wy);
-    const float r10 = 2.f*(xy-wz),        r11 = 1.f - 2.f*(xx+zz), r12 = 2.f*(yz+wx);
-    const float r20 = 2.f*(xz+wy),        r21 = 2.f*(yz-wx),       r22 = 1.f - 2.f*(xx+yy);
+    const float r00 = 1.f - 2.f*(yy+zz), r01 = 2.f*(xy+wzq), r02 = 2.f*(xz-wyq);
+    const float r10 = 2.f*(xy-wzq),        r11 = 1.f - 2.f*(xx+zz), r12 = 2.f*(yz+wxq);
+    const float r20 = 2.f*(xz+wyq),        r21 = 2.f*(yz-wxq),       r22 = 1.f - 2.f*(xx+yy);
 
     // dest is Mtx = float[3][4]
     dest[0][0] = r00; dest[0][1] = r01; dest[0][2] = r02;
-    dest[0][3] = -(p.x*r00 + p.y*r01 + p.z*r02);
+    dest[0][3] = -(wx_*r00 + wy_*r01 + wz_*r02);
 
     dest[1][0] = r10; dest[1][1] = r11; dest[1][2] = r12;
-    dest[1][3] = -(p.x*r10 + p.y*r11 + p.z*r12);
+    dest[1][3] = -(wx_*r10 + wy_*r11 + wz_*r12);
 
     dest[2][0] = r20; dest[2][1] = r21; dest[2][2] = r22;
-    dest[2][3] = -(p.x*r20 + p.y*r21 + p.z*r22);
+    dest[2][3] = -(wx_*r20 + wy_*r21 + wz_*r22);
 }
 
 // Build a Nintendo-style Mtx44 (4x4, row-major) asymmetric perspective
@@ -162,6 +218,11 @@ struct EyeParams {
     XrFovf    fov;          // from XrView.fov
     uint32_t  width;        // from XrViewConfigurationView.recommendedImageRectWidth
     uint32_t  height;
+    // Head-center pose (from g_viewSpace, same XR tracking space as pose)
+    // for this frame -- see eyePoseToViewMtx's comment on why the camera is
+    // anchored to Link's game position via this delta rather than using
+    // `pose` as an absolute world position.
+    XrVector3f hmdRefPos;
 };
 
 // ---------------------------------------------------------------------------
@@ -226,8 +287,10 @@ inline aurora::gfx::ResolvedTargets beginEye(const EyeParams& eye) {
     view_class* view = dComIfGd_getView();
     assert(view != nullptr && "VR: no active view_class — called outside gameplay?");
 
-    // Build and apply the view matrix directly from the HMD eye pose.
-    eyePoseToViewMtx(view->viewMtx, eye.pose);
+    // Build and apply the view matrix, anchored to Link's actual game-world
+    // eye position (view->lookat.eye) rather than treating the raw XR pose
+    // as an absolute world position -- see eyePoseToViewMtx's comment.
+    eyePoseToViewMtx(view->viewMtx, eye.pose, eye.hmdRefPos, view->lookat.eye);
     j3dSys.setViewMtx(view->viewMtx);
 
     // Inverse view for anything that needs world-from-view (shadow maps, etc.)

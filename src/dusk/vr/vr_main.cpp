@@ -495,6 +495,7 @@ void tick() {
             views[eye].fov,
             configViews[eye].recommendedImageRectWidth,
             configViews[eye].recommendedImageRectHeight,
+            hmdPose.position,
         };
 
         // Safe to call unconditionally here: the isViewReady() check earlier

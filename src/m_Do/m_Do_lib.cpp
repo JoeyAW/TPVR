@@ -52,7 +52,22 @@ void mDoLib_clipper::setup(f32 fovy, f32 aspect, f32 near_, f32 far_) {
     mSystemFar = far_;
     mClipper.calcViewFrustum();
 
-    s16 tmp = DEG2S(fovy);
+    // FIXED (VR investigation): mFovyRate = cos(fovy)/sin(fovy) is only
+    // ever consumed by d_drawlist.cpp's shadow-poly cull-distance scaling
+    // (mDoLib_clipper::changeFar(getFovyRate() * 10000.0f)), which assumed
+    // a moderate, comfortably-sub-90-degree camera fovy -- true for the
+    // normal flatscreen camera (~60 degrees), but not for VR eyes, which
+    // need fovy well past 90 degrees (measured up to ~141 here). Past 90,
+    // cos(fovy) goes negative, making mFovyRate negative -- which produced
+    // a large NEGATIVE far-clip override for that shadow cull check,
+    // culling almost everything beyond the near plane (no skybox, most of
+    // the scene only visible near the edges of the VR view). Clamp the
+    // angle used for JUST this ratio to stay under 90 degrees so it stays
+    // positive; the actual frustum shape above (calcViewFrustum(), via
+    // mClipper.setFovy/setAspect) is untouched and still uses the real,
+    // full fovy/aspect for correct wide-FOV culling.
+    const f32 clampedFovyForRate = fovy < 89.0f ? fovy : 89.0f;
+    s16 tmp = DEG2S(clampedFovyForRate);
 
     mFovyRate = cM_scos(tmp) / cM_ssin(tmp);
 }

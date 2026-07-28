@@ -56,6 +56,7 @@
 #include "dusk/dusk.h"
 #include "dusk/frame_interpolation.h"
 #include "dusk/game_clock.h"
+#include "dusk/vr/vr_main.hpp"
 #include "dusk/gyro.h"
 #include "dusk/mouse.h"
 #include "dusk/imgui/ImGuiConsole.hpp"
@@ -272,6 +273,22 @@ void main01(void) {
             continue;
         }
 
+        // Lazy one-time VR init: a successful aurora_begin_frame() guarantees
+        // the aurora::gfx device exists, which is the exact precondition
+        // dusk::vr::startup() needs (see its comment in vr_main.cpp). Not
+        // gated on any settings/CLI flag yet -- TODO once a VR-enable
+        // toggle is decided; for now this always attempts VR init and
+        // silently proceeds flatscreen-only on failure.
+        {
+            static bool triedVrStartup = false;
+            if (!triedVrStartup) {
+                triedVrStartup = true;
+                if (!dusk::vr::startup()) {
+                    DuskLog.info("VR startup failed or no headset found, continuing flatscreen");
+                }
+            }
+        }
+
         VIWaitForRetrace();
 
         dusk::lastFrameAuroraStats = *aurora_get_stats();
@@ -301,8 +318,26 @@ void main01(void) {
             dusk::frame_interp::interpolate();
             dusk::frame_interp::begin_presentation_camera();
             // run draw functions for anything specially marked to handle interp
-            fpcM_DrawIterater((fpcM_DrawIteraterFunc)fpcM_Draw);
-            cAPIGph_Painter();
+            //
+            // FIXED (v10): isActive() alone used to gate this, which blanked
+            // the flatscreen (menus, video, loading screens included) for the
+            // entire time VR is active, not just during real 3D gameplay --
+            // isActive() just means a session exists, not that tick() had a
+            // real gameplay view to draw this frame. tick() must still run
+            // every frame VR is active (it pumps the XR frame loop even with
+            // no view), but the normal flatscreen draw call needs to ALSO run
+            // whenever tick() didn't actually render stereo eyes -- see
+            // isRenderingToHeadset()'s comment in vr_main.hpp.
+            if (dusk::vr::isActive()) {
+                // vr::tick() calls fpcM_DrawIterater/cAPIGph_Painter itself,
+                // once per eye, plus the XR frame submit -- do not also call
+                // them here when it actually rendered.
+                dusk::vr::tick();
+            }
+            if (!dusk::vr::isActive() || !dusk::vr::isRenderingToHeadset()) {
+                fpcM_DrawIterater((fpcM_DrawIteraterFunc)fpcM_Draw);
+                cAPIGph_Painter();
+            }
             dusk::frame_interp::end_presentation_camera();
             dusk::frame_interp::set_ui_tick_pending(false);
         } else {
@@ -316,12 +351,33 @@ void main01(void) {
 
             // EXECUTE GAME LOGIC & RENDER
             // This calls mDoGph_Painter -> JFWDisplay -> GX Functions
+            // TODO(VR): when dusk::vr::isActive(), this path's internal
+            // render call still goes to the flatscreen swapchain -- unlike
+            // the interpolating branch above, this doesn't call
+            // fpcM_DrawIterater/cAPIGph_Painter explicitly, so there's no
+            // safe place here yet to swap in dusk::vr::tick() without
+            // reading what fapGm_Execute() does internally first. Left
+            // alone deliberately rather than guessed at.
             fapGm_Execute();
 
             mDoAud_Execute();
         }
 
         aurora_end_frame();
+
+        // FIX (this session): dusk::vr::submitFrame() was never called
+        // anywhere -- per its own contract in vr_main.hpp ("Call once per
+        // frame, right after the caller's own aurora_end_frame()"), this is
+        // what actually reads back each eye's copied pixels, uploads them
+        // into the XR swapchain image, releases the swapchain image, and
+        // calls xrEndFrame(). Without it, tick() acquires a swapchain image
+        // every frame that never gets released -- the runtime's swapchain
+        // image pool exhausts almost immediately, and xrAcquireSwapchainImage
+        // fails permanently from then on (confirmed this session via
+        // XrResult logging added to tick()/submitFrame() in vr_main.cpp).
+        // Safe to call unconditionally every frame -- see submitFrame()'s
+        // own comment: it's a no-op if tick() didn't render stereo eyes.
+        dusk::vr::submitFrame();
 
         FrameMark;
 

@@ -6,6 +6,7 @@
 #include <cstdio>
 
 #include "d/dolzel.h" // IWYU pragma: keep
+#include "dusk/vr/vr_main.hpp"
 
 #include <base/PPCArch.h>
 #include <cstring>
@@ -2265,7 +2266,20 @@ int mDoGph_Painter() {
             fapGm_HIO_c::startCpuTimer();
             #endif
 
-            GX_DEBUG_GROUP(dComIfGd_imageDrawShadow, camera_p->view.viewMtx);
+            // Stopgap: dComIfGd_imageDrawShadow() draws shadow maps via a
+            // mid-scene GXCreateFrameBuffer/GXCopyTex framebuffer swap
+            // (dDlst_shadowControl_c::imageDraw(), d_drawlist.cpp), which
+            // clobbers VR's offscreen eye pass every time it runs (see
+            // resolve_pass_checked() in common.cpp / VR_MOD_HANDOFF_11).
+            // Skip it while actually rendering stereo eyes to the headset
+            // so VR frames reach the headset; real fix is giving offscreen
+            // passes protected identity in common.cpp (tracked separately
+            // as option (b) -- not done here). Flatscreen rendering is
+            // unaffected: isRenderingToHeadset() is false outside of real
+            // per-eye VR draws.
+            if (!dusk::vr::isRenderingToHeadset()) {
+                GX_DEBUG_GROUP(dComIfGd_imageDrawShadow, camera_p->view.viewMtx);
+            }
 
             #if DEBUG
             // "drawing Shadow Texture (Rendering)"
@@ -2489,7 +2503,21 @@ int mDoGph_Painter() {
                 fapGm_HIO_c::startCpuTimer();
                 #endif
 
-                GX_DEBUG_GROUP(drawDepth2, &camera_p->view, view_port, dComIfGp_getCameraZoomForcus(camera_id));
+                // Stopgap: drawDepth2()'s drawDepth_blurTex() does an
+                // unconditional GXCreateFrameBuffer + 3x GXCopyTex blur-chain
+                // every frame (divNum=3 loop, m_Do_graphic.cpp) -- the DOF
+                // toggle guarding it is #if DEBUG only, so it always runs in
+                // this build. That framebuffer swap clobbers VR's offscreen
+                // eye pass every time (see resolve_pass_checked() in
+                // common.cpp / VR_MOD_HANDOFF_11) -- this, not shadows, was
+                // the actual per-eye source (confirmed via isRenderingToHeadset
+                // logging after the shadow skip alone didn't change anything).
+                // Skip while actually rendering stereo eyes; real fix is
+                // giving offscreen passes protected identity in common.cpp
+                // (option (b), not done here).
+                if (!dusk::vr::isRenderingToHeadset()) {
+                    GX_DEBUG_GROUP(drawDepth2, &camera_p->view, view_port, dComIfGp_getCameraZoomForcus(camera_id));
+                }
                 GXInvalidateTexAll();
                 GXSetClipMode(GX_CLIP_ENABLE);
 
@@ -2660,7 +2688,18 @@ int mDoGph_Painter() {
                 fapGm_HIO_c::startCpuTimer();
                 #endif
 
-                GX_DEBUG_GROUP(mDoGph_gInf_c::getBloom()->draw);
+                // Stopgap: bloom_c::draw() does an unconditional
+                // GXCreateFrameBuffer + downsample/upsample GXCopyTex chain
+                // (m_Do_graphic.cpp, mDoGph_gInf_c::bloom_c::draw()), which
+                // clobbers VR's offscreen eye pass the same way
+                // drawDepth_blurTex did (see resolve_pass_checked() in
+                // common.cpp / VR_MOD_HANDOFF_11). Skip while actually
+                // rendering stereo eyes; real fix is giving offscreen passes
+                // protected identity in common.cpp (option (b), not done
+                // here).
+                if (!dusk::vr::isRenderingToHeadset()) {
+                    GX_DEBUG_GROUP(mDoGph_gInf_c::getBloom()->draw);
+                }
                 j3dSys.setViewMtx(camera_p->view.viewMtx);
                 GXSetProjection(camera_p->view.projMtx, GX_PERSPECTIVE);
 

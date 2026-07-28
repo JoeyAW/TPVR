@@ -1,0 +1,27 @@
+[0/2] Re-checking globbed directories...
+[1/7] Building CXX object CMakeFiles\dusklight.dir\src\dusk\vr\vr_main.cpp.obj
+[2/7] Generating dusklight exports; Linking CXX executable dusklight.exe; Generating dusklight import library; Embedding symbol manifest; Copying resources
+ INFO 28956 exports (2429 data, 277 forwarded) from 1407 objects
+[3/7] Linking CXX shared module mods\ao_mod\ao_mod.dll
+[4/7] Linking CXX shared module mods\shadow_mod\shadow_mod.dll
+[5/7] Packaging shadow_mod -> C:/Users/joeyw/dusklight/build/windows-msvc-relwithdebinfo/mods/shadow_mod.dusk
+mod.json
+lib
+lib/windows-amd64
+lib/windows-amd64/mod.dll
+res
+res/shadow.wgsl
+[6/7] Packaging ao_mod -> C:/Users/joeyw/dusklight/build/windows-msvc-relwithdebinfo/mods/ao_mod.dusk
+mod.json
+lib
+lib/windows-amd64
+lib/windows-amd64/mod.dll
+res
+res/composite.wgsl
+res/denoise.wgsl
+res/gtao.wgsl
+res/licenses
+res/licenses/BEVY-APACHE-2.0.txt
+res/licenses/BEVY-MIT.txt
+res/licenses/XEGTAO-MIT.txt
+res/preprocess_depth.wgsl

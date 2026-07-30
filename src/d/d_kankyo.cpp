@@ -37,6 +37,8 @@
 #include "dusk/settings.h"
 #include "dusk/frame_interpolation.h"
 #include "dusk/game_clock.h"
+#include "dusk/vr/vr_main.hpp"
+#include <windows.h>
 static f32 timeScale = 1.0f;
 #endif
 
@@ -8282,7 +8284,29 @@ static int dKy_Create(void* i_this) {
     stage_envr_info_class* stage_envr_p = dComIfGp_getStageEnvrInfo();
     if (stage_envr_p != NULL && dComIfGp_getStartStageRoomNo() != -1) {
         stage_envr_p += dComIfGp_getStartStageRoomNo();
+        // ROOT-CAUSED this session ("black screen after loading a save",
+        // final piece): bloom_c::create() (m_Do_graphic.cpp) does an
+        // unconditional GXCreateFrameBuffer to allocate its render targets.
+        // Unlike bloom_c::draw()'s GXCreateFrameBuffer (already guarded at
+        // its own call site in m_Do_graphic.cpp), GXCreateFrameBuffer goes
+        // through gfx::begin_offscreen() directly (see GXAurora.cpp) --
+        // NOT create_pass() -- so it completely bypasses both
+        // create_pass()'s own nesting guard and resolve_pass_into()'s
+        // protected-pass check added earlier this session (that only
+        // covers the GXCopyTex/resolve_pass_into path, not this direct
+        // offscreen-open path). dKy_Create() runs once when the
+        // environment actor is created for a stage -- i.e. exactly when
+        // loading a save transitions into a (freshly loaded) stage --
+        // while VR's own offscreen eye pass can legitimately still be
+        // open, corrupting it the same way every other capture in this
+        // investigation did. Skip while actually rendering stereo eyes;
+        // bloom for this stage just won't be allocated until the next time
+        // this runs outside VR.
+#if TARGET_PC
+        if (stage_envr_p->pselect_id[64] != 0 && !dusk::vr::isRenderingToHeadset()) {
+#else
         if (stage_envr_p->pselect_id[64] != 0) {
+#endif
             mDoGph_gInf_c::getBloom()->create();
 
             #if DEBUG
@@ -11424,7 +11448,257 @@ void dKy_bg_MAxx_proc(void* bg_model_p) {
                 if (memcmp(&mat_name[3], "MA10", 4) == 0 || memcmp(&mat_name[3], "MA02", 4) == 0) {
                     dComIfGd_setListInvisisble();
 
-                    if (mat_p->getTexGenBlock()->getTexMtx(0) != NULL) {
+#if TARGET_PC
+                    // TEMP DIAGNOSTIC (VR water-black investigation, round 8
+                    // -- READ-ONLY, no GX/material state writes, safe): after
+                    // round 7's patch()-triggered crash, back off from
+                    // writing material state entirely and just read this
+                    // material's actual compiled TEV stage structure --
+                    // how many stages, and each stage's texCoord/texMap/
+                    // colorChan (J3DTevOrderInfo, safe plain-data reads, no
+                    // GX FIFO involvement at all). texMap == 0xff would mean
+                    // that stage samples no texture at all (output driven by
+                    // vertex/raster color or constant registers only);
+                    // colorChan tells us which vertex-color channel (if any)
+                    // feeds it.
+                    // WIDENED (round 11): was gated on a single "logged
+                    // once ever" bool, which only captures whichever MA02/
+                    // MA10 material this function happens to process FIRST
+                    // each session -- dKy_bg_MAxx_proc iterates every
+                    // water-tagged material in the currently loaded stage
+                    // every frame, not just the one on screen, so that
+                    // first sample has no guaranteed relationship to
+                    // whatever water the user is actually looking at. Now
+                    // keyed by material pointer identity so every distinct
+                    // water material encountered gets logged once (capped),
+                    // with the pointer value itself included so samples can
+                    // be told apart across multiple test runs.
+                    {
+                        static const void* loggedPtrsVR[32] = {};
+                        static int loggedCountVR = 0;
+                        static const void* loggedPtrsFlat[32] = {};
+                        static int loggedCountFlat = 0;
+                        bool inVR = dusk::vr::isRenderingToHeadset();
+                        const void** loggedPtrs = inVR ? loggedPtrsVR : loggedPtrsFlat;
+                        int& loggedCount = inVR ? loggedCountVR : loggedCountFlat;
+                        bool alreadyLogged = false;
+                        for (int k = 0; k < loggedCount; ++k) {
+                            if (loggedPtrs[k] == (const void*)mat_p) {
+                                alreadyLogged = true;
+                                break;
+                            }
+                        }
+                        if (!alreadyLogged && loggedCount < 32) {
+                            loggedPtrs[loggedCount++] = (const void*)mat_p;
+                            J3DTevBlock* tevBlock = mat_p->getTevBlock();
+                            u8 numStages = tevBlock ? tevBlock->getTevStageNum() : 0;
+                            char msg[160];
+                            _snprintf_s(msg, _TRUNCATE,
+                                        "[dusk::kankyowater] VR=%d mat=%p TEV stages=%d\n", inVR ? 1 : 0,
+                                        (void*)mat_p, numStages);
+                            OutputDebugStringA(msg);
+                            for (u32 i = 0; i < numStages && i < 16; ++i) {
+                                J3DTevOrder* order = tevBlock->getTevOrder(i);
+                                if (order != NULL) {
+                                    char msg2[160];
+                                    _snprintf_s(msg2, _TRUNCATE,
+                                                "[dusk::kankyowater] VR=%d mat=%p TEV stage %u: texCoord=%d "
+                                                "texMap=%d colorChan=%d\n",
+                                                inVR ? 1 : 0, (void*)mat_p, i, order->mTexCoord,
+                                                order->mTexMap, order->mColorChan);
+                                    OutputDebugStringA(msg2);
+                                }
+                            }
+
+                            // Round 9: the global GXSetChanCtrl/AmbColor/
+                            // MatColor trace (GXLighting.cpp) got drowned
+                            // out by boot-logo-screen noise before reaching
+                            // actual gameplay. Read THIS material's own
+                            // baked channel-0 config directly instead --
+                            // safe, read-only, no correlation guessing.
+                            // matSrc tells us whether COLOR0A0's channel
+                            // output comes from the constant MatColor
+                            // register (GX_SRC_REG=0, confirmed always
+                            // (255,255,255,255) in the noisy trace -- would
+                            // never go black) or this mesh's own raw
+                            // per-vertex color attribute (GX_SRC_VTX=1) --
+                            // if the latter, and lightingEnabled is off (as
+                            // every sample in the noisy trace showed), then
+                            // water's brightness depends ENTIRELY on the
+                            // mesh's baked vertex-color data with no live
+                            // computation at all, and the black would have
+                            // to come from a vertex-buffer read/bind issue,
+                            // not lighting or texture.
+                            J3DColorBlock* colorBlock = mat_p->getColorBlock();
+                            J3DColorChan* chan0 = colorBlock ? colorBlock->getColorChan(0) : NULL;
+                            if (chan0 != NULL) {
+                                J3DGXColor* matColor = colorBlock->getMatColor(0);
+                                J3DGXColor* ambColor = colorBlock->getAmbColor(0);
+                                char msg3[300];
+                                _snprintf_s(msg3, _TRUNCATE,
+                                            "[dusk::kankyowater] VR=%d mat=%p chan0: enable=%d matSrc=%d "
+                                            "ambSrc=%d lightMask=0x%x matColor=(%d,%d,%d,%d) "
+                                            "ambColor=(%d,%d,%d,%d)\n",
+                                            inVR ? 1 : 0, (void*)mat_p, chan0->getEnable(),
+                                            chan0->getMatSrc(),
+                                            chan0->getAmbSrc(), chan0->getLightMask(),
+                                            matColor ? matColor->r : -1, matColor ? matColor->g : -1,
+                                            matColor ? matColor->b : -1, matColor ? matColor->a : -1,
+                                            ambColor ? ambColor->r : -1, ambColor ? ambColor->g : -1,
+                                            ambColor ? ambColor->b : -1, ambColor ? ambColor->a : -1);
+                                OutputDebugStringA(msg3);
+                            }
+
+                            // Round 10: chan0 confirms enable=0/matSrc=REG/
+                            // matColor=white -- with lighting fully
+                            // disabled, this channel is an UNCONDITIONAL
+                            // white constant, so TEVout = texture0 * white
+                            // = texture0 exactly. Every non-texture theory
+                            // (reflection matrix, TEV/KColor regs, blend,
+                            // lighting/vertex-color) is now ruled out --
+                            // the final pixel color is determined
+                            // ENTIRELY by whatever texMap 0 samples. Log
+                            // which actual texture asset (index + baked
+                            // width/height/format from the compiled BMD)
+                            // is bound there, to check whether VR is
+                            // somehow resolving a DIFFERENT (or
+                            // degenerate/zero-sized) texture than
+                            // flatscreen -- vs. the same texture identity
+                            // in both, which would point at the aurora
+                            // upload/binding layer instead of game code.
+                            if (tevBlock != NULL) {
+                                u16 texNo = tevBlock->getTexNo(0);
+                                char msg4[200];
+                                if (texNo != 0xffff && modelData->getTexture() != NULL &&
+                                    texNo < modelData->getTexture()->getNum())
+                                {
+                                    ResTIMG* timg = modelData->getTexture()->getResTIMG(texNo);
+                                    _snprintf_s(msg4, _TRUNCATE,
+                                                "[dusk::kankyowater] VR=%d mat=%p texNo=%u width=%u "
+                                                "height=%u format=%u\n",
+                                                inVR ? 1 : 0, (void*)mat_p, texNo, (u16)timg->width,
+                                                (u16)timg->height, timg->format);
+                                } else {
+                                    _snprintf_s(msg4, _TRUNCATE,
+                                                "[dusk::kankyowater] VR=%d mat=%p texNo=%u (out of range "
+                                                "or null texture table!)\n",
+                                                inVR ? 1 : 0, (void*)mat_p, texNo);
+                                }
+                                OutputDebugStringA(msg4);
+                            }
+                        }
+                    }
+#endif
+
+                    bool hasTexMtx0 = mat_p->getTexGenBlock()->getTexMtx(0) != NULL;
+#if TARGET_PC
+                    // TEMP BISECT (VR water-black investigation, round 4):
+                    // round 3 (skipping the reflection-matrix branch below
+                    // entirely) looked identical to before -- but that test
+                    // is ambiguous: if this branch was NEVER computed in VR
+                    // in this run, the material's effect matrix could be
+                    // coincidentally stale/black-sampling either way,
+                    // whether or not this code matters. Stronger test:
+                    // force this material's color registers to bright
+                    // magenta regardless of the branch below. If the water
+                    // flashes magenta, this material IS reaching the
+                    // screen and the bug is a color/texture INPUT. If it
+                    // stays black even with a forced override, the bug is
+                    // downstream of this (blend state, or the draw being
+                    // dropped/overwritten entirely).
+                    // CONTROL TEST (round 6): applied UNCONDITIONALLY now
+                    // (VR and flatscreen both), not gated on
+                    // isRenderingToHeadset(). Rounds 4/5 (magenta + forced
+                    // opaque blend) both showed zero visible effect in VR --
+                    // suspicious enough on its own to question whether these
+                    // material-state writes are reaching the actual draw
+                    // call at all (e.g. some cached/baked display-list
+                    // mechanism bypassing runtime edits), rather than
+                    // genuinely confirming color/blend aren't the cause. If
+                    // flatscreen water ALSO fails to show magenta despite
+                    // normally rendering fine, the override mechanism itself
+                    // is the problem and rounds 4/5's "no change" conclusions
+                    // are invalid. If flatscreen DOES show magenta, that's
+                    // real confirmation the mechanism works and VR is
+                    // genuinely different.
+                    if (true) {
+                        static bool logged = false;
+                        if (!logged) {
+                            logged = true;
+                            OutputDebugStringA(
+                                "[dusk::kankyowater] FORCE: overriding TevColor/TevKColor 0-3 to magenta "
+                                "(VR+flat control test)\n");
+                        }
+                        J3DGXColorS10 magentaS10;
+                        magentaS10.r = 255;
+                        magentaS10.g = 0;
+                        magentaS10.b = 255;
+                        magentaS10.a = 255;
+                        J3DGXColor magenta;
+                        magenta.r = 255;
+                        magenta.g = 0;
+                        magenta.b = 255;
+                        magenta.a = 255;
+                        mat_p->setTevColor(0, &magentaS10);
+                        mat_p->setTevColor(1, &magentaS10);
+                        mat_p->setTevColor(2, &magentaS10);
+                        mat_p->setTevColor(3, &magentaS10);
+                        mat_p->setTevKColor(0, &magenta);
+                        mat_p->setTevKColor(1, &magenta);
+                        mat_p->setTevKColor(2, &magenta);
+                        mat_p->setTevKColor(3, &magenta);
+
+                        // TEMP DIAGNOSTIC/BISECT (VR water-black
+                        // investigation, round 5): the magenta test above
+                        // produced zero visible change, ruling out the
+                        // material's constant color registers. This
+                        // material is almost certainly translucent (drawn
+                        // via the Xlu half of the Invisible list) -- log
+                        // its actual blend mode/factors once, then force
+                        // blend mode to GX_BM_NONE (fully opaque, no
+                        // blending) to test whether broken blend state
+                        // (not texture/color content) is what's turning
+                        // the output black. If water shows ANYTHING other
+                        // than solid black with blending forced off
+                        // (even wrong-looking), blend state is implicated.
+                        J3DBlend* blend = mat_p->getBlend();
+                        if (blend != NULL) {
+                            static bool loggedBlend = false;
+                            if (!loggedBlend) {
+                                loggedBlend = true;
+                                char msg[300];
+                                _snprintf_s(msg, _TRUNCATE,
+                                            "[dusk::kankyowater] BLEND: type=%d src=%d dst=%d "
+                                            "(forcing GX_BM_NONE)\n",
+                                            (int)blend->getBlendMode(), (int)blend->getSrcFactor(),
+                                            (int)blend->getDstFactor());
+                                OutputDebugStringA(msg);
+                            }
+                            blend->setType(GX_BM_NONE);
+                        }
+
+                        // TRIED and REVERTED (round 7): calling
+                        // mat_p->patch() here to force the TevColor/
+                        // TevKColor/blend writes above into the GX FIFO
+                        // command stream (see J3DMaterial::calc() only
+                        // touching mTexGenBlock, never mTevBlock/
+                        // mColorBlock/mPEBlock -- J3DMaterial.cpp:267)
+                        // CRASHED immediately: "unknown opcode 0x7E",
+                        // corrupted FIFO. patch()'s beginPatch()/endPatch()
+                        // (via j3dSys.getMatPacket()) evidently requires a
+                        // packet-recording context that isn't active here --
+                        // this function runs during the environment/kankyo
+                        // update pass, not during the model's actual
+                        // draw-time material entry. Do NOT call patch() (or
+                        // presumably diff()) from this function again
+                        // without first understanding what context those
+                        // need. Rounds 4-6's "zero visual effect" findings
+                        // are still unconfirmed either way -- we still don't
+                        // have a working way to force-apply TevColor/blend
+                        // changes from here to test those hypotheses.
+                    }
+#endif
+                    if (hasTexMtx0) {
                         tex_mtx_inf =
                             &mat_p->getTexGenBlock()->getTexMtx(0)->getTexMtxInfo();
                         if (tex_mtx_inf != NULL) {
@@ -11432,13 +11706,37 @@ void dKy_bg_MAxx_proc(void* bg_model_p) {
                             cXyz sp108;
 
                             Mtx sp1D8;
+                            // ROOT-CAUSED this session (VR water rendering
+                            // solid black): see
+                            // dComIfGd_getReflectionFovAspect()'s comment.
+                            f32 waterFovy, waterAspect;
+                            dComIfGd_getReflectionFovAspect(&waterFovy, &waterAspect);
+#if TARGET_PC
+                            {
+                                // TEMP DIAGNOSTIC (VR water-black investigation,
+                                // round 2): confirm this general-BG water path is
+                                // even reached in VR, and with what values.
+                                static bool loggedVR = false;
+                                static bool loggedFlat = false;
+                                bool inVR = dusk::vr::isRenderingToHeadset();
+                                bool* flag = inVR ? &loggedVR : &loggedFlat;
+                                if (!*flag) {
+                                    *flag = true;
+                                    char msg[256];
+                                    _snprintf_s(msg, _TRUNCATE,
+                                                "[dusk::kankyowater] VR=%d mat=%.4s fovy=%.2f aspect=%.3f\n",
+                                                inVR ? 1 : 0, &mat_name[3], waterFovy, waterAspect);
+                                    OutputDebugStringA(msg);
+                                }
+                            }
+#endif
                             if (mat_name[6] == '2') {
-                                C_MTXLightPerspective(sp1D8, dComIfGd_getView()->fovy,
-                                                      camera_p->view.aspect, 1.0f, 1.0f,
+                                C_MTXLightPerspective(sp1D8, waterFovy,
+                                                      waterAspect, 1.0f, 1.0f,
                                                       -0.01f, 0.0f);
                             } else {
-                                C_MTXLightPerspective(sp1D8, dComIfGd_getView()->fovy,
-                                                      camera_p->view.aspect, 0.49f, -0.49f, 0.5f, 0.5f);
+                                C_MTXLightPerspective(sp1D8, waterFovy,
+                                                      waterAspect, 0.49f, -0.49f, 0.5f, 0.5f);
                             }
 
                             #if WIDESCREEN_SUPPORT

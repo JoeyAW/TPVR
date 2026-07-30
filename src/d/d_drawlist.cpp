@@ -22,6 +22,8 @@
 #include "dusk/frame_interpolation.h"
 #include "helpers/gx_helper.h"
 #include "dusk/logging.h"
+#include <windows.h>
+extern "C" bool g_duskVRRenderingToHeadset;
 
 static const void* getInterpKey(const void* base, int idx) {
     return reinterpret_cast<const void*>(reinterpret_cast<uintptr_t>(base) ^ idx);
@@ -1127,9 +1129,14 @@ void dDlst_shadowReal_c::draw() {
     GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
     GXSetCurrentMtx(GX_PNMTX0);
 #ifdef TARGET_PC
+    // Defensive fix applied alongside dDlst_shadowSimple_c::draw()'s (see
+    // its comment) -- same frame-interpolation subsystem, same composite
+    // phase that runs unconditionally regardless of VR state.
     Mtx view_mtx, recv_proj_mtx;
-    const auto have_view_mtx = dusk::frame_interp::lookup_replacement(getInterpKey(mpModels[0], 1), view_mtx);
-    const auto have_recv_proj_mtx = dusk::frame_interp::lookup_replacement(getInterpKey(mpModels[0], 3), recv_proj_mtx);
+    const auto have_view_mtx = !g_duskVRRenderingToHeadset &&
+        dusk::frame_interp::lookup_replacement(getInterpKey(mpModels[0], 1), view_mtx);
+    const auto have_recv_proj_mtx = !g_duskVRRenderingToHeadset &&
+        dusk::frame_interp::lookup_replacement(getInterpKey(mpModels[0], 3), recv_proj_mtx);
     if (have_view_mtx && have_recv_proj_mtx) {
         cMtx_concat(recv_proj_mtx, view_mtx, recv_proj_mtx);
         GXLoadTexMtxImm(recv_proj_mtx, GX_TEXMTX0, GX_MTX3x4);
@@ -1301,7 +1308,70 @@ u8 dDlst_shadowReal_c::setShadowRealMtx(cXyz* param_0, cXyz* param_1, f32 param_
     dusk::frame_interp::record_final_mtx(mRenderProjMtx, getInterpKey(keybase, 2));
     dusk::frame_interp::record_final_mtx(mReceiverProjMtx, getInterpKey(keybase, 3));
 #endif
+    // ROOT-CAUSED this session (VR shadow-stretching, confirmed via
+    // diagnostic logging): this concatenation multiplies mReceiverProjMtx's
+    // small scale factor (~1/(2*size), ~0.00125 here) against mViewMtx's
+    // huge translation (this stage's world coordinates run to
+    // ~30,000-40,000+ units -- see the camera-anchor fix's precision
+    // comment in vr_stereo_render.hpp for the same underlying magnitude).
+    // float32 (the format Mtx uses throughout) loses enough precision in
+    // that multiply that the resulting translation terms come out ~88x
+    // larger than the ~0.5 bias C_MTXLightOrtho was given (logged:
+    // 44.30/50.92 instead of ~0.5) -- exactly what produces wildly-wrong
+    // texture UVs and the observed stretching. Redo just this specific
+    // concat in double precision; cMtx_lookAt/C_MTXLightOrtho above stay as
+    // the SDK-provided float32 calls (lower risk than reimplementing
+    // those) since the diagnostic pointed specifically at this multiply.
+#ifdef TARGET_PC
+    {
+        double concatResult[3][4];
+        for (int ci = 0; ci < 3; ++ci) {
+            for (int cj = 0; cj < 3; ++cj) {
+                concatResult[ci][cj] = static_cast<double>(mReceiverProjMtx[ci][0]) * mViewMtx[0][cj] +
+                                        static_cast<double>(mReceiverProjMtx[ci][1]) * mViewMtx[1][cj] +
+                                        static_cast<double>(mReceiverProjMtx[ci][2]) * mViewMtx[2][cj];
+            }
+            concatResult[ci][3] = static_cast<double>(mReceiverProjMtx[ci][0]) * mViewMtx[0][3] +
+                                   static_cast<double>(mReceiverProjMtx[ci][1]) * mViewMtx[1][3] +
+                                   static_cast<double>(mReceiverProjMtx[ci][2]) * mViewMtx[2][3] +
+                                   static_cast<double>(mReceiverProjMtx[ci][3]);
+        }
+        for (int ci = 0; ci < 3; ++ci) {
+            for (int cj = 0; cj < 4; ++cj) {
+                mReceiverProjMtx[ci][cj] = static_cast<float>(concatResult[ci][cj]);
+            }
+        }
+    }
+#else
     cMtx_concat(mReceiverProjMtx, mViewMtx, mReceiverProjMtx);
+#endif
+    // TEMP DIAGNOSTIC (VR shadow-stretching investigation, complex/real
+    // shadow system): CORRECTED placement -- logs mReceiverProjMtx AFTER
+    // the view*proj concat above, i.e. the actual matrix draw() loads into
+    // GX_TEXMTX0 for projecting the shadow texture onto the ground. An
+    // earlier placement logged the raw pre-concat projection, which looked
+    // numerically sane but wasn't what's actually used for rendering.
+#if TARGET_PC
+    {
+        static const void* loggedPtrVR2 = nullptr;
+        static const void* loggedPtrFlat2 = nullptr;
+        const void** loggedPtr2 = g_duskVRRenderingToHeadset ? &loggedPtrVR2 : &loggedPtrFlat2;
+        if (*loggedPtr2 != static_cast<const void*>(param_1)) {
+            *loggedPtr2 = param_1;
+            char msg[500];
+            _snprintf_s(msg, _TRUNCATE,
+                        "[dusk::realshadow] VR=%d pos=(%.1f,%.1f,%.1f) size=%.1f "
+                        "finalRecvProj row0=(%.4f,%.4f,%.4f,%.4f) row1=(%.4f,%.4f,%.4f,%.4f) "
+                        "row2=(%.4f,%.4f,%.4f,%.4f)\n",
+                        g_duskVRRenderingToHeadset ? 1 : 0,
+                        param_1->x, param_1->y, param_1->z, param_2,
+                        mReceiverProjMtx[0][0], mReceiverProjMtx[0][1], mReceiverProjMtx[0][2], mReceiverProjMtx[0][3],
+                        mReceiverProjMtx[1][0], mReceiverProjMtx[1][1], mReceiverProjMtx[1][2], mReceiverProjMtx[1][3],
+                        mReceiverProjMtx[2][0], mReceiverProjMtx[2][1], mReceiverProjMtx[2][2], mReceiverProjMtx[2][3]);
+            OutputDebugStringA(msg);
+        }
+    }
+#endif
     return r29;
 }
 
@@ -1362,6 +1432,15 @@ bool dDlst_shadowReal_c::add(J3DModel* i_model) {
 }
 
 void dDlst_shadowSimple_c::draw() {
+#if TARGET_PC
+    // User request this session: hidden in VR alongside the complex shadow
+    // system (dComIfGd_drawShadow in m_Do_graphic.cpp) -- see that guard's
+    // comment for why. Re-disabled after a mistaken re-enable confirmed the
+    // stretching persists post-fix; do not re-enable without new evidence.
+    if (g_duskVRRenderingToHeadset) {
+        return;
+    }
+#endif
     static GXColor l_color = {0, 0, 0, 64};
     l_color.a = mAlpha;
 
@@ -1369,8 +1448,21 @@ void dDlst_shadowSimple_c::draw() {
     GXClearVtxDesc();
     GXSetVtxDesc(GX_VA_POS, GX_INDEX8);
 #ifdef TARGET_PC
+    // ROOT-CAUSED this session (VR shadow-stretching investigation): this
+    // path re-concatenates the INTERPOLATED (world-space-only) matrix with
+    // j3dSys.getViewMtx() AT DRAW() TIME -- correct only if the view matrix
+    // here still matches whichever eye set() used when it originally baked
+    // mVolumeMtx (view * local) at SET() TIME. Flatscreen has one stable
+    // view matrix per frame, so this always lines up there; VR's two
+    // rapidly-alternating per-eye view matrices make a mismatch likely,
+    // producing exactly this kind of severe stretching (wrong-eye view
+    // multiplied against this shadow's small local geometry). Skip the
+    // interpolated path for VR and always use the already-correct
+    // mVolumeMtx baked at set()-time instead -- loses frame-smoothing for
+    // shadow position specifically in VR, not a meaningful loss.
     Mtx volume_mtx;
-    if (dusk::frame_interp::lookup_replacement(mVolumeMtxKey, volume_mtx)) {
+    if (!g_duskVRRenderingToHeadset &&
+        dusk::frame_interp::lookup_replacement(mVolumeMtxKey, volume_mtx)) {
         cMtx_concat(j3dSys.getViewMtx(), volume_mtx, volume_mtx);
         GXLoadPosMtxImm(volume_mtx, GX_PNMTX0);
     } else
@@ -1384,8 +1476,10 @@ void dDlst_shadowSimple_c::draw() {
     GXCallDisplayList(l_backSubMat, 0x20);
     GXCallDisplayList(l_shadowVolumeDL, 0x40);
 #ifdef TARGET_PC
+    // Same fix as mVolumeMtx above.
     Mtx shadow_mtx;
-    if (dusk::frame_interp::lookup_replacement(mMtxKey, shadow_mtx)) {
+    if (!g_duskVRRenderingToHeadset &&
+        dusk::frame_interp::lookup_replacement(mMtxKey, shadow_mtx)) {
         cMtx_concat(j3dSys.getViewMtx(), shadow_mtx, shadow_mtx);
         GXLoadPosMtxImm(shadow_mtx, GX_PNMTX1);
     } else
@@ -1424,6 +1518,31 @@ void dDlst_shadowSimple_c::draw() {
 
 void dDlst_shadowSimple_c::set(cXyz* param_0, f32 param_1, f32 param_2, cXyz* param_3,
                                    s16 param_4, f32 param_5, TGXTexObj* param_6) {
+    // TEMP DIAGNOSTIC (VR shadow-stretching investigation): log this
+    // shadow's inputs and resulting view-space matrices once per distinct
+    // actor position pointer while actually rendering to the headset, to
+    // see whether the computed values look sane (small local shadow near
+    // the actor's position) or degenerate (huge/NaN/wildly displaced) --
+    // comparing against known-good flatscreen behavior for the same actor.
+#if TARGET_PC
+    // WIDENED this session: now logs once per (actor pointer, VR state)
+    // combination, so a single test session can capture both a flatscreen
+    // baseline and the VR case for the SAME actor, for direct comparison.
+    static const void* loggedPtrVR = nullptr;
+    static const void* loggedPtrFlat = nullptr;
+    const void** loggedPtr = g_duskVRRenderingToHeadset ? &loggedPtrVR : &loggedPtrFlat;
+    if (*loggedPtr != static_cast<const void*>(param_0)) {
+        *loggedPtr = param_0;
+        char msg[400];
+        _snprintf_s(msg, _TRUNCATE,
+                    "[dusk::shadow] VR=%d set() pos=(%.1f,%.1f,%.1f) groundY=%.1f radius=%.1f "
+                    "normal=(%.3f,%.3f,%.3f) yrot=%d stretch=%.3f\n",
+                    g_duskVRRenderingToHeadset ? 1 : 0,
+                    param_0->x, param_0->y, param_0->z, param_1, param_2,
+                    param_3->x, param_3->y, param_3->z, (int)param_4, param_5);
+        OutputDebugStringA(msg);
+    }
+#endif
     if (param_5 < 0.0f) {
         mAlpha = param_5 * -255.0f;
         param_5 = 1.0f;
@@ -1450,6 +1569,19 @@ void dDlst_shadowSimple_c::set(cXyz* param_0, f32 param_1, f32 param_2, cXyz* pa
     dusk::frame_interp::record_final_mtx(mDoMtx_stack_c::get(), mVolumeMtxKey);
 #endif
     cMtx_concat(j3dSys.getViewMtx(), mDoMtx_stack_c::get(), mVolumeMtx);
+#if TARGET_PC
+    if (*loggedPtr == static_cast<const void*>(param_0)) {
+        char msg[300];
+        _snprintf_s(msg, _TRUNCATE,
+                    "[dusk::shadow] VR=%d mVolumeMtx row0=(%.2f,%.2f,%.2f,%.2f) row1=(%.2f,%.2f,%.2f,%.2f) "
+                    "row2=(%.2f,%.2f,%.2f,%.2f)\n",
+                    g_duskVRRenderingToHeadset ? 1 : 0,
+                    mVolumeMtx[0][0], mVolumeMtx[0][1], mVolumeMtx[0][2], mVolumeMtx[0][3],
+                    mVolumeMtx[1][0], mVolumeMtx[1][1], mVolumeMtx[1][2], mVolumeMtx[1][3],
+                    mVolumeMtx[2][0], mVolumeMtx[2][1], mVolumeMtx[2][2], mVolumeMtx[2][3]);
+        OutputDebugStringA(msg);
+    }
+#endif
     f32 f31 = JMAFastSqrt(1.0f - param_3->x * param_3->x);
     f32 f29;
     f32 f28;
@@ -1479,6 +1611,19 @@ void dDlst_shadowSimple_c::set(cXyz* param_0, f32 param_1, f32 param_2, cXyz* pa
     dusk::frame_interp::record_final_mtx(mDoMtx_stack_c::get(), mMtxKey);
 #endif
     cMtx_concat(j3dSys.getViewMtx(), mDoMtx_stack_c::get(), mMtx);
+#if TARGET_PC
+    if (*loggedPtr == static_cast<const void*>(param_0)) {
+        char msg[300];
+        _snprintf_s(msg, _TRUNCATE,
+                    "[dusk::shadow] VR=%d mMtx row0=(%.2f,%.2f,%.2f,%.2f) row1=(%.2f,%.2f,%.2f,%.2f) "
+                    "row2=(%.2f,%.2f,%.2f,%.2f)\n",
+                    g_duskVRRenderingToHeadset ? 1 : 0,
+                    mMtx[0][0], mMtx[0][1], mMtx[0][2], mMtx[0][3],
+                    mMtx[1][0], mMtx[1][1], mMtx[1][2], mMtx[1][3],
+                    mMtx[2][0], mMtx[2][1], mMtx[2][2], mMtx[2][3]);
+        OutputDebugStringA(msg);
+    }
+#endif
     mpTexObj = param_6;
 }
 

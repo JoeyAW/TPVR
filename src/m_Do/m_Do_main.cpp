@@ -58,6 +58,36 @@
 #include "dusk/frame_interpolation.h"
 #include "dusk/game_clock.h"
 #include "dusk/vr/vr_main.hpp"
+
+#ifdef TARGET_PC
+// TEMP DIAGNOSTIC (VR water-black investigation): manual RenderDoc capture
+// trigger. RenderDoc's own hotkey capture only sees the DESKTOP window's
+// Present() calls, which are essentially empty while VR is active (see the
+// "REMOVED this session" comment on the old desktop-mirror hack below) --
+// confirmed via two real captures that contained nothing but a fence signal
+// and a Present, no draw calls at all. The actual GPU command submission for
+// VR's eye rendering happens inside aurora_end_frame(), not inside
+// dusk::vr::tick() itself (aurora defers/retains draw recording -- see
+// tick()'s own comment in vr_main.cpp), so this brackets the WHOLE frame
+// (aurora_begin_frame() through submitFrame()) rather than just tick().
+// Passing nullptr/nullptr to Start/EndFrameCapture captures whatever
+// device/queue submits work in that window, regardless of which one it is.
+#include "dusk/vr/renderdoc_app.h"
+
+static RENDERDOC_API_1_1_2* getRenderDocApi() {
+    static RENDERDOC_API_1_1_2* api = nullptr;
+    static bool attempted = false;
+    if (!attempted) {
+        attempted = true;
+        if (HMODULE mod = GetModuleHandleA("renderdoc.dll")) {
+            if (auto getApi = (pRENDERDOC_GetAPI)GetProcAddress(mod, "RENDERDOC_GetAPI")) {
+                getApi(eRENDERDOC_API_Version_1_1_2, (void**)&api);
+            }
+        }
+    }
+    return api;
+}
+#endif
 #include "dusk/gyro.h"
 #include "dusk/mouse.h"
 #include "dusk/imgui/ImGuiConsole.hpp"
@@ -269,6 +299,20 @@ void main01(void) {
 
         eventsDone:;
 
+#ifdef TARGET_PC
+        static bool rdocKeyWasDown = false;
+        static bool rdocCapturing = false;
+        bool rdocKeyDown = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
+        bool rdocKeyPressed = rdocKeyDown && !rdocKeyWasDown;
+        rdocKeyWasDown = rdocKeyDown;
+        RENDERDOC_API_1_1_2* rdocApi = getRenderDocApi();
+        if (rdocKeyPressed && rdocApi && !rdocCapturing) {
+            rdocApi->StartFrameCapture(nullptr, nullptr);
+            rdocCapturing = true;
+            OutputDebugStringA("[dusk::renderdoc] StartFrameCapture\n");
+        }
+#endif
+
         if (!aurora_begin_frame()) {
             DuskLog.debug("aurora_begin_frame returned false, skipping draw this frame");
             continue;
@@ -359,24 +403,17 @@ void main01(void) {
                 // shared clock state (see vr_main.hpp's tick() comment).
                 dusk::vr::tick(pacing);
             }
+            // REMOVED this session: a temporary desktop-mirror hack used to
+            // live here (draw a second time, reusing the last VR eye's
+            // camera, so the desktop window showed what the headset saw).
+            // Confirmed harmful, not just extra cost: calling the game's
+            // whole per-frame draw pipeline twice corrupted state that
+            // assumes it runs exactly once per frame (e.g. the dialogue-mode
+            // vignette render produced solid-white polygon corruption on the
+            // second call; water reflections were also reported broken while
+            // this was active). Back to skipping the flatscreen draw
+            // whenever tick() actually rendered stereo eyes.
             if (!dusk::vr::isActive() || !dusk::vr::isRenderingToHeadset()) {
-                fpcM_DrawIterater((fpcM_DrawIteraterFunc)fpcM_Draw);
-                cAPIGph_Painter();
-            }
-            // TEMP DEBUG MIRROR (VR camera-position/culling investigation):
-            // when tick() actually rendered stereo eyes, this window's own
-            // on-screen pass is otherwise never drawn into this frame (see
-            // the branch above), which is why the desktop goes black while
-            // VR is active. view->viewMtx/projMtx are still exactly what the
-            // LAST eye tick() processed set them to (beginEye() for that eye
-            // is the last thing to touch them), and endEye() already
-            // restored the on-screen EFB pass as current -- so drawing again
-            // right here, with no VR-specific setup, reuses that eye's
-            // camera and lands the same picture the headset just saw onto
-            // the desktop window, screenshot-able normally. Doubles this
-            // frame's draw cost (debug-only) -- remove this block once no
-            // longer needed for headset-visibility comparisons.
-            else {
                 fpcM_DrawIterater((fpcM_DrawIteraterFunc)fpcM_Draw);
                 cAPIGph_Painter();
             }
@@ -420,6 +457,16 @@ void main01(void) {
         // Safe to call unconditionally every frame -- see submitFrame()'s
         // own comment: it's a no-op if tick() didn't render stereo eyes.
         dusk::vr::submitFrame();
+
+#ifdef TARGET_PC
+        if (rdocCapturing) {
+            if (RENDERDOC_API_1_1_2* rdocApi2 = getRenderDocApi()) {
+                rdocApi2->EndFrameCapture(nullptr, nullptr);
+                OutputDebugStringA("[dusk::renderdoc] EndFrameCapture\n");
+            }
+            rdocCapturing = false;
+        }
+#endif
 
         FrameMark;
 

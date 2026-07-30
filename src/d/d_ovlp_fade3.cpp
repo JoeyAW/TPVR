@@ -12,7 +12,26 @@
 #include "m_Do/m_Do_audio.h"
 #include "m_Do/m_Do_graphic.h"
 
+#ifdef TARGET_PC
+#include "dusk/vr/vr_main.hpp"
+#endif
+
 void dDlst_snapShot_c::draw() {
+    // ROOT-CAUSED this session ("black screen after loading a save", part
+    // 3): this is the save-icon screenshot capture -- fires once, exactly
+    // when a save file is created, which lines up precisely with the
+    // reported symptom. Same unconditional GXCopyTex-clobbers-VR's-
+    // offscreen-eye-pass bug as retry_captue_frame and postRenderingMap,
+    // just with a much more specific/rare trigger (once per save, not every
+    // frame), which is why it survived those two fixes. Skip the capture
+    // while actually rendering stereo eyes -- the save icon just won't be
+    // refreshed with an in-VR screenshot, same acceptable tradeoff as the
+    // other guarded captures.
+#ifdef TARGET_PC
+    if (dusk::vr::isRenderingToHeadset()) {
+        return;
+    }
+#endif
     GXSetTexCopySrc(0, 0, FB_WIDTH, FB_HEIGHT);
 #if TARGET_PC
     GXSetTexCopyDst(FB_WIDTH, FB_HEIGHT, GX_TF_RGBA8, GX_FALSE);

@@ -197,7 +197,11 @@ int daLv3Water2_c::Draw() {
         texMtxInfo = &btkMaterial->getTexGenBlock()->getTexMtx(0)->getTexMtxInfo();
         if(texMtxInfo) {
             Mtx lightProjMtx;
-            C_MTXLightPerspective(lightProjMtx, dComIfGd_getView()->fovy, dComIfGd_getView()->aspect, 1.0f, 1.0f, -0.01f, 0);
+            // ROOT-CAUSED this session (VR water rendering solid black):
+            // see dComIfGd_getReflectionFovAspect()'s comment.
+            f32 waterFovy, waterAspect;
+            dComIfGd_getReflectionFovAspect(&waterFovy, &waterAspect);
+            C_MTXLightPerspective(lightProjMtx, waterFovy, waterAspect, 1.0f, 1.0f, -0.01f, 0);
             #if WIDESCREEN_SUPPORT
             mDoGph_gInf_c::setWideZoomLightProjection(lightProjMtx);
             #endif

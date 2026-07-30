@@ -124,9 +124,24 @@ inline void eyePoseToViewMtx(
 
     // Scale to game units and flip Z, then anchor to Link's actual game-world
     // eye position for this frame (matches buildHandMtx's convention).
-    const float wx_ = linkEyeGame.x + dx * scale;
-    const float wy_ = linkEyeGame.y + dy * scale;
-    const float wz_ = linkEyeGame.z - dz * scale;
+    // ROOT-CAUSED this session (VR shadow-stretching investigation): kept
+    // in double precision here and through the translation dot-products
+    // below. Diagnostic logging showed this specific area's world
+    // coordinates run to ~100,000+ units (stage-specific origin offset far
+    // from the visible geometry) -- at that magnitude float32 only has
+    // ~0.01-0.02 units of precision left, and objects with small local
+    // scale (e.g. a shadow blob with radius ~20) concatenated against a
+    // huge-magnitude view matrix translation are exactly where that
+    // rounding error becomes visually obvious (stretching/distortion).
+    // This construction is entirely new this session (eyePoseToViewMtx
+    // didn't anchor to game position at all before), so it never got the
+    // numerical conditioning the original mDoMtx_lookAt-based flatscreen
+    // camera path presumably has; computing in double here and truncating
+    // to f32 only at the final Mtx write reduces that error without
+    // changing the Mtx storage format GX expects.
+    const double wx_ = static_cast<double>(linkEyeGame.x) + static_cast<double>(dx) * scale;
+    const double wy_ = static_cast<double>(linkEyeGame.y) + static_cast<double>(dy) * scale;
+    const double wz_ = static_cast<double>(linkEyeGame.z) - static_cast<double>(dz) * scale;
 
     // Orientation: use the eye's raw quaternion UNFLIPPED. Confirmed this
     // session -- flipping qz here (mirroring buildHandMtx's convention,
@@ -149,15 +164,18 @@ inline void eyePoseToViewMtx(
     const float r10 = 2.f*(xy-wzq),        r11 = 1.f - 2.f*(xx+zz), r12 = 2.f*(yz+wxq);
     const float r20 = 2.f*(xz+wyq),        r21 = 2.f*(yz-wxq),       r22 = 1.f - 2.f*(xx+yy);
 
-    // dest is Mtx = float[3][4]
+    // dest is Mtx = float[3][4]. wx_/wy_/wz_ are double (see comment
+    // above); r00.. are float but promote to double in these dot products,
+    // so the sum-then-negate happens in double precision and only rounds
+    // to float on the final assignment below.
     dest[0][0] = r00; dest[0][1] = r01; dest[0][2] = r02;
-    dest[0][3] = -(wx_*r00 + wy_*r01 + wz_*r02);
+    dest[0][3] = static_cast<float>(-(wx_*r00 + wy_*r01 + wz_*r02));
 
     dest[1][0] = r10; dest[1][1] = r11; dest[1][2] = r12;
-    dest[1][3] = -(wx_*r10 + wy_*r11 + wz_*r12);
+    dest[1][3] = static_cast<float>(-(wx_*r10 + wy_*r11 + wz_*r12));
 
     dest[2][0] = r20; dest[2][1] = r21; dest[2][2] = r22;
-    dest[2][3] = -(wx_*r20 + wy_*r21 + wz_*r22);
+    dest[2][3] = static_cast<float>(-(wx_*r20 + wy_*r21 + wz_*r22));
 }
 
 // Build a Nintendo-style Mtx44 (4x4, row-major) asymmetric perspective
@@ -302,6 +320,27 @@ inline uint64_t g_currentEyePassId = 0;
 // mismatch -- which, empirically, was every single eye/frame.
 inline wgpu::TextureView g_currentEyeColorView;
 
+// ROOT-CAUSED this session (VR water rendering solid black): several game
+// systems read view->fovy/view->aspect directly instead of view->projMtx --
+// most notably daGrdWater_c::Draw() (d_a_obj_groundwater.cpp), which builds
+// its reflection env-map matrix via C_MTXLightPerspective(fovy, aspect, ...).
+// The culling fix above deliberately left view->fovy/aspect untouched (see
+// its comment) since those same two fields also drive particle billboarding,
+// rain shadow-projection, audio spatialization, and the modding API --
+// changing them wholesale risked side effects on all of those, untested.
+// Instead, expose the SAME symmetric-frustum-containing-the-real-asymmetric-
+// FOV values already computed for the clipper below, via getEyeSymmetricFov()
+// (dusk::vr::getEyeSymmetricFov() forwards to this from vr_main.cpp), so
+// individual call sites can opt in to VR-correct values without touching the
+// shared view_class fields everything else still relies on.
+inline float g_eyeSymmetricFovyDeg = 60.0f;
+inline float g_eyeSymmetricAspect = 1.3571428f;
+
+inline void getEyeSymmetricFov(float* fovyDeg, float* aspect) noexcept {
+    *fovyDeg = g_eyeSymmetricFovyDeg;
+    *aspect = g_eyeSymmetricAspect;
+}
+
 inline aurora::gfx::ResolvedTargets beginEye(const EyeParams& eye) {
     // 1. Get the shared game view and patch it with this eye's transform.
     //    This is the same view_class pointer that frame_interpolation.cpp
@@ -363,6 +402,9 @@ inline aurora::gfx::ResolvedTargets beginEye(const EyeParams& eye) {
         const float clipperFovyDeg = 2.f * std::atan(halfV) * kRadToDeg;
         const float clipperAspect = halfH / halfV;
         mDoLib_clipper::setup(clipperFovyDeg, clipperAspect, view->near_, view->far_);
+        // Shared with getEyeSymmetricFov() -- see its comment above.
+        g_eyeSymmetricFovyDeg = clipperFovyDeg;
+        g_eyeSymmetricAspect = clipperAspect;
 
         // TEMP DIAGNOSTIC (culling investigation): confirm the actual
         // computed values once, to rule out a units/formula bug producing
@@ -420,6 +462,17 @@ inline aurora::gfx::ResolvedTargets beginEye(const EyeParams& eye) {
     g_currentEyePassId = aurora::gfx::current_pass_id();
     g_currentEyeColorView = aurora::gfx::current_pass_color_view();
 
+    // ROOT-CAUSED this session (architectural fix superseding the many
+    // individual per-call-site GXCopyTex guards elsewhere): protect this
+    // eye's pass centrally so resolve_pass_into() (extern/aurora/lib/gfx/
+    // common.cpp) refuses to substitute over it no matter which system's
+    // GXCopyTex call is responsible -- see set_protected_offscreen_pass()'s
+    // doc comment in gfx.hpp. Must stay set until AFTER endEye()'s
+    // resolve_pass_checked() call below, since that call drains the GX FIFO
+    // itself and any queued copy from this eye's own scene draw gets
+    // processed during that drain, not before.
+    aurora::gfx::set_protected_offscreen_pass(g_currentEyePassId);
+
     // Return an empty ResolvedTargets as the "pass is now open" signal;
     // the real targets come back from endEye().
     return {};
@@ -465,6 +518,11 @@ inline aurora::gfx::ResolvedTargets endEye() {
     // only consults this flag in the offscreen branch), but cleared
     // unconditionally here for clarity.
     aurora::gfx::set_offscreen_uses_native_logical_size(false);
+    // Matches the set_protected_offscreen_pass() call in beginEye() -- clear
+    // it now that this eye's pass is fully resolved (or has failed to), so
+    // whatever (non-VR) offscreen pass runs next this frame isn't
+    // accidentally protected too.
+    aurora::gfx::clear_protected_offscreen_pass();
 
     if (!ok) {
         // Deliberately NOT an assert: unlike create_pass()/resolve_pass()

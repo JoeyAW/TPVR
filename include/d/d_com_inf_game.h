@@ -20,6 +20,9 @@
 #if defined(DUSK_BUILDING_GAME)
 #include <tracy/Tracy.hpp>
 #include "dusk/settings.h"
+#ifdef TARGET_PC
+#include "dusk/vr/vr_main.hpp"
+#endif
 #else
 #ifndef ZoneScoped
 #define ZoneScoped
@@ -4625,6 +4628,27 @@ inline void dComIfGd_setCopy2D(dDlst_base_c* dlst) {
 
 inline view_class* dComIfGd_getView() {
     return g_dComIfG_gameInfo.drawlist.getView();
+}
+
+// ROOT-CAUSED this session (VR water rendering solid black): view->fovy/
+// view->aspect are deliberately never updated for VR (see
+// vr_stereo_render.hpp's getEyeSymmetricFov() comment) since they also drive
+// particle billboarding, rain shadow-projection, audio spatialization, and
+// the modding API. Several water/reflection materials build their env-map
+// matrix directly from these two fields via C_MTXLightPerspective(), which
+// left them building that matrix from the stale flatscreen camera while
+// actually rendering VR's much wider eye -- pushing the reflection texture
+// coordinates entirely outside the texture (sampling its border, i.e. solid
+// black). Call sites doing that should use this instead of
+// dComIfGd_getView()->fovy/aspect directly.
+inline void dComIfGd_getReflectionFovAspect(f32* o_fovy, f32* o_aspect) {
+    *o_fovy = dComIfGd_getView()->fovy;
+    *o_aspect = dComIfGd_getView()->aspect;
+#if defined(TARGET_PC) && defined(DUSK_BUILDING_GAME)
+    if (dusk::vr::isRenderingToHeadset()) {
+        dusk::vr::getEyeSymmetricFov(o_fovy, o_aspect);
+    }
+#endif
 }
 
 inline Mtx44* dComIfGd_getProjViewMtx() {

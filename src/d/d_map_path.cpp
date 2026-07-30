@@ -16,6 +16,7 @@
 
 #ifdef TARGET_PC
 #include "dusk/settings.h"
+#include "dusk/vr/vr_main.hpp"
 #include "m_Do/m_Do_graphic.h"
 #include <dolphin/gx/GXAurora.h>
 #include <aurora/math.hpp>
@@ -540,6 +541,26 @@ void dRenderingMap_c::makeResTIMG(ResTIMG* p_image, u16 width, u16 height, u8* p
 }
 
 void dRenderingMap_c::renderingMap() {
+    // ROOT-CAUSED this session ("black screen after loading a save" /
+    // "water and heatwaves now show black" investigation, the dominant
+    // remaining source): preRenderingMap() opens the minimap's own
+    // render-to-texture pass via GXCreateFrameBuffer -- same as
+    // postRenderingMap()'s closing GXCopyTex/GXRestoreFrameBuffer (already
+    // guarded), but GXCreateFrameBuffer goes through gfx::begin_offscreen()
+    // directly (see GXAurora.cpp), bypassing BOTH create_pass()'s nesting
+    // guard AND resolve_pass_into()'s protected-pass check added earlier
+    // this session (that only covers the GXCopyTex/resolve_pass_into path).
+    // Since the minimap HUD renders every single frame during normal
+    // gameplay, this was firing constantly, not just around saves --
+    // guarding only postRenderingMap()'s copy left this wide open. Skip the
+    // whole pre/draw/post sequence while actually rendering stereo eyes;
+    // the minimap texture just won't update that frame instead of
+    // corrupting VR's eye pass.
+#ifdef TARGET_PC
+    if (dusk::vr::isRenderingToHeadset()) {
+        return;
+    }
+#endif
     preRenderingMap();
     if (isDrawPath()) {
         preDrawPath();
@@ -642,12 +663,31 @@ void dRenderingFDAmap_c::preRenderingMap() {
 
 void dRenderingFDAmap_c::postRenderingMap() {
     GXSetCopyFilter(GX_FALSE, NULL, GX_FALSE, NULL);
+    // ROOT-CAUSED this session ("black screen after loading a save",
+    // continued): same class of bug as retry_captue_frame in
+    // m_Do_graphic.cpp -- this minimap/dungeon-map path renderer does an
+    // unconditional, every-frame GXCopyTex (+ GXRestoreFrameBuffer on PC)
+    // as part of the normal HUD draw, which clobbers VR's offscreen eye
+    // pass the same way. Confirmed via a debugger breakpoint on GXCopyTex
+    // conditioned on g_duskVRRenderingToHeadset landing right here.
+    // CORRECTED this session: an earlier version of this fix returned out
+    // of the WHOLE function early, which also skipped setup2D() at the
+    // bottom -- later HUD/2D drawing this frame apparently depends on that
+    // running unconditionally, and skipping it corrupted rendering badly
+    // enough to blank the flatscreen window too (previously only the
+    // headset went black; the desktop mirror-less flatscreen path had
+    // always kept working fine before this fix). Only skip the actual
+    // GXCopyTex/GXRestoreFrameBuffer capture, not the rest of the function's
+    // GX state setup.
 #ifdef TARGET_PC
+    const bool skipCapture = dusk::vr::isRenderingToHeadset();
     const auto [rw, rh] = map_render_size_for(mTexWidth, mTexHeight);
-    GXSetTexCopySrc(0, 0, rw, rh);
-    GXSetTexCopyDst(rw, rh, GX_CTF_R8, GX_FALSE);
-    GXCopyTex(field_0x4, GX_TRUE);
-    GXRestoreFrameBuffer();
+    if (!skipCapture) {
+        GXSetTexCopySrc(0, 0, rw, rh);
+        GXSetTexCopyDst(rw, rh, GX_CTF_R8, GX_FALSE);
+        GXCopyTex(field_0x4, GX_TRUE);
+        GXRestoreFrameBuffer();
+    }
 #else
     GXSetTexCopySrc(0, 0, mTexWidth, mTexHeight);
     GXSetTexCopyDst(mTexWidth, mTexHeight, GX_CTF_R8, GX_FALSE);

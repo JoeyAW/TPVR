@@ -14,6 +14,9 @@
 #include "f_op/f_op_camera_mng.h"
 #include <cstring>
 #include "m_Do/m_Do_audio.h"
+#ifdef TARGET_PC
+#include "dusk/vr/vr_main.hpp"
+#endif
 
 static void dKyw_pntlight_set(WIND_INFLUENCE* pntwind);
 
@@ -1040,7 +1043,20 @@ void dKyw_wether_draw() {
         dKyw_Cloud_Draw();
     }
 
+    // User-reported this session: the sun sprite (dKyw_Sun_Draw, drawn via
+    // the sky rendering path -- separate from the lens-flare/IndScreen path
+    // already disabled for VR above) renders as a solid dark/blurred blob
+    // in VR instead of a glowing disc -- e.g. clearly visible facing the
+    // sunset in the intro. Matches the user's "heat wave" report (the
+    // IndScreen fix alone didn't remove it). Disable both the sun and its
+    // lens flare together for VR, same tradeoff already accepted for
+    // IndScreen.
+#ifdef TARGET_PC
+    if (strcmp(dComIfGp_getStartStageName(), "Name") && g_env_light.mSunInitialized &&
+        !dusk::vr::isRenderingToHeadset()) {
+#else
     if (strcmp(dComIfGp_getStartStageName(), "Name") && g_env_light.mSunInitialized) {
+#endif
         stage_stag_info_class* stag_info = dComIfGp_getStageStagInfo();
 
         if (dStage_stagInfo_GetArg0(stag_info) != 0) {

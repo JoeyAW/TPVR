@@ -8,6 +8,9 @@
 #include "d/actor/d_a_obj_groundwater.h"
 #include "d/d_com_inf_game.h"
 #include "m_Do/m_Do_graphic.h"
+#ifdef TARGET_PC
+#include <windows.h>
+#endif
 
 static daGrdWater_HIO_c l_HIO;
 
@@ -262,6 +265,26 @@ void daGrdWater_c::modeLevelDownB() {
 }
 
 int daGrdWater_c::Draw() {
+#ifdef TARGET_PC
+    // TEMP DIAGNOSTIC (VR water-black investigation, round 2): the fovy/
+    // aspect fix didn't resolve it, so confirm basic facts before guessing
+    // again: is this actor's Draw() even reached in VR, does the reflection
+    // branch run, and what does the lighting/tev setup actually produce.
+    {
+        static bool loggedVR = false;
+        static bool loggedFlat = false;
+        bool inVR = dusk::vr::isRenderingToHeadset();
+        bool* flag = inVR ? &loggedVR : &loggedFlat;
+        if (!*flag) {
+            *flag = true;
+            char msg[256];
+            _snprintf_s(msg, _TRUNCATE,
+                        "[dusk::grdwater] Draw() VR=%d pos=(%.1f,%.1f,%.1f)\n",
+                        inVR ? 1 : 0, current.pos.x, current.pos.y, current.pos.z);
+            OutputDebugStringA(msg);
+        }
+    }
+#endif
     g_env_light.settingTevStruct(0x10, &current.pos, &tevStr);
     g_env_light.setLightTevColorType_MAJI(mModel2, &tevStr);
     g_env_light.setLightTevColorType_MAJI(mModel1, &tevStr);
@@ -296,17 +319,62 @@ int daGrdWater_c::Draw() {
     dComIfGd_setList();
     J3DMaterial* material = modelData2->getMaterialNodePointer(0);
     dComIfGd_setListInvisisble();
+#ifdef TARGET_PC
+    {
+        static bool loggedVR = false;
+        static bool loggedFlat = false;
+        bool inVR = dusk::vr::isRenderingToHeadset();
+        bool* flag = inVR ? &loggedVR : &loggedFlat;
+        if (!*flag) {
+            *flag = true;
+            char msg[300];
+            _snprintf_s(msg, _TRUNCATE,
+                        "[dusk::grdwater] VR=%d hasTexMtx0=%d TevColor=(%d,%d,%d,%d) "
+                        "AmbCol=(%d,%d,%d,%d) TevKColor=(%d,%d,%d,%d) mLightInf=(%d,%d,%d,%d)\n",
+                        inVR ? 1 : 0, material->getTexGenBlock()->getTexMtx(0) != NULL ? 1 : 0,
+                        tevStr.TevColor.r, tevStr.TevColor.g, tevStr.TevColor.b, tevStr.TevColor.a,
+                        tevStr.AmbCol.r, tevStr.AmbCol.g, tevStr.AmbCol.b, tevStr.AmbCol.a,
+                        tevStr.TevKColor.r, tevStr.TevKColor.g, tevStr.TevKColor.b, tevStr.TevKColor.a,
+                        tevStr.mLightInf.r, tevStr.mLightInf.g, tevStr.mLightInf.b, tevStr.mLightInf.a);
+            OutputDebugStringA(msg);
+        }
+    }
+#endif
     if (material->getTexGenBlock()->getTexMtx(0) != NULL) {
         J3DTexMtxInfo* mtxInfo = &material->getTexGenBlock()->getTexMtx(0)->getTexMtxInfo();
         if (mtxInfo != NULL) {
             Mtx afStack_50;
-            C_MTXLightPerspective(afStack_50, dComIfGd_getView()->fovy, dComIfGd_getView()->aspect,
+            // ROOT-CAUSED this session (VR water rendering solid black):
+            // see dComIfGd_getReflectionFovAspect()'s comment.
+            f32 waterFovy, waterAspect;
+            dComIfGd_getReflectionFovAspect(&waterFovy, &waterAspect);
+            C_MTXLightPerspective(afStack_50, waterFovy, waterAspect,
                                   1.0f, 1.0f, -0.01f, 0.0f);
             #if WIDESCREEN_SUPPORT
             mDoGph_gInf_c::setWideZoomLightProjection(afStack_50);
             #endif
             mtxInfo->setEffectMtx(afStack_50);
             modelData2->simpleCalcMaterial(0, (MtxP)j3dDefaultMtx);
+#ifdef TARGET_PC
+            {
+                static bool loggedVR2 = false;
+                static bool loggedFlat2 = false;
+                bool inVR = dusk::vr::isRenderingToHeadset();
+                bool* flag = inVR ? &loggedVR2 : &loggedFlat2;
+                if (!*flag) {
+                    *flag = true;
+                    char msg[300];
+                    _snprintf_s(msg, _TRUNCATE,
+                                "[dusk::grdwater] VR=%d fovy=%.2f aspect=%.3f effectMtx row0=(%.4f,%.4f,%.4f,%.4f) "
+                                "row1=(%.4f,%.4f,%.4f,%.4f) row2=(%.4f,%.4f,%.4f,%.4f)\n",
+                                inVR ? 1 : 0, waterFovy, waterAspect,
+                                afStack_50[0][0], afStack_50[0][1], afStack_50[0][2], afStack_50[0][3],
+                                afStack_50[1][0], afStack_50[1][1], afStack_50[1][2], afStack_50[1][3],
+                                afStack_50[2][0], afStack_50[2][1], afStack_50[2][2], afStack_50[2][3]);
+                    OutputDebugStringA(msg);
+                }
+            }
+#endif
         }
     }
     mDoExt_modelUpdateDL(mModel2);

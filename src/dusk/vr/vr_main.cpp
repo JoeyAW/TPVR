@@ -30,6 +30,20 @@
 #include "dusk/vr/vr_xr_submit.hpp"             // dusk::vr::Session
 #include "dusk/vr/vr_main.hpp"
 
+// TEMP DIAGNOSTIC (VR black-screen-after-save investigation): plain,
+// unmangled, non-namespaced global mirroring g_renderedToHeadsetThisFrame
+// below, purely so it can be used as a Visual Studio conditional-breakpoint
+// expression from OTHER translation units (extern/aurora's GXFrameBuffer.cpp)
+// without fighting anonymous-namespace name mangling in the debugger's
+// expression evaluator.
+extern "C" bool g_duskVRRenderingToHeadset = false;
+// TEMP DIAGNOSTIC (VR water-black investigation): which eye (0=left,
+// 1=right) is currently being drawn, set right before beginEye() each
+// iteration of the per-eye loop below. Same extern "C" pattern as
+// g_duskVRRenderingToHeadset, for the same reason (usable from
+// extern/aurora's gx.cpp without namespace/mangling issues).
+extern "C" uint32_t g_duskVRCurrentEyeIndex = 0;
+
 namespace dusk::vr {
 
 namespace {
@@ -198,6 +212,10 @@ bool isRenderingToHeadset() {
     return g_renderedToHeadsetThisFrame;
 }
 
+void getEyeSymmetricFov(float* fovyDeg, float* aspect) {
+    vr_render::getEyeSymmetricFov(fovyDeg, aspect);
+}
+
 // Call once at startup, after an aurora::gfx device exists (per the
 // existing TODO in initSession() -- same timing requirement applies here).
 // Returns false on any XR/D3D12 setup failure; caller should proceed
@@ -342,6 +360,7 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     // gameplay view) means no stereo draw happened this frame. Only the
     // per-eye loop further down flips this true.
     g_renderedToHeadsetThisFrame = false;
+    g_duskVRRenderingToHeadset = false;
 
     if (!g_session) {
         logTickReasonOnChange("no-session");
@@ -466,6 +485,7 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     // above), so this frame really is drawing stereo eyes into the headset.
     logTickReasonOnChange("rendering-normally");
     g_renderedToHeadsetThisFrame = true;
+    g_duskVRRenderingToHeadset = true;
 
     const XrTime time = g_session->predictedDisplayTime();
     const XrSpace base = g_session->localSpace();
@@ -572,6 +592,7 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
         // there's no active gameplay view, so beginEye()'s own internal
         // dComIfGd_getView() (see vr_stereo_render.hpp) is guaranteed
         // non-null at this point.
+        g_duskVRCurrentEyeIndex = eye;
         vr_render::beginEye(eyeParams);
 
         fpcM_DrawIterater((fpcM_DrawIteraterFunc)fpcM_Draw);

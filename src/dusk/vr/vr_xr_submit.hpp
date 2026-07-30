@@ -70,6 +70,92 @@ inline int64_t toDxgiSwapchainFormat(wgpu::TextureFormat format) {
     }
 }
 
+// TEMP DIAGNOSTIC (VR water-black investigation): dumps an eye's actual
+// rendered color buffer (post game-rendering, pre-XR-submission) to a BMP
+// on disk, once per eyeIndex. Lets us distinguish "the game rendered water
+// wrong" (buffer already shows black/whatever the user sees) from "the game
+// rendered it correctly but something after this readback point -- XR
+// submission, compositor, swapchain format -- corrupts it before the
+// headset displays it" (buffer shows the correct/expected color). Only
+// handles the 8-bit-per-channel formats actually in use for the VR
+// swapchain; silently skips (with a log) for anything else rather than
+// guessing a wrong channel order.
+inline void dumpEyeBufferToBmp(const uint8_t* mapped, uint32_t width, uint32_t height,
+                                uint32_t bytesPerRow, wgpu::TextureFormat format, uint32_t eyeIndex) {
+    const bool isBgra = format == wgpu::TextureFormat::BGRA8Unorm ||
+                         format == wgpu::TextureFormat::BGRA8UnormSrgb;
+    const bool isRgba = format == wgpu::TextureFormat::RGBA8Unorm ||
+                         format == wgpu::TextureFormat::RGBA8UnormSrgb;
+    if (!isBgra && !isRgba) {
+        OutputDebugStringA("[dusk::vr] dumpEyeBufferToBmp: unsupported format, skipping dump\n");
+        return;
+    }
+
+    const uint32_t rowBytes = width * 4;
+    const uint32_t imageSize = rowBytes * height;
+    const uint32_t fileSize = 14 + 40 + imageSize;
+
+    std::vector<uint8_t> fileBuf(fileSize);
+    uint8_t* p = fileBuf.data();
+
+    p[0] = 'B';
+    p[1] = 'M';
+    *reinterpret_cast<uint32_t*>(p + 2) = fileSize;
+    *reinterpret_cast<uint32_t*>(p + 6) = 0;
+    *reinterpret_cast<uint32_t*>(p + 10) = 54;
+
+    uint8_t* h = p + 14;
+    *reinterpret_cast<int32_t*>(h + 0) = 40;
+    *reinterpret_cast<int32_t*>(h + 4) = static_cast<int32_t>(width);
+    *reinterpret_cast<int32_t*>(h + 8) = -static_cast<int32_t>(height); // negative = top-down rows
+    *reinterpret_cast<int16_t*>(h + 12) = 1;
+    *reinterpret_cast<int16_t*>(h + 14) = 32;
+    *reinterpret_cast<int32_t*>(h + 16) = 0;
+    *reinterpret_cast<int32_t*>(h + 20) = static_cast<int32_t>(imageSize);
+    *reinterpret_cast<int32_t*>(h + 24) = 0;
+    *reinterpret_cast<int32_t*>(h + 28) = 0;
+    *reinterpret_cast<int32_t*>(h + 32) = 0;
+    *reinterpret_cast<int32_t*>(h + 36) = 0;
+
+    uint8_t* pixels = p + 54;
+    for (uint32_t y = 0; y < height; ++y) {
+        const uint8_t* srcRow = mapped + static_cast<size_t>(y) * bytesPerRow;
+        uint8_t* dstRow = pixels + static_cast<size_t>(y) * rowBytes;
+        for (uint32_t x = 0; x < width; ++x) {
+            uint8_t r, g, b, a;
+            if (isBgra) {
+                b = srcRow[x * 4 + 0];
+                g = srcRow[x * 4 + 1];
+                r = srcRow[x * 4 + 2];
+                a = srcRow[x * 4 + 3];
+            } else {
+                r = srcRow[x * 4 + 0];
+                g = srcRow[x * 4 + 1];
+                b = srcRow[x * 4 + 2];
+                a = srcRow[x * 4 + 3];
+            }
+            dstRow[x * 4 + 0] = b;
+            dstRow[x * 4 + 1] = g;
+            dstRow[x * 4 + 2] = r;
+            dstRow[x * 4 + 3] = a;
+        }
+    }
+
+    char path[260];
+    _snprintf_s(path, _TRUNCATE, "C:\\Users\\joeyw\\dusklight\\vr_debug_eye%u.bmp", eyeIndex);
+    FILE* f = nullptr;
+    if (fopen_s(&f, path, "wb") == 0 && f) {
+        fwrite(fileBuf.data(), 1, fileBuf.size(), f);
+        fclose(f);
+        char msg[300];
+        _snprintf_s(msg, _TRUNCATE, "[dusk::vr] dumped eye %u buffer (%ux%u) to %s\n", eyeIndex, width,
+                    height, path);
+        OutputDebugStringA(msg);
+    } else {
+        OutputDebugStringA("[dusk::vr] dumpEyeBufferToBmp: failed to open output file\n");
+    }
+}
+
 class Session {
 public:
     // xrDevice/xrQueue are the XR-side ID3D12Device/ID3D12CommandQueue
@@ -424,6 +510,20 @@ public:
 
         const uint8_t* mapped = static_cast<const uint8_t*>(
             res.readback.GetConstMappedRange(0, static_cast<size_t>(res.bytesPerRow) * eyeHeight));
+
+        // TEMP DIAGNOSTIC (VR water-black investigation): periodically
+        // re-dump each eye's actual rendered buffer (overwriting the same
+        // file), rather than once at VR startup -- a one-shot dump would
+        // almost certainly fire before the user has navigated to water.
+        // Instead the file on disk always reflects a recent frame; look at
+        // water for a couple seconds in the headset, then read whatever's
+        // currently there. See dumpEyeBufferToBmp()'s comment above.
+        {
+            static uint32_t frameCounter[2] = {0, 0};
+            if (eyeIndex < 2 && (frameCounter[eyeIndex]++ % 90) == 0) {
+                dumpEyeBufferToBmp(mapped, eyeWidth, eyeHeight, res.bytesPerRow, format, eyeIndex);
+            }
+        }
 
         // --- Copy row-by-row into the D3D12 upload heap. ---
         // Two independent row-pitch alignments (Dawn's and D3D12's are both

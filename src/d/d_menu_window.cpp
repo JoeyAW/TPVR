@@ -28,6 +28,7 @@
 
 #ifdef TARGET_PC
 #include "dusk/frame_interpolation.h"
+#include "dusk/vr/vr_main.hpp"
 #endif
 
 class dDlst_MENU_CAPTURE_c : public dDlst_base_c {
@@ -36,14 +37,37 @@ public:
         if (getDrawFlag() == 1) {
             setDrawFlag();
             dComIfGp_onPauseFlag();
-            GXSetTexCopySrc(0, 0, FB_WIDTH, FB_HEIGHT);
-#if TARGET_PC
-            GXSetTexCopyDst(FB_WIDTH, FB_HEIGHT, (GXTexFmt)mDoGph_gInf_c::getFrameBufferTimg()->format, GX_DISABLE);
-#else
-            GXSetTexCopyDst(FB_WIDTH / 2, FB_HEIGHT / 2, (GXTexFmt)mDoGph_gInf_c::getFrameBufferTimg()->format, GX_ENABLE);
+            // CORRECTED this session: an earlier version of this fix
+            // skipped this whole draw() call while VR was rendering, to
+            // avoid the live-capture GXCopyTex clobbering VR's offscreen eye
+            // pass (see resolve_pass_checked() in common.cpp). That was too
+            // broad -- the game apparently doesn't redraw the live 3D world
+            // while paused for dialogue, it just shows this captured/frozen
+            // backdrop instead, so skipping the WHOLE thing left the VR eye
+            // with nothing drawn into it at all (a black frame), even after
+            // the pass-corruption itself got fixed elsewhere. Now only the
+            // live capture (GXCopyTex) is skipped during VR; mTexObj is
+            // still initialized below regardless -- GXInitTexObj just
+            // describes an existing persistent GPU texture, it doesn't
+            // touch the framebuffer, so it's safe to always run, and the
+            // backdrop draw (the `else` branch, a plain textured quad, no
+            // framebuffer copy) can then always run too, using whatever
+            // pixel data is there (fresh outside VR, stale/from a prior
+            // non-VR capture while VR is rendering) rather than nothing.
+            bool skipCapture = false;
+#ifdef TARGET_PC
+            skipCapture = dusk::vr::isRenderingToHeadset();
 #endif
-            GXCopyTex(mDoGph_gInf_c::getFrameBufferTex(), GX_FALSE);
-            GXPixModeSync();
+            if (!skipCapture) {
+                GXSetTexCopySrc(0, 0, FB_WIDTH, FB_HEIGHT);
+#if TARGET_PC
+                GXSetTexCopyDst(FB_WIDTH, FB_HEIGHT, (GXTexFmt)mDoGph_gInf_c::getFrameBufferTimg()->format, GX_DISABLE);
+#else
+                GXSetTexCopyDst(FB_WIDTH / 2, FB_HEIGHT / 2, (GXTexFmt)mDoGph_gInf_c::getFrameBufferTimg()->format, GX_ENABLE);
+#endif
+                GXCopyTex(mDoGph_gInf_c::getFrameBufferTex(), GX_FALSE);
+                GXPixModeSync();
+            }
 #if TARGET_PC
             // init mTexObj at capture time so the gpu ref survives window resizes
             mCaptureWidth = JUTVideo::getManager()->getRenderWidth();
@@ -53,6 +77,7 @@ public:
             GXInitTexObjLOD(&mTexObj, GX_LINEAR, GX_LINEAR, 0.0f, 0.0f, 0.0f, GX_FALSE, GX_FALSE, GX_ANISO_1);
 #endif
         } else {
+            bool useSolidColorOverlay = false;
 #if TARGET_PC
             // If the window was resized since capture, force a re-capture at the new size
             if (mCaptureWidth != JUTVideo::getManager()->getRenderWidth() ||
@@ -60,7 +85,25 @@ public:
                 mFlag = 1;
                 return;
             }
-            GXLoadTexObj(&mTexObj, GX_TEXMAP0);
+            // CORRECTED this session (VR dialogue/pause backdrop
+            // investigation): this overlay's color comes entirely from the
+            // captured screenshot texture (GX_CC_TEXC below); while VR is
+            // rendering we skip the live capture (GXCopyTex clobbers VR's
+            // offscreen eye pass -- see resolve_pass_checked() in
+            // common.cpp), so that texture never holds valid pixel data in
+            // a VR-only session. Confirmed the live 3D world WAS still being
+            // drawn underneath (flatscreen keeps animating during this same
+            // dialogue) -- the reported "black screen" was actually this
+            // overlay blending garbage/uninitialized texture content over
+            // the real scene at whatever this dialogue's darken alpha is,
+            // visually swamping it. Fix: for VR, pull the overlay's color
+            // from the TEV constant register (already set to plain black
+            // below) instead of the texture -- same darkening effect, zero
+            // dependency on the capture.
+            useSolidColorOverlay = dusk::vr::isRenderingToHeadset();
+            if (!useSolidColorOverlay) {
+                GXLoadTexObj(&mTexObj, GX_TEXMAP0);
+            }
 #else
             TGXTexObj tex;
             GXInitTexObj(&tex, mDoGph_gInf_c::getFrameBufferTex(), FB_WIDTH / 2, FB_HEIGHT / 2,
@@ -73,7 +116,8 @@ public:
             GXSetTexCoordGen2(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, 60, GX_FALSE, 125);
             GXSetNumTevStages(1);
             GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR_NULL);
-            GXSetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_TEXC);
+            GXSetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO,
+                             useSolidColorOverlay ? GX_CC_C0 : GX_CC_TEXC);
             GXSetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
             const GXColor color = {0, 0, 0, mAlpha};
             GXSetTevColor(GX_TEVREG0, color);

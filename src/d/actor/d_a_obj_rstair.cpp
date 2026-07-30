@@ -313,8 +313,11 @@ int daObjRotStair_c::Draw() {
             J3DTexMtxInfo* texMtxInfo = &material->getTexGenBlock()->getTexMtx(0)->getTexMtxInfo();
             if (texMtxInfo != NULL) {
                 Mtx lightMtx;
-                C_MTXLightPerspective(lightMtx, dComIfGd_getView()->fovy,
-                                      dComIfGd_getView()->aspect, 1.0f, 1.0f, -0.01f, 0);
+                // ROOT-CAUSED this session (VR water rendering solid black):
+                // see dComIfGd_getReflectionFovAspect()'s comment.
+                f32 waterFovy, waterAspect;
+                dComIfGd_getReflectionFovAspect(&waterFovy, &waterAspect);
+                C_MTXLightPerspective(lightMtx, waterFovy, waterAspect, 1.0f, 1.0f, -0.01f, 0);
                 #if WIDESCREEN_SUPPORT
                 mDoGph_gInf_c::setWideZoomLightProjection(lightMtx);
                 #endif

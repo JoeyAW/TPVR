@@ -9,6 +9,11 @@
 
 #include "d/d_particle.h"
 #include <cstdio>
+#ifdef TARGET_PC
+#include <set>
+#include <windows.h>
+extern "C" bool g_duskVRRenderingToHeadset;
+#endif
 #include "JSystem/J3DGraphAnimator/J3DMaterialAnm.h"
 #include "JSystem/J3DGraphBase/J3DMaterial.h"
 #include "JSystem/JKernel/JKRExpHeap.h"
@@ -1668,6 +1673,25 @@ bool dPa_control_c::newSimple(u16 param_0, u8 param_1, u32* param_2) {
 u32 dPa_control_c::setSimple(u16 param_0, cXyz const* i_pos, dKy_tevstr_c const* param_2,
                                   u8 param_3, GXColor const& param_4, GXColor const& param_5,
                                   int param_6, f32 param_7) {
+    // TEMP DIAGNOSTIC (VR "heat wave" investigation): log every DISTINCT
+    // particle ID/name spawned while actually rendering to the headset,
+    // once each, so a single test run gives the full list to cross-
+    // reference against what's on screen when the blob appears. Three
+    // guesses (shared IndScreen distortion pass, sun sprite, torch kagerou
+    // heat-shimmer) have already been ruled out by the user still seeing it
+    // after each was disabled -- this replaces further guessing with
+    // direct evidence.
+#ifdef TARGET_PC
+    if (g_duskVRRenderingToHeadset) {
+        static std::set<u16> loggedIds;
+        if (loggedIds.insert(param_0).second) {
+            char msg[192];
+            _snprintf_s(msg, _TRUNCATE, "[dusk::particle] setSimple id=0x%04x name=%s\n",
+                        param_0, dPa_name::getName(param_0));
+            OutputDebugStringA(msg);
+        }
+    }
+#endif
     dPa_simpleEcallBack* cb = getSimple(param_0);
     if (cb == NULL) {
         JUT_WARN(3443, "One Emitter Error !! <%s>\n", dPa_name::getName(param_0));

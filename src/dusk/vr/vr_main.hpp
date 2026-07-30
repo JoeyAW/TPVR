@@ -35,6 +35,18 @@ bool isActive();
 // just 3D gameplay.
 bool isRenderingToHeadset();
 
+// Only meaningful while isRenderingToHeadset() is true (returns the last
+// computed values otherwise, harmlessly stale). The smallest symmetric
+// fovy/aspect frustum that fully contains the current eye's real asymmetric
+// VR FOV -- the same values the actor-culling frustum (mDoLib_clipper) uses.
+// For call sites that build their own fovy/aspect-based projection matrix
+// (e.g. daGrdWater_c::Draw()'s reflection env-map matrix) and need a VR-
+// correct substitute for view->fovy/view->aspect WITHOUT those shared
+// view_class fields themselves being changed for VR -- see
+// vr_stereo_render.hpp's getEyeSymmetricFov() comment for why those fields
+// are deliberately left alone.
+void getEyeSymmetricFov(float* fovyDeg, float* aspect);
+
 // Runs the first half of one VR frame: xrWaitFrame/xrBeginFrame, per-eye
 // render (including the fpcM_DrawIterater/cAPIGph_Painter draw call), and
 // encodes (but does not yet submit) the eye-texture copy for each eye.

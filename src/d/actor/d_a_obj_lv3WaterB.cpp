@@ -27,8 +27,11 @@ static int daObj_Lv3waterB_Draw(obj_lv3WaterB_class* i_this) {
         J3DTexMtxInfo* tex_mtx_info = &material_p->getTexGenBlock()->getTexMtx(0)->getTexMtxInfo();
         if (tex_mtx_info != NULL) {
             Mtx m;
-            C_MTXLightPerspective(m, dComIfGd_getView()->fovy, dComIfGd_getView()->aspect, 1.0f,
-                                  1.0f, -0.015f, 0.0f);
+            // ROOT-CAUSED this session (VR water rendering solid black):
+            // see dComIfGd_getReflectionFovAspect()'s comment.
+            f32 waterFovy, waterAspect;
+            dComIfGd_getReflectionFovAspect(&waterFovy, &waterAspect);
+            C_MTXLightPerspective(m, waterFovy, waterAspect, 1.0f, 1.0f, -0.015f, 0.0f);
             #if WIDESCREEN_SUPPORT
             mDoGph_gInf_c::setWideZoomLightProjection(m);
             #endif

@@ -4,6 +4,14 @@
  */
 
 #include <cstdio>
+#ifdef TARGET_PC
+#ifndef NOMINMAX
+#define NOMINMAX // avoid windows.h's min/max macros breaking std::numeric_limits<T>::max() below
+#endif
+#include <windows.h> // OutputDebugStringA (TEMP DIAGNOSTIC)
+#undef interface // windows.h #defines this to `struct` (COM interop) -- collides with
+                  // JAWExtSystem.h's use of `interface` as a plain parameter name below
+#endif
 
 #include "d/dolzel.h" // IWYU pragma: keep
 #include "dusk/vr/vr_main.hpp"
@@ -1978,7 +1986,20 @@ static void retry_captue_frame(view_class* param_0, view_port_class* param_1, in
         var_r23 = height >> 1;
         GXSetTexCopySrc(x_orig, y_orig_pos, width, height);
 #ifdef TARGET_PC
-        GXSetTexCopyDst(width, height, (GXTexFmt)mDoGph_gInf_c::getFrameBufferTimg()->format, GX_FALSE);
+        // FIXED this session (VR reflection-ghosting investigation): this
+        // used to pass the FULL width/height here, while the actual
+        // destination texture (mDoGph_gInf_c::getFrameBufferTex(), confirmed
+        // via RenderDoc to really be allocated at half size -- 304x224 for
+        // this game's FB_WIDTH_BASE/FB_HEIGHT_BASE) is HALF that -- the same
+        // mismatch the non-PC branch below already avoids by using
+        // var_r24/var_r23 (the half-size values computed above). Telling
+        // the copy system the destination was twice its real size produced
+        // exactly the kind of duplicated/misaligned content seen in VR
+        // (where the source capture rect and the real destination diverge
+        // enough for the mismatch to become visible) -- this likely worked
+        // "well enough" on flatscreen only because its render target size
+        // happens to be close to this capture's assumed source dimensions.
+        GXSetTexCopyDst(var_r24, var_r23, (GXTexFmt)mDoGph_gInf_c::getFrameBufferTimg()->format, GX_FALSE);
 #else
         GXSetTexCopyDst(var_r24, var_r23, (GXTexFmt)mDoGph_gInf_c::getFrameBufferTimg()->format, GX_TRUE);
 #endif
@@ -1987,6 +2008,144 @@ static void retry_captue_frame(view_class* param_0, view_port_class* param_1, in
         GXInvalidateTexAll();
     }
 }
+
+#if TARGET_PC
+// ADDED this session (VR reflection-ghosting investigation): the real
+// screen-capture-based reflection (retry_captue_frame() above) turned out
+// to be a fundamentally fragile technique in VR -- it assumes a camera that
+// moves the way a flatscreen third-person camera does (smoothly, roughly
+// level), and a freely-moving VR headset breaks that assumption in ways
+// that per-eye-ordering and destination-size fixes (see this session's
+// other changes to retry_captue_frame()) only partially addressed.
+//
+// FIRST ATTEMPT (reverted -- crashed): opening a NEW nested offscreen pass
+// here (GXCreateFrameBuffer) to draw an exact solid color, while already
+// inside VR's protected eye pass, hit a genuine second-level-of-nesting bug
+// -- the GXCopyTex capture inside that nested pass triggers
+// resolve_pass_into()'s ordinary pass-substitution, which begin_offscreen()/
+// end_offscreen()'s single-slot suspend/resume mechanism (comment: "Only one
+// level of nesting is tracked") doesn't account for, corrupting which pass
+// index gets resumed and crashing on the next SetViewport. NOT retried;
+// extending that suspend/resume logic for arbitrary nesting depth is a
+// bigger, riskier change than this fallback is worth.
+//
+// SECOND ATTEMPT (reverted -- didn't crash, but didn't work either): tried
+// capturing whatever the current scene already shows in a tiny 16x16-pixel
+// corner instead of drawing anything -- theory was that scaling something
+// that small up to 304x224 would look roughly uniform/blurred. In practice
+// the corner still contains real (if blocky) scene geometry/lighting, so it
+// still visibly changed color as the headset moved -- just at a coarser
+// granularity than the full-scene version. Not an improvement worth
+// keeping.
+//
+// THIRD ATTEMPT (superseded): a single constant solid color (via a TEV
+// KONST-register stage) fixed the crashing and the head-motion flashing,
+// but the user correctly pointed out it also erases the water's own
+// wind-driven UV distortion animation (see d_kankyo.cpp's reflection-matrix
+// code, dKyw_get_wind_vec()) -- sampling any (even wobbling/animated) UV
+// position of a perfectly UNIFORM color always returns that same color, so
+// there's nothing for the existing wave/shimmer distortion to reveal.
+//
+// CURRENT VERSION: same safe "draw directly into the current pass, small
+// corner, then capture" approach, but with a simple 2-color diagonal
+// gradient (via real per-vertex color, GX_SRC_VTX / GX_CC_RASC) instead of
+// one flat KONST color. Still completely stable (not tied to head
+// movement/scene content -- same immunity to every crop/scale/ghosting
+// issue chased this session), but now has actual spatial variation for
+// the pre-existing UV distortion to animate, giving a "waves" appearance
+// without needing the fragile real screen capture at all.
+static void captureGradientCornerReflection(view_class* view, view_port_class* realPort, int zoomFocus,
+                                             GXColor colorA, GXColor colorB) {
+    // realPort no longer used directly -- the capture below now uses the
+    // real destination texture's own dimensions instead of anything
+    // view_port-derived. Kept as a parameter for call-site symmetry with
+    // the other capture functions in this file.
+    UNUSED(realPort);
+    // Draw the gradient quad noticeably larger (in ortho-normalized 0..1
+    // screen space) than the pixel rect we're about to capture (16x16
+    // logical pixels), so the whole capture rect is guaranteed to land
+    // inside it.
+    GXSetChanCtrl(GX_COLOR0A0, GX_FALSE, GX_SRC_VTX, GX_SRC_VTX, GX_LIGHT_NULL, GX_DF_NONE, GX_AF_NONE);
+    GXSetNumChans(1);
+    GXSetNumTexGens(0);
+    GXSetNumTevStages(1);
+    GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD_NULL, GX_TEXMAP_NULL, GX_COLOR0A0);
+    GXSetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_RASC);
+    GXSetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+    GXSetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA);
+    GXSetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+    GXSetZCompLoc(1);
+    GXSetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
+    GXSetBlendMode(GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_CLEAR);
+    GXSetAlphaCompare(GX_ALWAYS, 0, GX_AOP_OR, GX_ALWAYS, 0);
+    GXSetFog(GX_FOG_NONE, 0.0f, 0.0f, 0.0f, 0.0f, g_clearColor);
+    GXSetCullMode(GX_CULL_NONE);
+    GXSetDither(GX_TRUE);
+
+    Mtx44 ortho;
+    C_MTXOrtho(ortho, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 10.0f);
+    GXLoadPosMtxImm(cMtx_getIdentity(), 0);
+    GXSetProjection(ortho, GX_ORTHOGRAPHIC);
+    GXSetCurrentMtx(0);
+    GXClearVtxDesc();
+    GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
+    GXSetVtxDesc(GX_VA_CLR0, GX_DIRECT);
+    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XY, GX_F32, 0);
+    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
+
+    // CHANGED: a single smooth 2-corner gradient (tried first) produced no
+    // visible difference -- it varies too gradually across space for the
+    // water's UV distortion's actual (small) per-frame shift to move
+    // anything a viewer would notice. Multiple alternating THIN stripes
+    // instead, so that same small UV shift visibly slides a stripe
+    // boundary rather than nudging a slow gradient by an imperceptible
+    // amount.
+    constexpr f32 kCornerFraction = 0.08f; // comfortably bigger than the ~2.6% capture rect below
+    constexpr int kStripeCount = 8;
+    constexpr f32 kStripeWidth = kCornerFraction / kStripeCount;
+    GXBegin(GX_QUADS, GX_VTXFMT0, kStripeCount * 4);
+    for (int i = 0; i < kStripeCount; ++i) {
+        const GXColor& c = (i % 2 == 0) ? colorA : colorB;
+        const f32 x0 = i * kStripeWidth;
+        const f32 x1 = x0 + kStripeWidth;
+        GXPosition2f32(x0, 0.0f);
+        GXColor4u8(c.r, c.g, c.b, c.a);
+        GXPosition2f32(x1, 0.0f);
+        GXColor4u8(c.r, c.g, c.b, c.a);
+        GXPosition2f32(x1, kCornerFraction);
+        GXColor4u8(c.r, c.g, c.b, c.a);
+        GXPosition2f32(x0, kCornerFraction);
+        GXColor4u8(c.r, c.g, c.b, c.a);
+    }
+    GXEnd();
+
+    GXSetProjection(view->projMtx, GX_PERSPECTIVE);
+
+    // FIXED (one more focused attempt, per user request): this used to call
+    // retry_captue_frame() with a fake tiny 16x16 view_port. That function
+    // computes its destination copy size as HALF of whatever source
+    // width/height it's given (var_r24 = width >> 1) -- correct for its
+    // normal 608x448 -> 304x224 use, but with a 16x16 fake source that told
+    // the copy system the destination was only 8x8, not the real 304x224
+    // texture. The tiny striped quad only ever filled an 8x8 corner of the
+    // real destination, leaving the rest at stale/default content -- which
+    // is almost certainly why the result looked like one washed-out patch
+    // instead of a visible repeating stripe pattern. Capture directly here
+    // instead, with the REAL destination texture's own dimensions (so the
+    // small striped quad gets scaled up to fill the WHOLE reflection
+    // texture, not just a sliver of it).
+    UNUSED(zoomFocus);
+    if (!dComIfGp_isPauseFlag()) {
+        const u16 dstW = (u16)mDoGph_gInf_c::getFrameBufferTimg()->width;
+        const u16 dstH = (u16)mDoGph_gInf_c::getFrameBufferTimg()->height;
+        GXSetTexCopySrc(0, 0, 16, 16);
+        GXSetTexCopyDst(dstW, dstH, (GXTexFmt)mDoGph_gInf_c::getFrameBufferTimg()->format, GX_FALSE);
+        GXCopyTex((void*)mDoGph_gInf_c::getFrameBufferTex(), GX_FALSE);
+        GXPixModeSync();
+        GXInvalidateTexAll();
+    }
+}
+#endif
 
 static void motionBlure(view_class* param_0) {
     ZoneScoped;
@@ -2401,7 +2560,24 @@ int mDoGph_Painter() {
             fapGm_HIO_c::startCpuTimer();
             #endif
 
-            GX_DEBUG_GROUP(dComIfGd_drawShadow, camera_p->view.viewMtx);
+            // User request this session: shadow stretching in VR
+            // (giant thin lines/static across the ground) resisted
+            // extensive investigation this session -- matrix math, float
+            // precision, frame-interpolation timing, shader
+            // texture-coordinate generation, and texture wrap mode were all
+            // checked and ruled out as the direct cause. Hiding entirely
+            // for now rather than leaving the distracting visual in place;
+            // revisit properly in a future session.
+            //
+            // CONFIRMED still stretched even after the double-precision
+            // fixes in setShadowRealMtx() (d_drawlist.cpp) and
+            // eyePoseToViewMtx() (vr_stereo_render.hpp) -- those were not
+            // the (or not the only) root cause. Re-disabled after a
+            // mistaken re-enable; do not re-enable again without new
+            // diagnostic evidence.
+            if (!dusk::vr::isRenderingToHeadset()) {
+                GX_DEBUG_GROUP(dComIfGd_drawShadow, camera_p->view.viewMtx);
+            }
 
 #if TARGET_PC
             dusk::mods::gfx_run_stage(GFX_STAGE_SCENE_AFTER_TERRAIN, &camera_p->view, view_port);
@@ -2528,6 +2704,36 @@ int mDoGph_Painter() {
                 fapGm_HIO_c::startCpuTimer();
                 #endif
 
+#if TARGET_PC
+                // SUPERSEDED this session (VR reflection-ghosting
+                // investigation, round 4): the real screen-capture-based
+                // reflection turned out to be a fundamentally fragile
+                // technique in VR (rounds 1-2). A single flat KONST color
+                // (round 3) fixed the crashing/flashing but erased the
+                // water's own wind-driven UV distortion animation entirely
+                // -- a perfectly uniform texture has nothing for that
+                // distortion to reveal, so it looked like a dead flat
+                // square with no "waves". This round uses a real per-vertex
+                // 2-color gradient instead (GX_SRC_VTX/GX_CC_RASC) -- see
+                // captureGradientCornerReflection()'s comment above -- so
+                // the existing distortion has spatial variation to animate,
+                // while staying just as immune to every crop/scale/ghosting
+                // issue chased earlier (still not tied to head movement or
+                // real scene content at all). Also confirmed this session:
+                // lowering this color's alpha had ZERO visible effect on
+                // transparency, meaning this material's blend doesn't
+                // simply read texture alpha the way assumed -- transparency
+                // is a separate, harder problem not solved by anything
+                // here; tune the two colors themselves to taste.
+                if (dusk::vr::isRenderingToHeadset()) {
+                    static const GXColor kWaterColorA = {120, 175, 200, 255};
+                    static const GXColor kWaterColorB = {170, 210, 225, 255};
+                    captureGradientCornerReflection(&camera_p->view, view_port,
+                                                     dComIfGp_getCameraZoomForcus(camera_id), kWaterColorA,
+                                                     kWaterColorB);
+                }
+#endif
+
                 if (!(DEBUG && g_kankyoHIO.navy.field_0x30d != 0 &&
                       dKy_darkworld_check() == TRUE)) {
                     if (g_env_light.is_blure == 0) {
@@ -2601,7 +2807,42 @@ int mDoGph_Painter() {
                 fapGm_HIO_c::startCpuTimer();
                 #endif
 
-                retry_captue_frame(&camera_p->view, view_port, dComIfGp_getCameraZoomForcus(camera_id));
+                // RE-ENABLED this session (VR water-black investigation):
+                // this capture feeds mDoGph_gInf_c::getFrameBufferTex() --
+                // the SAME shared 304x224 (FB_WIDTH_BASE/2 x
+                // FB_HEIGHT_BASE/2) texture water's fake screen-space
+                // reflection samples from (confirmed via RenderDoc resource
+                // inspection + dimension match). Previously skipped in VR
+                // (see below) because retry_captue_frame() -> GXCopyTex ->
+                // resolve_pass_into() used to unconditionally corrupt VR's
+                // protected eye pass -- that root cause is now fixed in
+                // resolve_pass_into() itself (extern/aurora/lib/gfx/
+                // common.cpp), which lets protected-pass substitutions
+                // through safely (colorView carries forward; endEye()'s
+                // resolve_pass_checked() already tolerates the resulting id
+                // change). Leaving this skipped was the direct cause of
+                // water rendering solid black in VR: this was the ONLY
+                // thing that ever wrote real data into that shared texture.
+                //
+                // Original guard comment, for history: "ROOT-CAUSED this
+                // session ('black screen after loading a save'):
+                // unconditional, every-frame GXCopyTex -- same class of bug
+                // as the shadow/DOF/bloom stopgaps below (mid-scene
+                // framebuffer copy clobbers VR's offscreen eye pass),
+                // confirmed via a debugger breakpoint on GXCopyTex
+                // conditioned on g_duskVRRenderingToHeadset landing right
+                // here."
+                // RE-GUARDED this session (VR reflection-ghosting
+                // investigation): VR now gets its own gradient corner
+                // placeholder capture earlier in this function (see
+                // captureGradientCornerReflection()) instead of this
+                // real-scene capture -- skip this one in VR so it doesn't
+                // immediately overwrite that placeholder with the same
+                // broken content this whole investigation was chasing.
+                // Flatscreen unaffected, runs exactly as before.
+                if (!dusk::vr::isRenderingToHeadset()) {
+                    retry_captue_frame(&camera_p->view, view_port, dComIfGp_getCameraZoomForcus(camera_id));
+                }
 
                 #if DEBUG
                 // "Frame Buffer capture 2nd time (Rendering)"
@@ -2633,9 +2874,23 @@ int mDoGph_Painter() {
 
                 GXSetClipMode(GX_CLIP_ENABLE);
 
-                GX_DEBUG_GROUP(dComIfGd_drawIndScreen);
+                // User request this session: heat-wave/odour distortion
+                // (part of the shared indirect-texture screen pass, along
+                // with sun lens flares and cloud shadows -- see
+                // d_kankyo_wether.cpp's dKyw_setDrawPacketListIndScreen())
+                // looks broken in VR (renders as a solid gray/black blurred
+                // blob instead of a subtle shimmer -- likely the same class
+                // of "depends on a captured texture we now skip during VR"
+                // issue as water) and isn't wanted in VR regardless. This
+                // disables the whole shared pass rather than isolating just
+                // the heat/odour component -- also loses sun lens flares
+                // and cloud shadows in VR, an accepted tradeoff.
+                if (!dusk::vr::isRenderingToHeadset()) {
+                    GX_DEBUG_GROUP(dComIfGd_drawIndScreen);
+                }
 
-                if (strcmp(dComIfGp_getStartStageName(), "F_SP124") == 0) {
+                if (strcmp(dComIfGp_getStartStageName(), "F_SP124") == 0 &&
+                    !dusk::vr::isRenderingToHeadset()) {
                     retry_captue_frame(&camera_p->view, view_port,
                                        dComIfGp_getCameraZoomForcus(camera_id));
                 }
@@ -2675,7 +2930,7 @@ int mDoGph_Painter() {
                 {
                     u8 enable = mDoGph_gInf_c::getBloom()->getEnable();
                     GXColor color = *mDoGph_gInf_c::getBloom()->getMonoColor();
-                    if (color.a != 0 || enable) {
+                    if ((color.a != 0 || enable) && !dusk::vr::isRenderingToHeadset()) {
                         retry_captue_frame(&camera_p->view, view_port,
                                            dComIfGp_getCameraZoomForcus(camera_id));
                     }
@@ -2707,8 +2962,10 @@ int mDoGph_Painter() {
                 if (g_kankyoHIO.navy.field_0x30d != 0 && dKy_darkworld_check() == TRUE) {
                     dComIfGd_drawOpaListDark();
                     dComIfGd_drawXluListDark();
-                    retry_captue_frame(&camera_p->view, view_port,
-                                       dComIfGp_getCameraZoomForcus(camera_id));
+                    if (!dusk::vr::isRenderingToHeadset()) {
+                        retry_captue_frame(&camera_p->view, view_port,
+                                           dComIfGp_getCameraZoomForcus(camera_id));
+                    }
                     dComIfGd_drawOpaListInvisible();
                     dComIfGd_drawXluListInvisible();
                     dComIfGd_drawOpaListFilter();

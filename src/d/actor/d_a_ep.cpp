@@ -10,6 +10,9 @@
 #include "d/d_com_inf_game.h"
 #include "d/d_s_play.h"
 #include "m_Do/m_Do_lib.h"
+#ifdef TARGET_PC
+#include "dusk/vr/vr_main.hpp"
+#endif
 
 static void hahen_draw(ep_class* i_this) {
     fopAc_ac_c* a_this = i_this;
@@ -509,6 +512,17 @@ static void ep_move(ep_class* i_this) {
                     }
                 }
 
+                // Testing this session: user reports a large blurred dark
+                // "heat wave" blob in VR near lit torches/fire (matches
+                // this kagerou heat-shimmer particle, spawned alongside the
+                // fire particles above). Two other candidates (the shared
+                // IndScreen distortion pass, the sun sprite) were already
+                // ruled out by the user still seeing it after both were
+                // disabled. Skip spawning this one specifically for VR;
+                // leave the actual fire particles (A/B above) untouched.
+#ifdef TARGET_PC
+                if (!dusk::vr::isRenderingToHeadset())
+#endif
                 dComIfGp_particle_setSimple(l_particle_kagerou[i_this->field_0x60c],
                     &sp1C, 0xff, g_whiteColor, g_whiteColor,
                     0, 0.0f);

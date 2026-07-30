@@ -7,6 +7,9 @@
 
 #include "d/actor/d_a_obj_onsenFire.h"
 #include "f_pc/f_pc_name.h"
+#ifdef TARGET_PC
+#include "dusk/vr/vr_main.hpp"
+#endif
 
 int daObjOnsenFire_c::create() {
     fopAcM_ct(this, daObjOnsenFire_c);
@@ -20,6 +23,13 @@ int daObjOnsenFire_c::create() {
 int daObjOnsenFire_c::execute() {
     dComIfGp_particle_setSimple(0x100,&current.pos,0xff,g_whiteColor,g_whiteColor,0,0.0f);
     dComIfGp_particle_setSimple(0x101,&current.pos,0xff,g_whiteColor,g_whiteColor,0,0.0f);
+    // Same 0x103 (ID_ZI_J_O_KAGEROU) heat-shimmer particle disabled for VR
+    // in d_a_ep.cpp's torch actor -- that disable only covers ep_class,
+    // not this actor, which spawns the identical particle ID directly.
+    // See CLAUDE.md section 3 / the VR heat-wave investigation.
+#ifdef TARGET_PC
+    if (!dusk::vr::isRenderingToHeadset())
+#endif
     dComIfGp_particle_setSimple(0x103,&current.pos,0xff,g_whiteColor,g_whiteColor,0,0.0f);
     Z2GetAudioMgr()->seStartLevel(Z2SE_OBJ_ONSEN_WARM_FIRE,&current.pos,0,0,1.0f,1.0f,-1.0f,-1.0f,0);
     return 1;

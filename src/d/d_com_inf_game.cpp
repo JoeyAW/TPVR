@@ -2996,16 +2996,30 @@ DUSK_GAME_DATA GXColor g_whiteColor = {255, 255, 255, 255};
 DUSK_GAME_DATA GXColor g_saftyWhiteColor = {160, 160, 160, 255};
 
 #if TARGET_PC
+// ADDED this session (VR water-reflection-quality investigation, 2026-07-29):
+// water's own reflective-surface material (MA02/MA10, registered into this
+// same Invisible list by dKy_bg_MAxx_proc) draws on top of an otherwise
+// correctly-rendered water base layer, opaquely, with whatever content the
+// screen-capture-as-reflection placeholder currently holds -- confirmed via
+// RenderDoc that skipping this draw entirely (via the existing, previously
+// player-facing-only "Disable Water Refraction" ImGui toggle) leaves the
+// clean underlying water/lakebed visible instead. Baking that in
+// permanently for VR, rather than requiring the manual toggle every
+// session -- see g_duskVRRenderingToHeadset's other call sites (e.g.
+// d_drawlist.cpp's shadow guard) for the same extern-bool pattern used to
+// avoid pulling VR headers into this file.
+extern "C" bool g_duskVRRenderingToHeadset;
+
 void dComIfGd_drawXluListInvisible() {
     ZoneScoped;
-    if (!dusk::getSettings().game.disableWaterRefraction) {
+    if (!dusk::getSettings().game.disableWaterRefraction && !g_duskVRRenderingToHeadset) {
         g_dComIfG_gameInfo.drawlist.drawXluListInvisible();
     }
 }
 
 void dComIfGd_drawOpaListInvisible() {
     ZoneScoped;
-    if (!dusk::getSettings().game.disableWaterRefraction) {
+    if (!dusk::getSettings().game.disableWaterRefraction && !g_duskVRRenderingToHeadset) {
         g_dComIfG_gameInfo.drawlist.drawOpaListInvisible();
     }
 }

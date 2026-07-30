@@ -13,6 +13,7 @@
 #include <set>
 #include <windows.h>
 extern "C" bool g_duskVRRenderingToHeadset;
+extern "C" bool g_duskVRSessionActive;
 #endif
 #include "JSystem/J3DGraphAnimator/J3DMaterialAnm.h"
 #include "JSystem/J3DGraphBase/J3DMaterial.h"
@@ -1478,6 +1479,34 @@ JPABaseEmitter* dPa_control_c::set(u8 param_0, u16 param_1, cXyz const* i_pos,
                                    cXyz const* i_scale, u8 i_alpha, dPa_levelEcallBack* param_7,
                                    s8 param_8, GXColor const* param_9, GXColor const* param_10,
                                    cXyz const* param_11, f32 param_12) {
+    // TEMP DIAGNOSTIC (VR "heat wave" investigation, continued): this is
+    // the actual choke point for setColor()/setNormal()/setPoly() (all
+    // funnel through here) -- the earlier setSimple()-only logging above
+    // never saw anything spawned through this path, which is most gameplay
+    // effects. Same once-per-id/session-scoped-flag approach as above.
+#ifdef TARGET_PC
+    if (g_duskVRSessionActive) {
+        static std::set<u16> loggedIds;
+        if (loggedIds.insert(param_1).second) {
+            // dPa_name::getName() has a real bounds-check/index mismatch
+            // bug (pre-existing, not VR-related): it range-checks the
+            // MASKED id (i_id & 0xFFFF1FFF < ID_PARTICLE_MAX) but then
+            // indexes jpaName[] with the RAW id -- so a scene/group-flagged
+            // id (high bits set, low bits small) passes the check but reads
+            // jpaName[] far out of bounds, returning garbage instead of
+            // NULL. Confirmed via a real crash here (daBubbPilar_c spawning
+            // exactly such an id) -- a plain NULL-check isn't sufficient.
+            // Only call getName() when param_1 itself (unmasked) is a safe,
+            // in-bounds array index; otherwise skip the name lookup.
+            const char* name =
+                (param_1 < ID_PARTICLE_MAX) ? dPa_name::getName(param_1) : NULL;
+            char msg[192];
+            _snprintf_s(msg, _TRUNCATE, "[dusk::particle] set id=0x%04x name=%s\n",
+                        param_1, name != NULL ? name : "(unnamed/scene-id)");
+            OutputDebugStringA(msg);
+        }
+    }
+#endif
     u8 local_e0 = getRM_ID(param_1);
     JPAResourceManager* local_a8 = mEmitterMng->getResourceManager(local_e0);
     if (local_a8 == NULL) {
@@ -1674,20 +1703,29 @@ u32 dPa_control_c::setSimple(u16 param_0, cXyz const* i_pos, dKy_tevstr_c const*
                                   u8 param_3, GXColor const& param_4, GXColor const& param_5,
                                   int param_6, f32 param_7) {
     // TEMP DIAGNOSTIC (VR "heat wave" investigation): log every DISTINCT
-    // particle ID/name spawned while actually rendering to the headset,
-    // once each, so a single test run gives the full list to cross-
-    // reference against what's on screen when the blob appears. Three
-    // guesses (shared IndScreen distortion pass, sun sprite, torch kagerou
-    // heat-shimmer) have already been ruled out by the user still seeing it
-    // after each was disabled -- this replaces further guessing with
-    // direct evidence.
+    // particle ID/name spawned during a VR session, once each, so a single
+    // test run gives the full list to cross-reference against what's on
+    // screen when the blob appears. Three guesses (shared IndScreen
+    // distortion pass, sun sprite, torch kagerou heat-shimmer) have already
+    // been ruled out by the user still seeing it after each was disabled --
+    // this replaces further guessing with direct evidence. Gated on
+    // g_duskVRSessionActive (whole-session flag), NOT
+    // g_duskVRRenderingToHeadset (only true inside tick()'s per-eye draw
+    // window) -- particle spawns happen during actor update, which runs
+    // outside that window, so gating on the narrow flag risked silently
+    // never firing regardless of what's actually spawning.
 #ifdef TARGET_PC
-    if (g_duskVRRenderingToHeadset) {
+    if (g_duskVRSessionActive) {
         static std::set<u16> loggedIds;
         if (loggedIds.insert(param_0).second) {
+            // See the bounds-check/index-mismatch note on the equivalent
+            // block in set() below -- getName() can read out of bounds for
+            // scene/group-flagged ids, not just return NULL.
+            const char* name =
+                (param_0 < ID_PARTICLE_MAX) ? dPa_name::getName(param_0) : NULL;
             char msg[192];
             _snprintf_s(msg, _TRUNCATE, "[dusk::particle] setSimple id=0x%04x name=%s\n",
-                        param_0, dPa_name::getName(param_0));
+                        param_0, name != NULL ? name : "(unnamed/scene-id)");
             OutputDebugStringA(msg);
         }
     }

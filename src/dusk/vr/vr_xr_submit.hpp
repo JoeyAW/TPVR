@@ -20,6 +20,7 @@
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include <wrl/client.h>
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -69,6 +70,196 @@ inline int64_t toDxgiSwapchainFormat(wgpu::TextureFormat format) {
                 "RGBA8Unorm (see VR_MOD_HANDOFF_7.md TODO list).");
     }
 }
+
+// Root cause of "works in Virtual Desktop, xrCreateSwapchain fails on
+// SteamVR" (confirmed 2026-07-30): different OpenXR runtimes support
+// different, non-overlapping sets of D3D12 swapchain formats -- Virtual
+// Desktop's runtime accepts DXGI_FORMAT_B8G8R8A8_UNORM (87, aurora's native
+// color format), SteamVR's compositor rejects it ("Unsupported format: 87")
+// entirely -- confirmed via logging its real xrEnumerateSwapchainFormats
+// list (29 91 2 10 24 40 55 45 20): SteamVR only offers the sRGB-encoded
+// 8bpc variants (91 = B8G8R8A8_UNORM_SRGB, 29 = R8G8B8A8_UNORM_SRGB), not
+// plain UNORM, alongside HDR float/10-bit/depth formats we can't use here.
+// Per the OpenXR spec, an app may only request a format returned by
+// xrEnumerateSwapchainFormats -- it must not assume its own native format
+// is accepted.
+//
+// Two independent axes a runtime might differ on, and what each requires
+// from the CPU-copy path below:
+//  - channel order (B8G8R8A8 vs R8G8B8A8) -- genuinely different byte
+//    layout, requires an actual R/B swap per pixel before upload.
+//  - sRGB-ness (UNORM vs UNORM_SRGB) -- a gamma-interpretation flag that
+//    only affects the raw CopyTextureRegion we do (no shader involved,
+//    so the bytes really do pass through unchanged) -- BUT SteamVR's own
+//    compositor later SAMPLES this swapchain image through its own shaders
+//    (lens/distortion correction, reprojection) using an SRV that respects
+//    the SRGB tag. That auto-decodes our already-gamma/display-encoded
+//    bytes as if they were meant to be linearized, and something later in
+//    its pipeline re-applies gamma on top -- net effect: gamma applied
+//    twice. **CONFIRMED WRONG by testing 2026-07-30**: using the SRGB
+//    variant (91/29) made SteamVR's output visibly oversaturated. Do not
+//    reuse this "byte-identical, should be fine" reasoning again -- prefer
+//    a format with NO sRGB semantics at all (see kPreferR10G10B10A2 below)
+//    over an SRGB variant, even though the SRGB variant is a smaller code
+//    change.
+// Returns 0 if `format` has no such counterpart (e.g. RGBA16Float, which
+// has neither) -- 0 signals "no fallback on this axis" to the caller
+// rather than silently guessing.
+inline int64_t channelSwapCounterpart(int64_t format) {
+    switch (format) {
+        case DXGI_FORMAT_B8G8R8A8_UNORM:
+            return DXGI_FORMAT_R8G8B8A8_UNORM;
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+            return DXGI_FORMAT_B8G8R8A8_UNORM;
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+            return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+            return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+        default:
+            return 0;
+    }
+}
+
+inline int64_t srgbToggleCounterpart(int64_t format) {
+    switch (format) {
+        case DXGI_FORMAT_B8G8R8A8_UNORM:
+            return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+            return DXGI_FORMAT_B8G8R8A8_UNORM;
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+            return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+            return DXGI_FORMAT_R8G8B8A8_UNORM;
+        default:
+            return 0;
+    }
+}
+
+// Preferred fallback over any SRGB variant (see the big comment above):
+// DXGI_FORMAT_R10G10B10A2_UNORM has no automatic gamma-decode/encode
+// semantics attached at all (unlike the *_SRGB formats), so there's no
+// double-gamma risk -- confirmed present in SteamVR's actual
+// xrEnumerateSwapchainFormats list (format 24) alongside the SRGB-only
+// 8bpc formats. Costs a real per-pixel repack (8-bit-per-channel source ->
+// 10-bit R/G/B + 2-bit A, bit-replicated rather than naively truncated so
+// e.g. 8-bit 255 maps to the true 10-bit max 1023, not 1020) instead of
+// a plain memcpy or channel swap, but avoids the color-space ambiguity
+// entirely. Bit layout per the DXGI spec (R in bits 0-9, G in 10-19, B in
+// 20-29, A in 30-31): confirmed against d3d/dxgiformat docs, not guessed.
+inline uint32_t packR10G10B10A2Unorm(uint8_t r8, uint8_t g8, uint8_t b8, uint8_t a8) {
+    auto to10 = [](uint8_t v8) -> uint32_t {
+        return (static_cast<uint32_t>(v8) << 2) | (static_cast<uint32_t>(v8) >> 6);
+    };
+    const uint32_t r10 = to10(r8);
+    const uint32_t g10 = to10(g8);
+    const uint32_t b10 = to10(b8);
+    const uint32_t a2 = static_cast<uint32_t>(a8) >> 6;
+    return r10 | (g10 << 10) | (b10 << 20) | (a2 << 30);
+}
+
+// What readbackEyeCopy() must do to the CPU-side bytes before uploading,
+// decided once by createSwapchain() based on which candidate format the
+// runtime actually supports.
+enum class SwapchainPixelConversion {
+    None,             // native format accepted as-is, plain memcpy
+    ChannelSwap,      // runtime wants the channel-swapped (still 8bpc, non-SRGB) counterpart
+    PackR10G10B10A2,  // runtime only offered SRGB 8bpc variants -- use the gamma-neutral 10bpc format instead
+};
+
+// EMPIRICAL gamma pre-compensation for the SRGB-swapchain-format case
+// (confirmed 2026-07-30: SteamVR only composites projection layers
+// successfully with an SRGB-tagged 8bpc format, and using one as-is makes
+// the in-headset image visibly oversaturated compared to VD/Meta Link,
+// which both accept our plain non-SRGB native format and show it
+// untouched). The exact transform SteamVR's closed-source compositor
+// applies to SRGB-tagged content isn't something we can inspect directly
+// -- this constant is a starting guess, tuned against the user's
+// in-headset visual comparison against VD/Meta Link's correct appearance:
+// 2.2 (darken) was tried first and looked worse ("evil", overcorrected too
+// dark); 1.0/2.2 (brighten) was confirmed to look normal. Adjust and
+// rebuild if this ever needs revisiting (e.g. a SteamVR update changes its
+// compositor's color handling) -- 1.0 disables compensation entirely.
+//
+// PERFORMANCE (confirmed 2026-07-30): originally applied via a per-pixel
+// CPU LUT lookup in readbackEyeCopy() -- this measurably halved SteamVR's
+// framerate (a scalar loop over ~9.7M texels/frame, on top of the
+// already-CPU-bound blocking readback path documented elsewhere in this
+// file). Moved to a GPU compute pass instead (see kGammaComputeShaderSource/
+// ensureGammaComputeResources() below) specifically to eliminate that cost
+// -- GPUs are built for exactly this kind of massively parallel per-pixel
+// work, and this way it runs as part of the existing render pipeline
+// rather than adding a new CPU stage. Only ever created/dispatched when
+// Session::swapchainIsSrgb_ is true, so VD/Meta Link (which never pick an
+// SRGB format) don't pay for any of this -- they keep the original plain
+// CopyTextureToBuffer path untouched.
+constexpr float kSteamVrGammaCompensationExponent = 1.0f / 2.2f;
+
+// Uniform buffer layout consumed by kGammaComputeShaderSource's `Params`
+// struct -- field order/sizes/padding must match exactly (WGSL host-shareable
+// uniform structs round up to 16-byte multiples; this is manually padded to
+// 32 bytes to match). swapRB selects output byte order: 0 = native channel
+// order (e.g. BGRA, matching SwapchainPixelConversion::None), 1 = swapped
+// (matching SwapchainPixelConversion::ChannelSwap) -- lets the same compute
+// pass handle gamma correction AND any channel reorder the chosen SRGB
+// candidate format also needed, in one GPU pass instead of two.
+struct GammaComputeParams {
+    uint32_t width;
+    uint32_t height;
+    uint32_t rowWords;    // res.bytesPerRow / 4 -- destination row stride in u32 texels
+    uint32_t swapRB;
+    float gammaExponent;
+    uint32_t _pad0 = 0;
+    uint32_t _pad1 = 0;
+    uint32_t _pad2 = 0;
+};
+static_assert(sizeof(GammaComputeParams) == 32,
+              "GammaComputeParams must match kGammaComputeShaderSource's Params uniform layout");
+
+// Reads the source eye texture directly (textureLoad -- no sampler, no
+// filtering, exact texel values) and writes gamma-corrected, correctly
+// byte-ordered pixels into a packed u32 storage buffer laid out exactly
+// like the CPU-readback buffer CopyTextureToBuffer would otherwise
+// produce (row stride = rowWords u32s, matching res.bytesPerRow). Alpha is
+// passed through unchanged -- only R/G/B get the compensation curve.
+inline constexpr const char* kGammaComputeShaderSource = R"WGSL(
+struct Params {
+    width: u32,
+    height: u32,
+    rowWords: u32,
+    swapRB: u32,
+    gammaExponent: f32,
+};
+
+@group(0) @binding(0) var srcTex: texture_2d<f32>;
+@group(0) @binding(1) var<storage, read_write> dst: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= params.width || gid.y >= params.height) {
+        return;
+    }
+
+    let texel = textureLoad(srcTex, vec2<i32>(i32(gid.x), i32(gid.y)), 0);
+    let r = pow(clamp(texel.r, 0.0, 1.0), params.gammaExponent);
+    let g = pow(clamp(texel.g, 0.0, 1.0), params.gammaExponent);
+    let b = pow(clamp(texel.b, 0.0, 1.0), params.gammaExponent);
+    let a = clamp(texel.a, 0.0, 1.0);
+
+    let r8 = u32(r * 255.0 + 0.5);
+    let g8 = u32(g * 255.0 + 0.5);
+    let b8 = u32(b * 255.0 + 0.5);
+    let a8 = u32(a * 255.0 + 0.5);
+
+    var packed: u32;
+    if (params.swapRB != 0u) {
+        packed = (a8 << 24u) | (b8 << 16u) | (g8 << 8u) | r8;
+    } else {
+        packed = (a8 << 24u) | (r8 << 16u) | (g8 << 8u) | b8;
+    }
+    dst[gid.y * params.rowWords + gid.x] = packed;
+}
+)WGSL";
 
 // TEMP DIAGNOSTIC (VR water-black investigation): dumps an eye's actual
 // rendered color buffer (post game-rendering, pre-XR-submission) to a BMP
@@ -190,10 +381,101 @@ public:
         return views;
     }
 
-    bool createSwapchain(uint32_t width, uint32_t height, int64_t format) {
+    std::vector<int64_t> enumerateSwapchainFormats() {
+        uint32_t count = 0;
+        xrEnumerateSwapchainFormats(session_, 0, &count, nullptr);
+        std::vector<int64_t> formats(count);
+        xrEnumerateSwapchainFormats(session_, count, &count, formats.data());
+        return formats;
+    }
+
+    // `nativeFormat` is aurora's actual render color format, converted to
+    // DXGI via toDxgiSwapchainFormat() -- what the CPU-readback path's
+    // staging buffer bytes are genuinely laid out as. Per the OpenXR spec
+    // we can only request a format the runtime actually returned from
+    // xrEnumerateSwapchainFormats -- but confirmed 2026-07-30 that this
+    // alone isn't sufficient either: SteamVR's xrEnumerateSwapchainFormats
+    // lists DXGI_FORMAT_R10G10B10A2_UNORM (24), xrCreateSwapchain with it
+    // succeeds, but actually submitting a projection layer with it fails at
+    // runtime with "ComposeLayerProjection: ... VRCompositorError_
+    // TextureUsesUnsupportedFormat" -- i.e. SteamVR over-advertises formats
+    // its projection-layer compositor path doesn't really accept, so R10G10B10A2
+    // is demoted to last resort here despite being gamma-neutral (see its
+    // own comment). Preference order:
+    //   (1) nativeFormat exactly -- no conversion needed.
+    //   (2) its channel-swapped counterpart -- real R/B swap, but still no
+    //       gamma semantics attached, safe.
+    //   (3) its sRGB-toggled counterpart -- what SteamVR actually needs
+    //       and successfully composites with (confirmed working
+    //       end-to-end 2026-07-30, format 91/B8G8R8A8_UNORM_SRGB); does
+    //       visibly oversaturate colors somewhat (still not fully
+    //       root-caused -- see project notes) but is the only option that
+    //       actually gets a frame in front of the user on this runtime.
+    //   (4) both channel-swapped AND sRGB-toggled.
+    //   (5) DXGI_FORMAT_R10G10B10A2_UNORM -- LAST RESORT: gamma-neutral in
+    //       theory, but confirmed to fail at actual frame submission on
+    //       SteamVR despite being enumerated as supported. Kept as a final
+    //       fallback in case some OTHER runtime advertises it AND actually
+    //       honors it, rather than removing it outright.
+    // Picks the first the runtime actually supports and records what
+    // readbackEyeCopy() needs to do to the pixel data for it. Fails loudly
+    // (returns false) rather than silently guessing a 6th format if none
+    // of these match.
+    bool createSwapchain(uint32_t width, uint32_t height, int64_t nativeFormat) {
+        const std::vector<int64_t> supported = enumerateSwapchainFormats();
+
+        const int64_t channelSwapped = channelSwapCounterpart(nativeFormat);
+        const int64_t srgbToggled = srgbToggleCounterpart(nativeFormat);
+        const int64_t bothSwapped = channelSwapped != 0 ? srgbToggleCounterpart(channelSwapped) : 0;
+
+        struct Candidate { int64_t format; SwapchainPixelConversion conversion; };
+        const Candidate candidates[] = {
+            {nativeFormat, SwapchainPixelConversion::None},
+            {channelSwapped, SwapchainPixelConversion::ChannelSwap},
+            {srgbToggled, SwapchainPixelConversion::None},
+            {bothSwapped, SwapchainPixelConversion::ChannelSwap},
+            {DXGI_FORMAT_R10G10B10A2_UNORM, SwapchainPixelConversion::PackR10G10B10A2},
+        };
+
+        int64_t chosenFormat = 0;
+        SwapchainPixelConversion conversion = SwapchainPixelConversion::None;
+        for (const Candidate& c : candidates) {
+            if (c.format != 0 && std::find(supported.begin(), supported.end(), c.format) != supported.end()) {
+                chosenFormat = c.format;
+                conversion = c.conversion;
+                break;
+            }
+        }
+
+        if (chosenFormat == 0) {
+            char msg[512];
+            int off = _snprintf_s(msg, _TRUNCATE,
+                                  "[dusk::vr] createSwapchain: none of native format %lld or its "
+                                  "sRGB/channel-swap/10bpc variants supported; runtime offers:",
+                                  static_cast<long long>(nativeFormat));
+            for (size_t i = 0; i < supported.size() && off > 0 && off < 480; ++i) {
+                int written = _snprintf_s(msg + off, sizeof(msg) - off, _TRUNCATE, " %lld",
+                                           static_cast<long long>(supported[i]));
+                if (written < 0) break;
+                off += written;
+            }
+            OutputDebugStringA(msg);
+            OutputDebugStringA("\n");
+            return false;
+        }
+        if (chosenFormat != nativeFormat) {
+            char msg[200];
+            _snprintf_s(msg, _TRUNCATE,
+                        "[dusk::vr] createSwapchain: native format %lld not supported by this "
+                        "runtime, using %lld instead (conversion=%d)\n",
+                        static_cast<long long>(nativeFormat), static_cast<long long>(chosenFormat),
+                        static_cast<int>(conversion));
+            OutputDebugStringA(msg);
+        }
+
         XrSwapchainCreateInfo ci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
         ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
-        ci.format = format;
+        ci.format = chosenFormat;
         ci.width = width;
         ci.height = height;
         ci.sampleCount = 1;
@@ -204,6 +486,11 @@ public:
         if (XR_FAILED(xrCreateSwapchain(session_, &ci, &swapchain_))) {
             return false;
         }
+
+        swapchainDxgiFormat_ = chosenFormat;
+        swapchainPixelConversion_ = conversion;
+        swapchainIsSrgb_ = chosenFormat == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB ||
+                           chosenFormat == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
 
         uint32_t imageCount = 0;
         xrEnumerateSwapchainImages(swapchain_, 0, &imageCount, nullptr);
@@ -534,9 +821,67 @@ public:
         void* uploadMapped = nullptr;
         D3D12_RANGE noRead{0, 0};
         res.uploadHeap->Map(0, &noRead, &uploadMapped);
-        for (uint32_t y = 0; y < eyeHeight; ++y) {
-            std::memcpy(static_cast<uint8_t*>(uploadMapped) + y * res.uploadRowPitch,
-                        mapped + y * res.bytesPerRow, rowBytes);
+        // swapchainPixelConversion_ (see createSwapchain()'s comment): what
+        // the runtime's actually-accepted format requires we do to the
+        // bytes before upload -- otherwise this would silently corrupt
+        // colors (channel swap) or fail validation (wrong format) in the
+        // headset. NOT consulted when swapchainIsSrgb_ is true: in that
+        // case encoderTaskCallback()'s GPU compute pass already applied
+        // gamma compensation AND any needed channel reorder before this
+        // buffer was populated (see kGammaComputeShaderSource's comment) --
+        // `mapped` here is already the final byte layout, so just memcpy.
+        const bool srcIsBgra = format == wgpu::TextureFormat::BGRA8Unorm ||
+                                format == wgpu::TextureFormat::BGRA8UnormSrgb;
+        if (swapchainIsSrgb_) {
+            for (uint32_t y = 0; y < eyeHeight; ++y) {
+                std::memcpy(static_cast<uint8_t*>(uploadMapped) + y * res.uploadRowPitch,
+                            mapped + y * res.bytesPerRow, rowBytes);
+            }
+        } else {
+            switch (swapchainPixelConversion_) {
+                case SwapchainPixelConversion::ChannelSwap:
+                    for (uint32_t y = 0; y < eyeHeight; ++y) {
+                        const uint8_t* srcRow = mapped + y * res.bytesPerRow;
+                        uint8_t* dstRow = static_cast<uint8_t*>(uploadMapped) + y * res.uploadRowPitch;
+                        for (uint32_t x = 0; x < eyeWidth; ++x) {
+                            dstRow[x * 4 + 0] = srcRow[x * 4 + 2];
+                            dstRow[x * 4 + 1] = srcRow[x * 4 + 1];
+                            dstRow[x * 4 + 2] = srcRow[x * 4 + 0];
+                            dstRow[x * 4 + 3] = srcRow[x * 4 + 3];
+                        }
+                    }
+                    break;
+                case SwapchainPixelConversion::PackR10G10B10A2:
+                    // Repack each 8-bit-per-channel source pixel into a 10/10/10/2
+                    // word -- see packR10G10B10A2Unorm's comment for why this
+                    // format was chosen over an SRGB variant. Extract r/g/b/a
+                    // respecting the SOURCE's real channel order (srcIsBgra),
+                    // packR10G10B10A2Unorm always takes them as (r,g,b,a) and
+                    // places them per the DXGI-defined bit layout regardless.
+                    for (uint32_t y = 0; y < eyeHeight; ++y) {
+                        const uint8_t* srcRow = mapped + y * res.bytesPerRow;
+                        uint32_t* dstRow = reinterpret_cast<uint32_t*>(
+                            static_cast<uint8_t*>(uploadMapped) + y * res.uploadRowPitch);
+                        for (uint32_t x = 0; x < eyeWidth; ++x) {
+                            const uint8_t c0 = srcRow[x * 4 + 0];
+                            const uint8_t c1 = srcRow[x * 4 + 1];
+                            const uint8_t c2 = srcRow[x * 4 + 2];
+                            const uint8_t a = srcRow[x * 4 + 3];
+                            const uint8_t r = srcIsBgra ? c2 : c0;
+                            const uint8_t g = c1;
+                            const uint8_t b = srcIsBgra ? c0 : c2;
+                            dstRow[x] = packR10G10B10A2Unorm(r, g, b, a);
+                        }
+                    }
+                    break;
+                case SwapchainPixelConversion::None:
+                default:
+                    for (uint32_t y = 0; y < eyeHeight; ++y) {
+                        std::memcpy(static_cast<uint8_t*>(uploadMapped) + y * res.uploadRowPitch,
+                                    mapped + y * res.bytesPerRow, rowBytes);
+                    }
+                    break;
+            }
         }
         D3D12_RANGE written{0, static_cast<SIZE_T>(res.uploadRowPitch) * eyeHeight};
         res.uploadHeap->Unmap(0, &written);
@@ -568,7 +913,11 @@ public:
         src.pResource = res.uploadHeap.Get();
         src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
         src.PlacedFootprint.Offset = 0;
-        src.PlacedFootprint.Footprint.Format = static_cast<DXGI_FORMAT>(toDxgiSwapchainFormat(format));
+        // Must match the swapchain's ACTUAL format (swapchainDxgiFormat_),
+        // not necessarily aurora's native format -- see createSwapchain()'s
+        // comment. After the channel-swap step above, the uploaded bytes
+        // really are laid out as swapchainDxgiFormat_ when a swap happened.
+        src.PlacedFootprint.Footprint.Format = static_cast<DXGI_FORMAT>(swapchainDxgiFormat_);
         src.PlacedFootprint.Footprint.Width = eyeWidth;
         src.PlacedFootprint.Footprint.Height = eyeHeight;
         src.PlacedFootprint.Footprint.Depth = 1;
@@ -618,6 +967,56 @@ private:
         auto& res = self->cpuCopyBuffers_[p.eyeIndex];
         const wgpu::Texture& srcTexture = self->pendingCopySrc_[p.eyeIndex];
 
+        wgpu::CommandEncoder mutableCmd = cmd; // several calls below are non-const on CommandEncoder
+
+        if (self->swapchainIsSrgb_) {
+            // GPU gamma-compensation path (see kGammaComputeShaderSource's
+            // comment) -- replaces the plain CopyTextureToBuffer below with
+            // a compute dispatch that applies the correction curve directly,
+            // then a GPU-side buffer copy into the same CPU-mappable
+            // `readback` buffer the non-gamma path would have written via
+            // CopyTextureToBuffer. ctx.queue is the right handle for the
+            // WriteBuffer call here -- borrowed/valid for this call only,
+            // but that's exactly the per-frame-work use case gfx.hpp
+            // documents it for.
+            const GammaComputeParams params{
+                p.eyeWidth,
+                p.eyeHeight,
+                res.bytesPerRow / 4,
+                self->swapchainPixelConversion_ == SwapchainPixelConversion::ChannelSwap ? 1u : 0u,
+                kSteamVrGammaCompensationExponent,
+            };
+            ctx.queue.WriteBuffer(res.gammaUniform, 0, &params, sizeof(params));
+
+            wgpu::TextureView srcView = srcTexture.CreateView();
+
+            wgpu::BindGroupEntry entries[3] = {};
+            entries[0].binding = 0;
+            entries[0].textureView = srcView;
+            entries[1].binding = 1;
+            entries[1].buffer = res.gammaStorage;
+            entries[1].size = static_cast<uint64_t>(res.bytesPerRow) * p.eyeHeight;
+            entries[2].binding = 2;
+            entries[2].buffer = res.gammaUniform;
+            entries[2].size = sizeof(GammaComputeParams);
+
+            wgpu::BindGroupDescriptor bgDesc{};
+            bgDesc.layout = self->gammaBindGroupLayout_;
+            bgDesc.entryCount = 3;
+            bgDesc.entries = entries;
+            wgpu::BindGroup bindGroup = aurora::webgpu::g_device.CreateBindGroup(&bgDesc);
+
+            wgpu::ComputePassEncoder pass = mutableCmd.BeginComputePass();
+            pass.SetPipeline(self->gammaPipeline_);
+            pass.SetBindGroup(0, bindGroup);
+            pass.DispatchWorkgroups((p.eyeWidth + 7) / 8, (p.eyeHeight + 7) / 8, 1);
+            pass.End();
+
+            mutableCmd.CopyBufferToBuffer(res.gammaStorage, 0, res.readback, 0,
+                                           static_cast<uint64_t>(res.bytesPerRow) * p.eyeHeight);
+            return;
+        }
+
         wgpu::TexelCopyTextureInfo srcCopy{};
         srcCopy.texture = srcTexture;
         srcCopy.aspect = wgpu::TextureAspect::All;
@@ -629,11 +1028,6 @@ private:
         dstCopy.layout.rowsPerImage = p.eyeHeight;
 
         wgpu::Extent3D extent{p.eyeWidth, p.eyeHeight, 1};
-        // ctx.device/ctx.queue are borrowed and valid only for this call, per
-        // gfx.hpp -- but we only need `cmd` here (already positioned on the
-        // frame's real encoder), not a separate device/queue reference.
-        (void)ctx;
-        wgpu::CommandEncoder mutableCmd = cmd; // CopyTextureToBuffer is non-const on CommandEncoder
         mutableCmd.CopyTextureToBuffer(&srcCopy, &dstCopy, &extent);
     }
 
@@ -684,6 +1078,29 @@ private:
     XrSwapchain swapchain_ = XR_NULL_HANDLE;
     XrFrameState frameState_{XR_TYPE_FRAME_STATE};
 
+    // Set by createSwapchain() -- see its comment. swapchainDxgiFormat_ is
+    // what the swapchain images were ACTUALLY created with (may differ from
+    // aurora's native color format if the runtime didn't support that
+    // format); swapchainPixelConversion_ tells readbackEyeCopy() what it
+    // must do to the pixel data per-pixel while uploading to match.
+    int64_t swapchainDxgiFormat_ = 0;
+    SwapchainPixelConversion swapchainPixelConversion_ = SwapchainPixelConversion::None;
+    // True when chosenFormat is B8G8R8A8_UNORM_SRGB/R8G8B8A8_UNORM_SRGB --
+    // tells encoderTaskCallback() to run the GPU gamma-compensation compute
+    // pass (see kGammaComputeShaderSource's comment) INSTEAD of a plain
+    // CopyTextureToBuffer, and tells readbackEyeCopy() the resulting bytes
+    // are already final (plain memcpy, no further CPU-side conversion --
+    // the compute shader already handles both gamma AND any channel
+    // reorder swapchainPixelConversion_ would otherwise call for).
+    bool swapchainIsSrgb_ = false;
+
+    // GPU gamma-compensation compute pipeline -- created lazily by
+    // ensureGammaComputeResources(), only when swapchainIsSrgb_ is true, so
+    // VD/Meta Link (which never pick an SRGB format) never pay to create
+    // or use any of this.
+    wgpu::ComputePipeline gammaPipeline_;
+    wgpu::BindGroupLayout gammaBindGroupLayout_;
+
     std::vector<XrSwapchainImageD3D12KHR> swapchainImages_;
 
     std::vector<wgpu::SharedTextureMemory> pendingMemory_;
@@ -704,6 +1121,14 @@ private:
         uint32_t width = 0, height = 0;
         Microsoft::WRL::ComPtr<ID3D12Resource> uploadHeap;   // XR side, D3D12_HEAP_TYPE_UPLOAD
         uint32_t uploadRowPitch = 0;                         // D3D12-side row pitch (256-aligned)
+        // Only created/used when swapchainIsSrgb_ is true (see
+        // ensureGammaComputeResources()). gammaStorage is written by the
+        // compute pass, then CopyBufferToBuffer'd into `readback` (the same
+        // CPU-mappable buffer used by the non-gamma path) -- WebGPU doesn't
+        // allow combining Storage with MapRead usage on one buffer, hence
+        // the extra GPU-side copy.
+        wgpu::Buffer gammaStorage;   // Storage|CopySrc
+        wgpu::Buffer gammaUniform;   // Uniform|CopyDst -- holds GammaComputeParams
     };
     // FIXED this session: indexed by eyeIndex (0/1), NOT swapchainIndex --
     // the previous swapchainIndex keying made both eyes share the exact
@@ -775,6 +1200,42 @@ private:
         xrDevice_->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &resDesc,
                                             D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
                                             IID_PPV_ARGS(&res.uploadHeap));
+
+        if (swapchainIsSrgb_) {
+            ensureGammaComputeResources();
+
+            wgpu::BufferDescriptor storageDesc{};
+            storageDesc.size = bufDesc.size; // same size/layout as `readback`
+            storageDesc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc;
+            res.gammaStorage = aurora::webgpu::g_device.CreateBuffer(&storageDesc);
+
+            wgpu::BufferDescriptor uniformDesc{};
+            uniformDesc.size = sizeof(GammaComputeParams);
+            uniformDesc.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
+            res.gammaUniform = aurora::webgpu::g_device.CreateBuffer(&uniformDesc);
+        }
+    }
+
+    // Lazily creates the gamma-compensation compute pipeline (once per
+    // session, the first time an SRGB swapchain format is in use). See
+    // kGammaComputeShaderSource's comment for why this exists and why it's
+    // gated on swapchainIsSrgb_ rather than always created.
+    void ensureGammaComputeResources() {
+        if (gammaPipeline_) {
+            return;
+        }
+
+        wgpu::ShaderSourceWGSL wgslDesc{};
+        wgslDesc.code = kGammaComputeShaderSource;
+        wgpu::ShaderModuleDescriptor moduleDesc{};
+        moduleDesc.nextInChain = &wgslDesc;
+        wgpu::ShaderModule module = aurora::webgpu::g_device.CreateShaderModule(&moduleDesc);
+
+        wgpu::ComputePipelineDescriptor pipelineDesc{};
+        pipelineDesc.compute.module = module;
+        pipelineDesc.compute.entryPoint = "main";
+        gammaPipeline_ = aurora::webgpu::g_device.CreateComputePipeline(&pipelineDesc);
+        gammaBindGroupLayout_ = gammaPipeline_.GetBindGroupLayout(0);
     }
 };
 

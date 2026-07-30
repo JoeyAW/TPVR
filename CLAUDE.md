@@ -70,7 +70,16 @@ gradient/stripes → no visible improvement) without fully converging, and
 the session was deliberately stopped there per explicit user agreement
 rather than continuing to iterate blindly — see section 3's "Options for a
 future session" for where to pick this up. Not a blocker, just imperfect.
-Other known issues below.
+Heat-wave/"kagerou" particle effects (the "floating portal duplicating the
+scene" bug) are also fixed as of 2026-07-29 — see section 5, written up in
+detail specifically so someone hitting the same thing in a similar engine
+can follow the same approach. Goron Mines (lava dungeon) confirmed clear of
+the portal too, but has a separate, not-yet-investigated visual issue —
+future session, not started. VR launch itself is now confirmed working on
+all three runtimes actually used for this project (SteamVR, Virtual
+Desktop, Meta Link) as of 2026-07-30 — see section 6 for the OpenXR API
+version / swapchain format / SteamVR color fixes involved; before that
+session only Meta Link had ever been tested. Other known issues below.
 
 ## Currently uncommitted working-tree changes
 
@@ -118,6 +127,58 @@ Main repo, by topic:
   a parallel computation, to avoid side effects on those other systems.
 
 ### 3. Water rendering solid black in VR — ROOT-CAUSED AND FIXED 2026-07-29
+**FULLY RESOLVED 2026-07-29 (including the reflection-quality follow-up
+below) — read this box first, the rest of the section is historical detail
+kept for context/lessons, not current status.**
+
+Both the original black-water bug AND the follow-up "reflection looks bad"
+problem are fixed. Final state:
+
+- Water's own reflective-surface material (`MA02`/`MA10`) is now **skipped
+  entirely in VR** — it never draws at all. Fix lives in
+  `d_com_inf_game.cpp`'s `dComIfGd_drawXluListInvisible()`/
+  `drawOpaListInvisible()`: added `&& !g_duskVRRenderingToHeadset` to the
+  existing condition that already gated these draws behind the
+  player-facing "Disable Water Refraction" ImGui checkbox
+  (`dusk::getSettings().game.disableWaterRefraction`,
+  `ImGuiMenuTools.cpp`) — confirmed live via that exact checkbox before
+  baking it into VR permanently. What you see in VR now is the water's base
+  layer (diffuse + foam/wave texture, still animated) with no reflective
+  overlay — no black, no opaque placeholder color, just no reflection
+  effect. **This is what finally fixed the "opaque, no transparency, wrong
+  color" symptom** — not a texture-content or blend-state fix, an
+  "don't draw this layer in VR at all" fix. See Round 9's writeup below for
+  the (extensive, ultimately unnecessary for the final fix) investigation
+  that preceded finding this.
+- The shared screen-capture texture (`mDoGph_gInf_c::getFrameBufferTex()`)
+  is back to real content in VR (`retry_captue_frame()`'s VR guard removed
+  at its main call site in `m_Do_graphic.cpp`) instead of the diagnostic
+  gradient/stripe placeholder — needed because the underwater motion-blur
+  effect (`motionBlure()`, samples the same shared texture) was still
+  showing the stripe placeholder when the camera went underwater, even
+  after water's own draw was skipped. Real capture is fine for blur (no
+  geometric-accuracy requirement the way a reflection has), even though it
+  wasn't good enough for water's reflection specifically.
+- **Cleanup performed same session**: removed the now-unused
+  `captureGradientCornerReflection()` function entirely
+  (`m_Do_graphic.cpp`) and all the round 2/4-11 diagnostic
+  `OutputDebugStringA` logging + inert magenta/blend-override test code from
+  `d_kankyo.cpp`'s `dKy_bg_MAxx_proc()` (none of it ended up load-bearing
+  for the actual fix — the real fix was found by looking at the draw-list
+  gating in `d_com_inf_game.cpp`, unrelated to anything that diagnostic
+  code was investigating). The Round 1 reflection-matrix/fovy-aspect fix
+  (`dComIfGd_getReflectionFovAspect()` and its call sites) was **left in
+  place** — it's still correct, just currently moot for VR since the
+  material it feeds never draws there anymore; harmless to leave, and would
+  matter again if water's VR draw is ever re-enabled.
+- **Known residual risk, not yet an observed problem**: the Invisible list
+  these draw functions gate may hold content besides water ("among other
+  things" per the drawn-list tracing below) — skipping it wholesale for VR
+  could theoretically be hiding something else too. User tested both
+  surface water and underwater after this fix with no other regressions
+  noticed, but this wasn't exhaustively audited. If something unrelated
+  looks off in VR later, check here first.
+
 **Original symptom** (user-confirmed): ALL water in the game — lakes,
 rivers, waterfalls, still or flowing — rendered as pitch black, fully
 opaque, no visible texture, only in VR (fine on flatscreen). **Now fixed**:
@@ -179,11 +240,14 @@ confirmed by testing)**:
    or safe to also re-enable.
 
 **Remaining issue (NOT the black bug — a visual quality/accuracy problem)
-— STOPPED HERE 2026-07-29 after many rounds, per explicit user agreement
-("one more focused attempt, but if it doesn't land, stop regardless") —
-the focused attempt below did not resolve it. Picking this up fresh with a
-different approach (see "options for a future session" at the end) is
-probably more productive than continuing to iterate on the current one.**
+— STOPPED after many rounds on 2026-07-29 per explicit user agreement
+("one more focused attempt, but if it doesn't land, stop regardless"), then
+RESUMED later the same day: user explicitly ruled out the second-camera
+option for now ("how good can it look without the second camera, by
+troubleshooting alpha") and asked to keep fixing bugs with changes kept
+easy to revert. See "Round 9" below for what was found/changed on resume —
+picking up with RenderDoc inspection (the top item in "Options for a future
+session" below) rather than more blind guessing.
 
 Full history of what was tried, in order:
 
@@ -293,14 +357,119 @@ Full history of what was tried, in order:
   washed-out appearance. The actual remaining cause of "stripes don't show
   up as distinct stripes" is still unidentified.
 
-**Current code state (all still in `m_Do_graphic.cpp`, functional, not
-reverted)**: `captureGradientCornerReflection()` draws 8 alternating-color
-stripes directly into the current eye pass's corner, then captures them
+**Round 9 (resumed session, 2026-07-29 — dstAlpha theory ruled out, real
+alpha=0 bug found and fixed via RenderDoc, NOT yet retested in-headset)**:
+
+- **dstAlpha override theory (ruled out)**: `GXCopyTex`'s destination-alpha
+  path (`extern/aurora/lib/dolphin/gx/GXFrameBuffer.cpp`'s `copy_tex()`) can
+  force a copied texture's alpha to a constant `dstAlpha` value, which
+  would've explained "changing alpha did nothing." Checked: `dstAlpha`
+  defaults disabled (`GXSetDstAlpha(GX_DISABLE, 0)` in `GXInit`,
+  `libs/dolphin/src/gx/GXInit.c`) and nothing in game code or the J3D
+  material system ever calls `GXSetDstAlpha` (only an unrelated particle
+  file, `JPABaseShape.cpp`, references it at all). This mechanism never
+  fires here — ruled out, not just abandoned.
+- **Reflection texture is NOT 304×224 in VR — it's scaled non-uniformly**:
+  confirmed via RenderDoc's Resource Inspector: the actual GPU resource is
+  `Dawn_InternalTexture_Resolved Texture`, 1032×1136, B8G8R8A8_UNORM — not
+  304×224. Root cause: `scale_copy_dst()` (same file as above) scales every
+  `GXCopyTex` destination by `(real render target size) / (logical fb
+  size)`. VR's eye rendering (`vr_stereo_render.hpp:447`,
+  `set_offscreen_uses_native_logical_size(true)`, reset `false` at line 520)
+  deliberately makes `logical_fb_size()` report the small flatscreen-native
+  size instead of the real (large) eye-target size *while inside the eye
+  pass*, specifically so the normal flatscreen draw code's viewport calls
+  scale up to fill the real eye texture — but this same override also
+  applies to our 304×224 capture request, scaling it up too. The non-square
+  result (1032×1136, not a uniform multiple of 304×224 in both dimensions)
+  is consistent with the VR headset's per-eye aspect ratio differing from
+  the flat game's internal ~608×448 aspect — expected once you know the
+  mechanism, not itself a bug. **Lesson for future sessions**: don't assume
+  a `GXSetTexCopyDst`-requested size is the real allocated size while inside
+  a VR eye pass — check via RenderDoc, or via
+  `aurora::gfx::get_render_target_size()`/`aurora::gx::logical_fb_size()` if
+  reasoning about it in code.
+- **Real alpha=0 bug found and fixed (root cause of "changing the
+  placeholder's alpha had zero visible effect", from the section above)**:
+  opened the actual 1032×1136 texture in RenderDoc's Texture Viewer.
+  Confirmed via a direct pixel readout — position (938, 1093), RGBA
+  (0.47059, 0.68627, 0.78431, **0.00**) — a pixel whose RGB clearly matches
+  one of the stripe colors, but alpha is exactly 0. Root cause: `GXSetBlendMode()`
+  (`extern/aurora/lib/dolphin/gx/GXPixel.cpp:114`) only writes the blend
+  enable/src/dst/op bits of the shared `cmode0` BP register — it does NOT
+  touch the alpha-update bit, which is set independently by
+  `GXSetAlphaUpdate()` and persists across `GXSetBlendMode` calls.
+  `captureGradientCornerReflection()` never called `GXSetAlphaUpdate` at
+  all, so it drew with whatever alpha-write state some earlier system in
+  the frame left behind. Checked every `GXSetAlphaUpdate` call site in the
+  whole codebase (`d_drawlist.cpp`, `d_particle.cpp`, `d_error_msg.cpp`,
+  `d_home_button.cpp`, `d_a_mirror.cpp`, `d_a_movie_player.cpp`,
+  `m_Do_graphic.cpp:2391`) — every single one disables it
+  (`GX_DISABLE`/`GX_FALSE`); none re-enable it. So by the time our capture
+  draw runs, alpha-write is off, and the render target's alpha channel
+  stays at whatever it was cleared to (0) regardless of the vertex alpha we
+  draw. **Fix applied** (`m_Do_graphic.cpp`,
+  `captureGradientCornerReflection()`): wrapped the stripe `GXBegin`/`GXEnd`
+  block with `GXSetAlphaUpdate(GX_ENABLE)` before and
+  `GXSetAlphaUpdate(GX_DISABLE)` after — restoring disabled afterward to
+  match the rest of the codebase's convention rather than leaving it on for
+  whatever draws next. **NOT YET rebuilt/retested** — next step for whoever
+  picks this up: rebuild, capture again in RenderDoc, confirm the same
+  pixel (or any stripe pixel) now shows non-zero alpha, then test in-headset
+  whether this actually changes water's visible transparency (it fixes a
+  real, confirmed bug regardless, but whether THIS is what's driving the
+  "opaque, no transparency" symptom specifically — as opposed to some other
+  mechanism entirely, e.g. the water material's own vertex alpha or a
+  separate blend constant not derived from this texture at all — is still
+  unconfirmed; the prior "translucency comes from something other than
+  straightforward texture alpha" finding from the section above was never
+  fully explained either, only that naive edits to the *source stripe
+  colors'* alpha had no effect — which this same alpha=0-write bug fully
+  explains on its own, without requiring some entirely separate mechanism).
+  **CONFIRMED (rebuilt + retested same session)**: fix works exactly as
+  expected — RenderDoc pixel readout at (345, 378) now shows alpha `1.00`
+  (was `0.00` before the fix). **But user confirmed zero visible change to
+  water's transparency in-headset.** This makes the earlier "not simple
+  texture alpha" suspicion definitive rather than just plausible: the
+  reflection texture's alpha channel is provably not what drives water's
+  translucency at all (we can now write real, correct alpha into it and
+  nothing changes). The alpha-write fix itself is still worth keeping (it
+  was a genuine bug — silently-dropped alpha writes could bite something
+  else later), but it is NOT the fix for the opacity symptom. **Next step,
+  not yet done**: stop looking at the reflection texture's own content
+  entirely and instead find water's ACTUAL draw call in RenderDoc (not
+  `dKy_bg_MAxx_proc`, which only builds the tex-gen matrix — the real
+  blend/TEV state lives in the model's own compiled material data, applied
+  at the model's normal per-frame draw-time material entry) and inspect its
+  Pipeline State — Output Merger blend factors, pixel shader texture/alpha
+  inputs — directly. Pixel History was not available in this RenderDoc
+  build/capture type; use the Resource Inspector's usage list on
+  `Dawn_InternalTexture_Resolved Texture` (or whatever the real water
+  diffuse/reflection texture turns out to be) to jump to a read event
+  instead.
+- **Separately, still unexplained**: the captured texture's color content
+  itself doesn't show 8 distinct stripes either — RenderDoc's Outputs
+  thumbnail showed roughly 3 merged color bands with solid black on both
+  the left and right edges, not 8 alternating stripes across the full
+  width. Not yet root-caused. Candidate theory (not confirmed): the 16×16
+  logical-pixel source rect (`GXSetTexCopySrc(0, 0, 16, 16)` in
+  `captureGradientCornerReflection()`) also gets scaled via
+  `map_logical_scissor()` using the same non-uniform VR scale factors
+  described above, so the actual captured source rectangle in real pixels
+  may not line up cleanly with where the 8 stripes were actually drawn
+  (also sized via the same viewport scaling) — worth checking directly in
+  RenderDoc (compare the drawn stripe quad's real screen-space extent,
+  visible in the Mesh Viewer/Pipeline State for the stripe draw call,
+  against the source rect used by the following `GXCopyTex`) before
+  guessing at another fix blind.
+
+**Current code state (`m_Do_graphic.cpp`, functional, not reverted)**:
+`captureGradientCornerReflection()` draws 8 alternating-color stripes
+directly into the current eye pass's corner (now with alpha-write
+explicitly enabled for that draw — see Round 9 above), then captures them
 with the corrected full-size destination, replacing the real
 `retry_captue_frame()` call in VR (which is now guarded to flatscreen-only
-again). Water is stably colored (no crash, no head-motion flashing) but:
-opaque (no transparency), and the stripe pattern does not visibly resolve
-into stripes on the actual water surface for reasons not yet found.
+again). Not yet rebuilt/retested since the Round 9 alpha fix.
 
 **Options for a future session** (roughly in order of how promising they
 seem, not yet attempted):
@@ -600,6 +769,306 @@ See the ROOT-CAUSED writeup at the top of this section instead.
   safely re-enabled too, the same way water's was. **Not yet attempted or
   tested** — bloom's guards are separate call sites from the one re-enabled
   for water; re-enabling them is a candidate follow-up, not yet done.
+
+### 5. Heat-wave / "kagerou" particle effects — ROOT-CAUSED AND FIXED 2026-07-29
+
+Written up in more detail than usual because this is a well-known class of
+bug for anyone VR-modding a GameCube/Wii-era engine with this style of
+cheap heat-shimmer effect — people have said they want to attempt the same
+fix elsewhere, so this section is meant to be followable on its own, not
+just a change-log entry.
+
+**Symptom**: a large rectangular "floating portal" hanging in the scene,
+showing a duplicated/offset copy of whatever's in view (e.g. a visibly
+duplicated horse, floating above the real one, offset roughly by the
+stereo eye separation) — VR-only, first reported in outdoor sunset scenes.
+Looked cosmetic/minor but was jarring and immersion-breaking in-headset.
+
+**General mechanism (the reusable part)**: this era of Zelda engine fakes
+"heat shimmer" using the exact same cheap trick water's fake reflection
+uses (see section 3) — sampling a shared, low-res, live screen-capture
+texture (`mDoGph_gInf_c::getFrameBufferTex()`) through a particle instead
+of a real heat-distortion shader. The hook is
+`JPAResourceManager::swapTexture(mDoGph_gInf_c::getFrameBufferTimg(),
+"dummy")`, called once when the common/scene particle resource managers are
+created (`d_particle.cpp`'s `dPa_control_c::createCommon()`/
+`createRoomScene()`): **any particle asset whose JPA texture is literally
+named `"dummy"` gets that texture silently swapped for the live shared
+capture at load time** — nothing at the call site marks it as special, you
+have to know this mechanism exists to find it by reading code. In VR, that
+single shared capture texture is subject to the same per-eye/stale-frame
+ambiguity that broke water's reflection: sampling it through a particle's
+own UV animation produces "a duplicate of the scene, offset like a ghost"
+instead of a subtle shimmer, which reads as a floating portal rather than
+heat haze. **If you're chasing this in a similar engine: any particle using
+this "dummy"-texture-swap technique is a candidate, regardless of what it's
+named** — this project's actual instances weren't even all named
+"kagerou"/"heat"/"shimmer".
+
+**Why three earlier guesses (from a prior, undocumented session) all
+failed**: the shared IndScreen distortion pass, the sun disc sprite/lens
+flare, and one specific torch-actor's kagerou particle were each disabled
+in turn, and the user kept seeing the blob after every one. Root cause:
+the exact same kagerou particle ID is spawned independently from *at
+least three unrelated systems* in this codebase alone (see below) — each
+disable only touched the one system a session happened to guess at. **The
+lesson: don't assume disabling the first plausible-looking spawn site is
+sufficient. Prove it with evidence (below), not by exhausting guesses.**
+
+**Diagnostic technique that actually found it (the reusable method)**:
+guessing was replaced with direct evidence by logging every *distinct*
+particle id/name spawned during a VR session, once each, via
+`OutputDebugStringA`, then reproducing the bug and reading back the Output
+window. Two non-obvious pitfalls cost real time building this and are
+worth knowing up front:
+1. **Instrument the actual creation choke point(s), not a specific
+   effect's suspected call site.** This engine has (at least) two
+   completely separate top-level particle-spawn functions:
+   `dPa_control_c::setSimple()` and `dPa_control_c::set()` (both in
+   `d_particle.cpp`). `dComIfGp_particle_setColor()`/`_setNormal()` (used
+   by most gameplay effects) funnel through `set()`; only a minority of
+   call sites (mostly fire/torch particles) go through `setSimple()`.
+   Instrumenting only `setSimple()` — the first, most obvious place to add
+   a log — produced **zero relevant log lines**, not because nothing was
+   spawning, but because the actual culprit spawned through the other
+   function entirely. Both had to be instrumented before the log was
+   useful.
+2. **Gate the log on a whole-session-scoped flag, not a per-frame
+   draw-scoped one.** This project already had a `g_duskVRRenderingToHeadset`
+   flag, but it's only `true` for the narrow window inside the per-eye
+   render call each frame (`vr_main.cpp`'s `tick()`) — particle spawns
+   happen during game-logic update, which runs outside that window, so
+   gating a spawn-time log on it risks silently never firing depending on
+   update/draw ordering, independent of whether anything is actually
+   spawning. Added `g_duskVRSessionActive` (mirrors `isActive()`/
+   `g_session != nullptr`, true for the whole VR session lifetime) instead,
+   specifically for this kind of update-phase diagnostic.
+3. **A found id is only useful if you can safely turn it back into a
+   name.** `dPa_name::getName()` (`d_particle_name.cpp`) has a real,
+   pre-existing bug: it bounds-checks a *masked* id
+   (`i_id & 0xFFFF1FFF >= ID_PARTICLE_MAX`) but then indexes its name table
+   with the *raw*, unmasked id — so an id with high flag bits set (e.g. a
+   dynamically-assigned scene/group id) can pass the check yet read the
+   array far out of bounds, returning garbage instead of `NULL`. A plain
+   `if (name != NULL)` guard is **not sufficient**. This caused a real
+   crash (access violation, unrelated actor `daBubbPilar_c` spawning a
+   scene-flagged id during a save load) after the logging was added. Fix:
+   only call `getName()` when the *raw, unmasked* id itself is directly a
+   safe in-bounds index (`param < ID_PARTICLE_MAX`); otherwise skip the
+   name lookup and log the numeric id alone.
+
+**The actual particles found and fixed**:
+1. `d_kankyo_rain.cpp`'s `dKyr_sun_move()` (~line 447-474): particle id
+   `0x11C` (`ZI_J_sunKagerou01.jpa`) — a heat-shimmer effect tracking the
+   sun, spawned every frame the sun is visible (`camera_water_in_status ==
+   0 && daytime > 255.0f && sunAlpha >= 0.2f`), positioned a fixed 30160
+   units from the camera eye toward the sun. A VR headset's free head
+   rotation sweeps that fixed-offset anchor across the view far more than
+   a flatscreen third-person camera ever would — the same class of problem
+   already noted for water's reflection quality. Previously undiscovered
+   because it's spawned from environment/weather update code, not from any
+   actor or the weather *draw* functions a prior session had already
+   checked. Fixed by skipping the spawn call in VR
+   (`#ifdef TARGET_PC / if (!dusk::vr::isRenderingToHeadset())`), same
+   pattern as the already-accepted disables for the other two kagerou
+   effects.
+2. The *exact same* particle id `0x103` (`ID_ZI_J_O_KAGEROU`) that the
+   prior session had already disabled for one specific torch actor
+   (`d_a_ep.cpp`'s `ep_class`) turned out to *also* be spawned directly and
+   unconditionally by six completely separate, unrelated actor classes,
+   none of which route through `ep_class` at all:
+   `d_a_obj_lv1Candle00.cpp`, `d_a_obj_lv1Candle01.cpp`,
+   `d_a_obj_lv2Candle.cpp`, `d_a_obj_lv3Candle.cpp`,
+   `d_a_obj_onsenFire.cpp` (hot spring fire), `d_a_obj_TvCdlst.cpp`. Found
+   by grepping the whole codebase for other direct callers of the same
+   particle id once it was identified via the log — this is the step that
+   actually generalizes; the specific ids won't match another game/mod,
+   but "grep for every other call site of the id you just found" is the
+   repeatable part. Each site got the same VR-skip guard applied only to
+   its `0x103` call, leaving that actor's other fire particles
+   (`0x100`/`0x101`/`0x83a6`/`0x83a7`) untouched.
+
+**The generalizable recipe, for anyone attempting this in a similar
+engine**:
+1. Instrument the *actual* particle-creation choke point(s) — trace what
+   your suspected effect's spawn call really funnels through, don't assume
+   it's the first/obvious-looking function. Log every distinct id/name
+   once per VR session, gated on a whole-session-scoped "is VR active"
+   flag rather than a per-frame render-scoped one.
+2. Reproduce the bug, read the log, identify the id(s) via your particle
+   name table. Sanity-check that lookup function for bounds bugs before
+   trusting it blindly (see pitfall 3 above) — the crash cost more time
+   than the original investigation.
+3. Grep the *entire* codebase for every other direct call site of that
+   same id. Assume it's spawned unconditionally by multiple unrelated
+   actor classes until you've actually checked — this project found the
+   identical id hardcoded independently in 7 call sites across 8 files,
+   not just the one obviously related to what you were looking at.
+4. Wrap each spawn call in a VR-skip guard
+   (`!dusk::vr::isRenderingToHeadset()` or your engine's equivalent),
+   touching only that one call, leaving every other particle/effect at
+   that call site alone.
+5. Separately, check whether the effect's underlying resource uses a
+   live-screen-capture texture-swap technique at all (the `"dummy"`-name
+   convention described above, or whatever your engine's equivalent is) —
+   if so, treat *any* particle using it as a candidate for this exact
+   symptom, independent of naming.
+
+**Known gaps / not yet covered**:
+- Dawn (the `daytime < 180.0f` branch of the same sun-color-blend logic in
+  `dKyr_sun_move()`) hasn't been explicitly tested in-headset — same code
+  path, untested time-of-day window. Likely fine (same guard covers it)
+  but not confirmed.
+- Goron Mines (the lava dungeon) confirmed clear of the portal after these
+  fixes, but has a separate, not-yet-identified visual issue there per the
+  user — a new, unstarted investigation, not assumed to be related to
+  anything in this section.
+- The diagnostic logging added this session (`d_particle.cpp`'s
+  `[dusk::particle] setSimple`/`[dusk::particle] set` logs, and
+  `g_duskVRSessionActive` in `vr_main.cpp`) is still in the tree as of this
+  writing. Per this project's usual practice (see Build workflow notes)
+  it should eventually be removed now that the bug is confirmed fixed, but
+  was deliberately left in for now in case it's useful for the Goron Mines
+  follow-up or any other still-unguarded kagerou-family/`"dummy"`-texture
+  spawn site that a whole-codebase grep didn't happen to catch.
+
+### 6. VR failing to launch at all on SteamVR/Virtual Desktop (worked fine on Meta Link) — FIXED 2026-07-30
+
+**Symptom**: the mod had only ever been tested via Meta Link (Quest Link/Air
+Link) before this session — that always worked. Testing SteamVR and Virtual
+Desktop (VDXR) for the first time on 2026-07-30 found the game silently
+fell back to flatscreen on both, with zero visible error to the user (VR
+mod's own design: `startup()` catches everything and just proceeds
+flatscreen-only — see Build Workflow's `OutputDebugStringA` logging, which
+is what actually diagnosed this).
+
+**Root cause 1 — OpenXR API version mismatch**: `vr_xr_bootstrap.hpp`'s
+`initialize()` requested `XR_CURRENT_API_VERSION`, which resolves to
+1.1.60 in this project's vendored OpenXR headers (`/c/vcpkg/installed/*/
+include/openxr/openxr.h`). Neither SteamVR's nor Virtual Desktop's OpenXR
+runtime supports the 1.1.x instance API yet — `xrCreateInstance` failed
+with `XR_ERROR_API_VERSION_UNSUPPORTED` on both (confirmed via the VS
+Output window's `[dusk::vr::startup] EXCEPTION: OpenXR call failed:
+xrCreateInstance` line). Meta's runtime happens to support 1.1, which is
+why this was never caught before. **Fix**: request `XR_API_VERSION_1_0`
+explicitly instead — this bootstrap only uses core 1.0 functionality plus
+the D3D12 KHR extension, so there's no feature reason to ask for 1.1.
+
+**Root cause 2 — swapchain format not universally supported**: even after
+fixing the API version, Virtual Desktop worked but SteamVR failed at
+`xrCreateSwapchain` with `Failed to create swapchain image: Unsupported
+format: 87` (87 = `DXGI_FORMAT_B8G8R8A8_UNORM`, aurora's native render
+format, hardcoded as the swapchain format via `toDxgiSwapchainFormat()`).
+Per the OpenXR spec, an app must only request a format the runtime actually
+returned from `xrEnumerateSwapchainFormats` — this code never called it,
+just assumed its own native format would be accepted everywhere (true for
+Meta and Virtual Desktop, false for SteamVR). **Fix**: `vr_xr_submit.hpp`'s
+`Session::createSwapchain()` now enumerates the runtime's real supported
+list and picks the first viable candidate in preference order: (1) native
+format exactly, (2) its channel-swapped counterpart (real R/B swap, still
+no gamma semantics), (3) its sRGB-toggled counterpart, (4) both
+channel-swapped and sRGB-toggled, (5) `DXGI_FORMAT_R10G10B10A2_UNORM` as an
+absolute last resort. `readbackEyeCopy()` was extended to actually perform
+whichever pixel transform the chosen format needs (`SwapchainPixelConversion`
+enum: `None`/`ChannelSwap`/`PackR10G10B10A2`) before uploading, instead of
+just changing the declared format and leaving stale bytes.
+
+**A confusing wrinkle worth remembering**: SteamVR's `xrEnumerateSwapchainFormats`
+list (`29 91 2 10 24 40 55 45 20`) includes `24` (`R10G10B10A2_UNORM`) and
+`xrCreateSwapchain` with it succeeds — but actually submitting a real
+projection layer with it fails at runtime (`ComposeLayerProjection: failed
+to submit view 0/1: VRCompositorError_TextureUsesUnsupportedFormat`), with
+the headset stuck on SteamVR's "waiting for application" screen forever
+despite the flatscreen window running fine. **Lesson: `xrEnumerateSwapchainFormats`
+returning a format is not proof the runtime's actual projection-layer
+compositor path accepts it — verify by actually getting a frame in front of
+the user, not just by a successful `xrCreateSwapchain` call.** This is why
+`R10G10B10A2_UNORM` is ranked *last* in the preference order above (after
+the sRGB variants, which SteamVR both advertises AND actually composites)
+rather than higher despite being the more "correct" gamma-neutral choice on
+paper.
+
+**Root cause 3 — SteamVR's sRGB format visibly oversaturates colors**:
+once frames were actually reaching the headset via SteamVR's
+`B8G8R8A8_UNORM_SRGB` format, colors looked oversaturated compared to
+Virtual Desktop/Meta Link (both use the plain, non-SRGB native format,
+zero pixel transform). The theoretical "should be a lossless round-trip"
+argument (SteamVR's SRGB-aware sampling decodes on read, then re-encodes
+for the panel, and encode∘decode should cancel out) does NOT hold up
+against the observed result — something in SteamVR's closed-source
+compositor (likely gamut/color-management processing applied only to
+properly-tagged SRGB content, not a simple gamma bug) makes this visibly
+different from a raw passthrough, and there's no way to inspect or
+precisely reverse-engineer it from outside. **Fix was empirical, not
+derived**: added a tunable gamma-compensation LUT
+(`vr_xr_submit.hpp`'s `steamVrGammaCompensationLut()`/
+`kSteamVrGammaCompensationExponent`), applied to R/G/B (never alpha)
+before upload, ONLY when the chosen swapchain format is one of the SRGB
+variants (`Session::swapchainIsSrgb_`) — so this never touches VD/Meta at
+all. Tried exponent 2.2 first (darkening curve) — user reported "worse,
+looks evil" (overcorrected too dark). Flipped to **1.0/2.2 (brightening
+curve)** — user confirmed "looks normal." If this ever needs revisiting
+(e.g. a SteamVR update changes its compositor's color handling), the
+exponent is the one constant to retune via the same rebuild-and-eyeball
+loop; 1.0 disables compensation entirely as a sanity-check baseline.
+
+**Framerate cost — moved from CPU to GPU 2026-07-30, only partially
+recovered, flagged as a possible crash-regression risk**: originally
+implemented as a scalar CPU per-pixel loop (3 LUT lookups per texel) over
+the full stereo resolution (~9.7M texels/frame at 2112×2304-per-eye),
+replacing what used to be a fast bulk `memcpy`, layered on top of a
+CPU-readback path already documented elsewhere in this file as
+"correctness-first, blocking, perf TODO." User observed roughly halved
+framerate on SteamVR specifically (confirmed NOT affecting VD/Meta, which
+never touch this code path either way). Per user request, moved to an
+actual GPU compute pass instead of the CPU loop, specifically to eliminate
+the cost rather than just shrink it:
+- `vr_xr_submit.hpp`: `kGammaComputeShaderSource` (a WGSL compute shader,
+  `textureLoad` from the source eye texture, `pow()`-based gamma curve on
+  R/G/B only, packs the result into a `u32` storage buffer matching the
+  CPU-readback buffer's row layout exactly), `GammaComputeParams` (the
+  matching uniform struct, manually padded to 32 bytes for WGSL's
+  host-shareable layout rules), `Session::ensureGammaComputeResources()`
+  (lazily creates the pipeline/bind-group-layout once via
+  `aurora::webgpu::g_device`), and `Session::CpuCopyBuffers::gammaStorage`/
+  `gammaUniform` (per-eye GPU-only buffers the shader writes into, then
+  `CopyBufferToBuffer`'d into the existing CPU-mappable `readback` buffer —
+  WebGPU doesn't allow combining `Storage` with `MapRead` usage on one
+  buffer, hence the extra GPU-side copy). `encoderTaskCallback()` now
+  branches: if `swapchainIsSrgb_`, dispatch the compute pass instead of the
+  plain `CopyTextureToBuffer`; `readbackEyeCopy()` correspondingly just
+  memcpy's when `swapchainIsSrgb_` (the shader already applied gamma AND
+  any channel reorder), only falling through to the old per-conversion CPU
+  switch (`ChannelSwap`/`PackR10G10B10A2`/`None`) for the non-SRGB
+  candidates where no gamma correction ever applied.
+- **Gating unchanged, confirmed VD/Meta still completely unaffected**:
+  `swapchainIsSrgb_` is only ever true when `createSwapchain()`'s candidate
+  search picks one of the SRGB formats, which only happens for whichever
+  runtime forces it (SteamVR, confirmed). VD/Meta's very first candidate
+  (native format) succeeds, so `ensureGammaComputeResources()` is never
+  even called and `encoderTaskCallback()` takes the untouched plain-copy
+  branch for them — verified by construction (the gate), not just assumed.
+- **Result, user-reported**: "got 20 more frames" compared to the CPU LUT
+  version — a real improvement, but phrased as partial, not "back to
+  normal" — full parity with VD/Meta's framerate on SteamVR is NOT
+  confirmed. **User explicitly wants to revisit/optimize this further in a
+  future session** rather than closing it out as fully resolved.
+- **Flagged as a possible regression source for OTHER bugs, not just
+  perf**: this is new, relatively complex GPU-side code (a real compute
+  pipeline, bind group, extra per-eye storage/uniform buffers, a
+  buffer-to-buffer copy) added directly into the per-frame VR eye-copy
+  path, on SteamVR only, with limited testing so far (confirmed working
+  once, not stress-tested across long sessions/dungeons/save-load cycles
+  the way earlier bugs in this file were). **If something SteamVR-specific
+  breaks later (crash, hang, corrupted frame, hitching) that doesn't
+  reproduce on VD/Meta, check this compute pass first** before assuming
+  it's unrelated — the gating means it's the one meaningfully different
+  code path SteamVR takes that VD/Meta don't.
+
+**Confirmed working end-to-end on all three runtimes as of 2026-07-30**:
+SteamVR, Virtual Desktop, and Meta Link (Meta Link retested after these
+changes specifically to confirm no regression from the API-version/format
+changes — none found).
 
 ## Key lesson learned this session
 

@@ -2009,143 +2009,15 @@ static void retry_captue_frame(view_class* param_0, view_port_class* param_1, in
     }
 }
 
-#if TARGET_PC
-// ADDED this session (VR reflection-ghosting investigation): the real
-// screen-capture-based reflection (retry_captue_frame() above) turned out
-// to be a fundamentally fragile technique in VR -- it assumes a camera that
-// moves the way a flatscreen third-person camera does (smoothly, roughly
-// level), and a freely-moving VR headset breaks that assumption in ways
-// that per-eye-ordering and destination-size fixes (see this session's
-// other changes to retry_captue_frame()) only partially addressed.
-//
-// FIRST ATTEMPT (reverted -- crashed): opening a NEW nested offscreen pass
-// here (GXCreateFrameBuffer) to draw an exact solid color, while already
-// inside VR's protected eye pass, hit a genuine second-level-of-nesting bug
-// -- the GXCopyTex capture inside that nested pass triggers
-// resolve_pass_into()'s ordinary pass-substitution, which begin_offscreen()/
-// end_offscreen()'s single-slot suspend/resume mechanism (comment: "Only one
-// level of nesting is tracked") doesn't account for, corrupting which pass
-// index gets resumed and crashing on the next SetViewport. NOT retried;
-// extending that suspend/resume logic for arbitrary nesting depth is a
-// bigger, riskier change than this fallback is worth.
-//
-// SECOND ATTEMPT (reverted -- didn't crash, but didn't work either): tried
-// capturing whatever the current scene already shows in a tiny 16x16-pixel
-// corner instead of drawing anything -- theory was that scaling something
-// that small up to 304x224 would look roughly uniform/blurred. In practice
-// the corner still contains real (if blocky) scene geometry/lighting, so it
-// still visibly changed color as the headset moved -- just at a coarser
-// granularity than the full-scene version. Not an improvement worth
-// keeping.
-//
-// THIRD ATTEMPT (superseded): a single constant solid color (via a TEV
-// KONST-register stage) fixed the crashing and the head-motion flashing,
-// but the user correctly pointed out it also erases the water's own
-// wind-driven UV distortion animation (see d_kankyo.cpp's reflection-matrix
-// code, dKyw_get_wind_vec()) -- sampling any (even wobbling/animated) UV
-// position of a perfectly UNIFORM color always returns that same color, so
-// there's nothing for the existing wave/shimmer distortion to reveal.
-//
-// CURRENT VERSION: same safe "draw directly into the current pass, small
-// corner, then capture" approach, but with a simple 2-color diagonal
-// gradient (via real per-vertex color, GX_SRC_VTX / GX_CC_RASC) instead of
-// one flat KONST color. Still completely stable (not tied to head
-// movement/scene content -- same immunity to every crop/scale/ghosting
-// issue chased this session), but now has actual spatial variation for
-// the pre-existing UV distortion to animate, giving a "waves" appearance
-// without needing the fragile real screen capture at all.
-static void captureGradientCornerReflection(view_class* view, view_port_class* realPort, int zoomFocus,
-                                             GXColor colorA, GXColor colorB) {
-    // realPort no longer used directly -- the capture below now uses the
-    // real destination texture's own dimensions instead of anything
-    // view_port-derived. Kept as a parameter for call-site symmetry with
-    // the other capture functions in this file.
-    UNUSED(realPort);
-    // Draw the gradient quad noticeably larger (in ortho-normalized 0..1
-    // screen space) than the pixel rect we're about to capture (16x16
-    // logical pixels), so the whole capture rect is guaranteed to land
-    // inside it.
-    GXSetChanCtrl(GX_COLOR0A0, GX_FALSE, GX_SRC_VTX, GX_SRC_VTX, GX_LIGHT_NULL, GX_DF_NONE, GX_AF_NONE);
-    GXSetNumChans(1);
-    GXSetNumTexGens(0);
-    GXSetNumTevStages(1);
-    GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD_NULL, GX_TEXMAP_NULL, GX_COLOR0A0);
-    GXSetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_RASC);
-    GXSetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-    GXSetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA);
-    GXSetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
-    GXSetZCompLoc(1);
-    GXSetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
-    GXSetBlendMode(GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_CLEAR);
-    GXSetAlphaCompare(GX_ALWAYS, 0, GX_AOP_OR, GX_ALWAYS, 0);
-    GXSetFog(GX_FOG_NONE, 0.0f, 0.0f, 0.0f, 0.0f, g_clearColor);
-    GXSetCullMode(GX_CULL_NONE);
-    GXSetDither(GX_TRUE);
-
-    Mtx44 ortho;
-    C_MTXOrtho(ortho, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 10.0f);
-    GXLoadPosMtxImm(cMtx_getIdentity(), 0);
-    GXSetProjection(ortho, GX_ORTHOGRAPHIC);
-    GXSetCurrentMtx(0);
-    GXClearVtxDesc();
-    GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
-    GXSetVtxDesc(GX_VA_CLR0, GX_DIRECT);
-    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XY, GX_F32, 0);
-    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
-
-    // CHANGED: a single smooth 2-corner gradient (tried first) produced no
-    // visible difference -- it varies too gradually across space for the
-    // water's UV distortion's actual (small) per-frame shift to move
-    // anything a viewer would notice. Multiple alternating THIN stripes
-    // instead, so that same small UV shift visibly slides a stripe
-    // boundary rather than nudging a slow gradient by an imperceptible
-    // amount.
-    constexpr f32 kCornerFraction = 0.08f; // comfortably bigger than the ~2.6% capture rect below
-    constexpr int kStripeCount = 8;
-    constexpr f32 kStripeWidth = kCornerFraction / kStripeCount;
-    GXBegin(GX_QUADS, GX_VTXFMT0, kStripeCount * 4);
-    for (int i = 0; i < kStripeCount; ++i) {
-        const GXColor& c = (i % 2 == 0) ? colorA : colorB;
-        const f32 x0 = i * kStripeWidth;
-        const f32 x1 = x0 + kStripeWidth;
-        GXPosition2f32(x0, 0.0f);
-        GXColor4u8(c.r, c.g, c.b, c.a);
-        GXPosition2f32(x1, 0.0f);
-        GXColor4u8(c.r, c.g, c.b, c.a);
-        GXPosition2f32(x1, kCornerFraction);
-        GXColor4u8(c.r, c.g, c.b, c.a);
-        GXPosition2f32(x0, kCornerFraction);
-        GXColor4u8(c.r, c.g, c.b, c.a);
-    }
-    GXEnd();
-
-    GXSetProjection(view->projMtx, GX_PERSPECTIVE);
-
-    // FIXED (one more focused attempt, per user request): this used to call
-    // retry_captue_frame() with a fake tiny 16x16 view_port. That function
-    // computes its destination copy size as HALF of whatever source
-    // width/height it's given (var_r24 = width >> 1) -- correct for its
-    // normal 608x448 -> 304x224 use, but with a 16x16 fake source that told
-    // the copy system the destination was only 8x8, not the real 304x224
-    // texture. The tiny striped quad only ever filled an 8x8 corner of the
-    // real destination, leaving the rest at stale/default content -- which
-    // is almost certainly why the result looked like one washed-out patch
-    // instead of a visible repeating stripe pattern. Capture directly here
-    // instead, with the REAL destination texture's own dimensions (so the
-    // small striped quad gets scaled up to fill the WHOLE reflection
-    // texture, not just a sliver of it).
-    UNUSED(zoomFocus);
-    if (!dComIfGp_isPauseFlag()) {
-        const u16 dstW = (u16)mDoGph_gInf_c::getFrameBufferTimg()->width;
-        const u16 dstH = (u16)mDoGph_gInf_c::getFrameBufferTimg()->height;
-        GXSetTexCopySrc(0, 0, 16, 16);
-        GXSetTexCopyDst(dstW, dstH, (GXTexFmt)mDoGph_gInf_c::getFrameBufferTimg()->format, GX_FALSE);
-        GXCopyTex((void*)mDoGph_gInf_c::getFrameBufferTex(), GX_FALSE);
-        GXPixModeSync();
-        GXInvalidateTexAll();
-    }
-}
-#endif
+// REMOVED this session (VR water-reflection investigation, resolved
+// 2026-07-29): captureGradientCornerReflection() -- the gradient/stripe
+// placeholder that used to feed water's reflection texture in VR -- is gone.
+// It's no longer called from anywhere: water's own reflective-surface
+// material draw is now skipped entirely in VR (d_com_inf_game.cpp's
+// dComIfGd_drawXluListInvisible()/drawOpaListInvisible(), guarded on
+// g_duskVRRenderingToHeadset), so nothing samples this texture for
+// reflection purposes anymore. Full history of the ghosting/transparency
+// investigation that led here is preserved in CLAUDE.md section 3.
 
 static void motionBlure(view_class* param_0) {
     ZoneScoped;
@@ -2705,33 +2577,28 @@ int mDoGph_Painter() {
                 #endif
 
 #if TARGET_PC
-                // SUPERSEDED this session (VR reflection-ghosting
-                // investigation, round 4): the real screen-capture-based
-                // reflection turned out to be a fundamentally fragile
-                // technique in VR (rounds 1-2). A single flat KONST color
-                // (round 3) fixed the crashing/flashing but erased the
-                // water's own wind-driven UV distortion animation entirely
-                // -- a perfectly uniform texture has nothing for that
-                // distortion to reveal, so it looked like a dead flat
-                // square with no "waves". This round uses a real per-vertex
-                // 2-color gradient instead (GX_SRC_VTX/GX_CC_RASC) -- see
-                // captureGradientCornerReflection()'s comment above -- so
-                // the existing distortion has spatial variation to animate,
-                // while staying just as immune to every crop/scale/ghosting
-                // issue chased earlier (still not tied to head movement or
-                // real scene content at all). Also confirmed this session:
-                // lowering this color's alpha had ZERO visible effect on
-                // transparency, meaning this material's blend doesn't
-                // simply read texture alpha the way assumed -- transparency
-                // is a separate, harder problem not solved by anything
-                // here; tune the two colors themselves to taste.
-                if (dusk::vr::isRenderingToHeadset()) {
-                    static const GXColor kWaterColorA = {120, 175, 200, 255};
-                    static const GXColor kWaterColorB = {170, 210, 225, 255};
-                    captureGradientCornerReflection(&camera_p->view, view_port,
-                                                     dComIfGp_getCameraZoomForcus(camera_id), kWaterColorA,
-                                                     kWaterColorB);
-                }
+                // REMOVED this session (VR water-reflection-quality
+                // investigation, resumed 2026-07-29): this gradient-stripe
+                // placeholder was only ever needed because water's own
+                // reflective-surface material (MA02/MA10) read this shared
+                // capture texture in VR, and the real screen capture was too
+                // ghosting-prone for that (head motion isn't bounded the way
+                // a flatscreen camera is -- see captureGradientCornerReflection()'s
+                // history above). Water's material draw is now skipped
+                // entirely in VR instead (d_com_inf_game.cpp's
+                // dComIfGd_drawXluListInvisible()/drawOpaListInvisible(),
+                // guarded on g_duskVRRenderingToHeadset) -- confirmed via
+                // RenderDoc that this is what was compositing the
+                // stripe/whatever-placeholder-content opaquely on top of an
+                // otherwise correct water base layer. With that consumer
+                // gone, the only thing left reading this shared texture is
+                // the underwater motion-blur effect (motionBlure(), below --
+                // samples getFrameBufferTexObj()), which doesn't need
+                // geometric accuracy the way a reflection does, so the real
+                // capture (re-enabled below) should be fine for it. Not
+                // calling captureGradientCornerReflection() here anymore;
+                // left the function defined in case a placeholder is needed
+                // again for some other purpose.
 #endif
 
                 if (!(DEBUG && g_kankyoHIO.navy.field_0x30d != 0 &&
@@ -2832,17 +2699,19 @@ int mDoGph_Painter() {
                 // confirmed via a debugger breakpoint on GXCopyTex
                 // conditioned on g_duskVRRenderingToHeadset landing right
                 // here."
-                // RE-GUARDED this session (VR reflection-ghosting
-                // investigation): VR now gets its own gradient corner
-                // placeholder capture earlier in this function (see
-                // captureGradientCornerReflection()) instead of this
-                // real-scene capture -- skip this one in VR so it doesn't
-                // immediately overwrite that placeholder with the same
-                // broken content this whole investigation was chasing.
-                // Flatscreen unaffected, runs exactly as before.
-                if (!dusk::vr::isRenderingToHeadset()) {
-                    retry_captue_frame(&camera_p->view, view_port, dComIfGp_getCameraZoomForcus(camera_id));
-                }
+                // RE-RE-ENABLED this session (VR water-reflection-quality
+                // investigation, resumed 2026-07-29): previously skipped in
+                // VR (see history above) so the gradient-stripe placeholder
+                // wouldn't get immediately overwritten -- that placeholder
+                // is gone now (water's material draw is skipped entirely in
+                // VR instead, see the removed block above), so there's no
+                // more reason to withhold real capture data from the one
+                // remaining consumer, the underwater motion-blur effect.
+                // Ghosting/ordering concerns that ruled this out for WATER
+                // specifically (a geometrically-precise reflection) shouldn't
+                // apply the same way to a full-screen blur, which doesn't
+                // need spatial accuracy. Not yet tested in-headset.
+                retry_captue_frame(&camera_p->view, view_port, dComIfGp_getCameraZoomForcus(camera_id));
 
                 #if DEBUG
                 // "Frame Buffer capture 2nd time (Rendering)"

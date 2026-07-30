@@ -7,6 +7,9 @@
 #include "d/actor/d_a_obj_lv1Candle01.h"
 #include "d/d_com_inf_game.h"
 #include "f_pc/f_pc_name.h"
+#ifdef TARGET_PC
+#include "dusk/vr/vr_main.hpp"
+#endif
 
 static daLv1Cdl01_HIO_c l_HIO;
 
@@ -138,6 +141,12 @@ int daLv1Cdl01_c::Execute(Mtx** param_0) {
                                     g_whiteColor, g_whiteColor, 0, 0.0f);
         dComIfGp_particle_setSimple(0x83a7, &mTorchPos, 0xff,
                                     g_whiteColor, g_whiteColor, 0, 0.0f);
+        // Same 0x103 (ID_ZI_J_O_KAGEROU) heat-shimmer particle disabled for
+        // VR in d_a_ep.cpp's torch actor -- that disable only covers
+        // ep_class, not this actor. See CLAUDE.md section 3.
+#ifdef TARGET_PC
+        if (!dusk::vr::isRenderingToHeadset())
+#endif
         dComIfGp_particle_setSimple(0x103, &mTorchPos, 0xff,
                                     g_whiteColor, g_whiteColor, 0, 0.0f);
         mDoAud_seStartLevel(Z2SE_OBJ_FIRE_BURNING, &mTorchPos, 0,

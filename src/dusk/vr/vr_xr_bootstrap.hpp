@@ -65,7 +65,13 @@ inline Bootstrap initialize() {
     std::strncpy(instanceInfo.applicationInfo.applicationName, "Dusklight VR",
                  XR_MAX_APPLICATION_NAME_SIZE - 1);
     instanceInfo.applicationInfo.applicationVersion = 1;
-    instanceInfo.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
+    // XR_CURRENT_API_VERSION (1.1.x in the vendored headers) is rejected
+    // with XR_ERROR_API_VERSION_UNSUPPORTED by both SteamVR's and Virtual
+    // Desktop's OpenXR runtimes (confirmed 2026-07-30) -- neither has
+    // caught up past the 1.0.x instance API. Request 1.0 explicitly; this
+    // bootstrap only uses core 1.0 functionality plus the D3D12 KHR
+    // extension, so there's no feature reason to ask for 1.1.
+    instanceInfo.applicationInfo.apiVersion = XR_API_VERSION_1_0;
 
     checkResult(xrCreateInstance(&instanceInfo, &boot.instance), "xrCreateInstance");
 

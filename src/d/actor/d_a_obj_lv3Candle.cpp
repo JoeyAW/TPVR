@@ -10,6 +10,9 @@
 #include "d/d_com_inf_game.h"
 #include "d/d_s_play.h"
 #include "d/d_cc_uty.h"
+#ifdef TARGET_PC
+#include "dusk/vr/vr_main.hpp"
+#endif
 
 class daLv3Candle_HIO_c : public mDoHIO_entry_c {
 public:
@@ -152,6 +155,12 @@ void daLv3Candle_c::pointLightProc() {
 int daLv3Candle_c::Execute() {
     dComIfGp_particle_setSimple(0x100, &mTorchPos, 0xff, g_whiteColor, g_whiteColor, 0, 0.0f);
     dComIfGp_particle_setSimple(0x101, &mTorchPos, 0xff, g_whiteColor, g_whiteColor, 0, 0.0f);
+    // Same 0x103 (ID_ZI_J_O_KAGEROU) heat-shimmer particle disabled for VR
+    // in d_a_ep.cpp's torch actor -- that disable only covers ep_class,
+    // not this actor. See CLAUDE.md section 3.
+#ifdef TARGET_PC
+    if (!dusk::vr::isRenderingToHeadset())
+#endif
     dComIfGp_particle_setSimple(0x103, &mTorchPos, 0xff, g_whiteColor, g_whiteColor, 0, 0.0f);
 
     mDoAud_seStartLevel(Z2SE_OBJ_FIRE_BURNING, &mTorchPos, 0,

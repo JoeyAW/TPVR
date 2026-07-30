@@ -37,6 +37,17 @@
 // without fighting anonymous-namespace name mangling in the debugger's
 // expression evaluator.
 extern "C" bool g_duskVRRenderingToHeadset = false;
+// TEMP DIAGNOSTIC (VR heat-wave "floating portal" investigation): unlike
+// g_duskVRRenderingToHeadset above (only true during the narrow per-eye
+// draw window inside tick(), which runs AFTER game-logic update in the
+// frame), this stays true for the whole VR session lifetime (mirrors
+// isActive()/g_session != nullptr). Particle spawn calls happen during
+// actor update, not draw, so gating a spawn-time log on the per-eye flag
+// risks a several-frame lag or missing the window entirely depending on
+// update/draw ordering -- this is the reliable one to gate spawn-time
+// diagnostics on. extern "C" for the same reason as above: usable from
+// other translation units without namespace/mangling issues.
+extern "C" bool g_duskVRSessionActive = false;
 // TEMP DIAGNOSTIC (VR water-black investigation): which eye (0=left,
 // 1=right) is currently being drawn, set right before beginEye() each
 // iteration of the per-eye loop below. Same extern "C" pattern as
@@ -200,6 +211,7 @@ bool waitForSessionReadyAndBegin(XrInstance instance, XrSession session) {
 void initSession(Session* session) {
     g_session = session;
     g_sessionRunning = true;
+    g_duskVRSessionActive = true;
     // TODO: call once, after an aurora::gfx device exists:
     // g_handDrawState.typeId = aurora::gfx::register_draw_type(vr_render::handDrawDescriptor());
 }
@@ -412,6 +424,7 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
                 // this session.
                 g_session = nullptr;
                 g_sessionRunning = false;
+                g_duskVRSessionActive = false;
                 return;
             }
         }

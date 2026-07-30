@@ -16,6 +16,7 @@
 #include "dusk/version.hpp"
 #if TARGET_PC
 #include "dusk/frame_interpolation.h"
+#include "dusk/vr/vr_main.hpp"
 #endif
 
 static void vectle_calc(DOUBLE_POS* i_pos, cXyz* o_out) {
@@ -452,6 +453,26 @@ void dKyr_sun_move() {
         sp24.y = camera_p2->view.lookat.eye.y + 30160.0f * lightDir.y;
         sp24.z = camera_p2->view.lookat.eye.z + 30160.0f * lightDir.z;
         sp24.y -= 21678.0f;
+        // User-reported this session: a large rectangular "floating portal"
+        // duplicating/repeating the scene, only in VR (matches the
+        // heat-shimmer-via-live-screen-capture mechanism, same family as
+        // water's ghosting bug -- see CLAUDE.md section 3). Found via
+        // diagnostic particle-spawn logging (d_particle.cpp): this
+        // "sunKagerou" (0x11C / ZI_J_sunKagerou01.jpa) particle is a THIRD,
+        // previously-unidentified kagerou effect, separate from both the
+        // sun disc sprite/lens flare (dKyw_Sun_Draw, already disabled in
+        // d_kankyo_wether.cpp) and the torch fire-shimmer particle (already
+        // disabled in d_a_ep.cpp) -- neither of those disables touched this
+        // code path, which is why the blob persisted after both. Positioned
+        // a fixed 30160 units from the camera eye toward the sun -- a VR
+        // headset's free head rotation moves that anchor point across the
+        // view far more than a flatscreen third-person camera ever would,
+        // the same class of problem noted for water's reflection quality.
+        // Skip spawning it in VR entirely, same tradeoff already accepted
+        // for the other two kagerou-family effects.
+#ifdef TARGET_PC
+        if (!dusk::vr::isRenderingToHeadset())
+#endif
         sun_packet->field_0x58 = dComIfGp_particle_set(sun_packet->field_0x58, 0x11C, &sp24, 0, 0);
     }
 }

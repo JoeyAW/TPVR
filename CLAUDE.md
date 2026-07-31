@@ -2,7 +2,7 @@
 
 Twilight Princess PC port ("dusklight") with an in-progress VR mod. This file
 tracks the state of active VR debugging so a session can be resumed cleanly
-after a break. It reflects the working tree as of 2026-07-29; check `git
+after a break. It reflects the working tree as of 2026-07-30; check `git
 status`/`git diff` against this list before trusting anything below, since
 these are hand-maintained notes, not generated from the diff.
 
@@ -79,7 +79,25 @@ future session, not started. VR launch itself is now confirmed working on
 all three runtimes actually used for this project (SteamVR, Virtual
 Desktop, Meta Link) as of 2026-07-30 — see section 6 for the OpenXR API
 version / swapchain format / SteamVR color fixes involved; before that
-session only Meta Link had ever been tested. Other known issues below.
+session only Meta Link had ever been tested. The 2D HUD (hearts, rupees,
+menus) now renders as a comfortable, head-locked 3D billboard (with
+orientation damping so it doesn't shake with head-tracking jitter) instead
+of a flat per-eye overlay glued to the lens, as of 2026-07-30 — see
+section 7. The in-game HUD minimap (and, by the same fix, the pause-screen
+map) no longer renders solid black with scattered color-corruption pixels
+in VR, as of 2026-07-30 — see section 8; user-confirmed fixed in-headset.
+Model/mesh-level frustum culling (background objects like rocks/buildings
+fully disappearing when Link faces away, distinct from section 2's actor
+culling) is disabled in VR as of 2026-07-30 — see section 9; built
+successfully but **not yet confirmed in-headset**.
+Goron Mines' own "heat wave" effect (visually similar to section 5's
+floating-portal bug but a separate follow-up, previously unidentified) is
+root-caused and fixed as of 2026-07-31 — see section 10; user-confirmed
+gone in-headset. Note this section 10 fix **removes the effect entirely**
+(both VR and flatscreen) rather than VR-gating it like section 5's fixes —
+an explicit user choice for this specific location, not the project's
+general VR-bug-fix pattern.
+Other known issues below.
 
 ## Currently uncommitted working-tree changes
 
@@ -920,9 +938,12 @@ engine**:
   path, untested time-of-day window. Likely fine (same guard covers it)
   but not confirmed.
 - Goron Mines (the lava dungeon) confirmed clear of the portal after these
-  fixes, but has a separate, not-yet-identified visual issue there per the
-  user — a new, unstarted investigation, not assumed to be related to
-  anything in this section.
+  fixes, but had a separate, similar-looking visual issue there per the
+  user — **root-caused and fixed 2026-07-31, see section 10.** Turned out to
+  be three more instances of this exact "dummy"-texture mechanism that this
+  section's whole-codebase grep didn't happen to catch, since none of them
+  are named "kagerou" and one is spawned via a raw hex literal instead of
+  the id constant's name.
 - The diagnostic logging added this session (`d_particle.cpp`'s
   `[dusk::particle] setSimple`/`[dusk::particle] set` logs, and
   `g_duskVRSessionActive` in `vr_main.cpp`) is still in the tree as of this
@@ -1069,6 +1090,393 @@ the cost rather than just shrink it:
 SteamVR, Virtual Desktop, and Meta Link (Meta Link retested after these
 changes specifically to confirm no regression from the API-version/format
 changes — none found).
+
+### 7. VR HUD — flat per-eye overlay replaced with a head-locked 3D billboard — FIXED 2026-07-30
+
+**Symptom**: the 2D HUD (hearts, rupees, menus — drawn by the tail of
+`mDoGph_Painter()`, `m_Do_graphic.cpp`) used to be drawn per-eye with a raw
+screen-space orthographic projection, identical in both eye textures —
+zero stereo disparity, which read as either painted directly on the lens or
+otherwise sitting at an uncomfortable, badly-defined depth. User wanted it
+pushed back to a comfortable, unobtrusive distance instead. Explicitly
+agreed approach: **head-locked** (rigidly follows the view every frame) for
+now, structured so it can grow into **body-locked** (lags behind quick head
+turns, steadier/less "swimmy") in a future session without a rewrite.
+
+**Architecture**:
+- `mDoGph_drawHud2D()` (`m_Do_graphic.cpp`) — the old inline HUD-drawing
+  tail of `mDoGph_Painter()`, extracted into its own function so it can be
+  called standalone. Flatscreen behavior is unchanged (still called inline,
+  same content).
+- `mDoGph_gInf_c::captureHudBillboard()` (`m_Do_graphic.cpp`) — renders that
+  same flat HUD, once per frame, into a small persistent offscreen texture
+  (`m_hudBillboardTimg`/`Tex`/`TexObj`, same "allocate once via `createTimg()`,
+  refresh every frame via `GXCopyTex`" template as the existing
+  `m_fullFrameBufferTex*`/`mFrameBufferTex*` capture buffers). Called from
+  `vr_main.cpp`'s `tick()` **before** the per-eye loop opens either eye's
+  protected offscreen pass — critical: `GXCreateFrameBuffer`'s
+  single-level-nesting limit means this must never run nested inside a VR
+  eye pass (see section 3's "Solid-color-in-a-new-offscreen-pass" crash for
+  why). Sized exactly `FB_WIDTH x FB_HEIGHT` (608x448) so the capture reuses
+  the existing ortho/viewport code with zero rescaling awareness needed.
+- `vr_render::drawHudBillboard()` (`vr_stereo_render.hpp`, forwarded via a
+  thin `dusk::vr::drawHudBillboard()` wrapper in `vr_main.hpp`/`.cpp` so
+  `m_Do_graphic.cpp` doesn't need to include the heavier OpenXR/aurora
+  headers) — draws that captured texture as a real 3D quad, once per eye,
+  called from `mDoGph_Painter()`'s original HUD call site
+  (`if (!dusk::vr::isRenderingToHeadset()) { mDoGph_drawHud2D(); } else { dusk::vr::drawHudBillboard(...); }`).
+  Reasserts the eye's real asymmetric projection
+  (`GXSetProjection(view->projMtx, GX_PERSPECTIVE)` — not automatic, a
+  stateful register write the 2D/3D passes both clobber earlier in the
+  frame) and draws the quad with an **identity position matrix**, vertices
+  authored directly in eye-space — this is what makes it head-locked "for
+  free," no view-matrix multiply needed. Quad placement (`computeHudPose()`,
+  same file) is deliberately its own small function, separate from the
+  actual GX draw calls — the seam for a future body-locked mode (swap this
+  one function for something that low-pass-filters yaw instead of using the
+  raw eye pose, without touching capture/texture/draw plumbing at all).
+  Tunable constants: `kHudDistanceMeters` (2.0), `kHudWidthMeters` (1.4,
+  bumped up from an initial 1.0 per user feedback), `kHudHeightMeters`
+  (derived, matches 608:448 aspect).
+
+**Gotcha 1 — captured content came back solid black**: `mDoGph_drawHud2D()`
+draws nothing when called from `captureHudBillboard()`'s pre-eye-loop
+position, even though the offscreen-pass/`GXCopyTex` pipeline itself was
+proven fine (confirmed via a hand-drawn solid-color marker quad injected
+directly into the same capture, independent of `mDoGph_drawHud2D()`'s own
+draw calls — it showed up fine on the billboard). Root cause: whatever
+populates/refreshes the persistent 2D HUD draw-list content happens as a
+side effect of `fpcM_DrawIterater()` (actor updates, meter state, etc.),
+not independently of it — and at the point `captureHudBillboard()` runs
+(before the per-eye loop), that hasn't run yet this frame. **Fix**: call
+`fpcM_DrawIterater((fpcM_DrawIteraterFunc)fpcM_Draw)` once, explicitly,
+right before `captureHudBillboard()` in `vr_main.cpp`'s `tick()` — a third
+call per frame (previously only once per eye, twice total). Its 3D draw
+output targets the normal EFB pass, which is discarded/never presented
+while VR is active (same "game skips its own desktop redraw" behavior noted
+in the Build Workflow section), so this is CPU-traversal cost, not wasted
+GPU-visible work.
+
+**Gotcha 2 — real per-pixel alpha made the WHOLE panel invisible**: tried
+sampling the captured texture's own alpha channel (`GX_CA_TEXA`) for real
+per-pixel transparency (icons visible, background see-through). Confirmed
+the captured COLOR content was correct first (a debug pass forcing
+`GX_BM_NONE` — opaque overwrite, alpha ignored entirely — showed real HUD
+icons, just against an opaque black background as expected for that test).
+But switching to real alpha blending made the ENTIRE billboard disappear,
+icons included — not just the background. This is the same class of "this
+material's translucency isn't simple texture alpha" finding as the water
+investigation (section 3) hit and never fully explained either; likely
+these HUD materials' TEV alpha outputs were simply never authored to be
+meaningful, since alpha-write has always been disabled during normal
+gameplay (nothing downstream ever consumed it before this VR use case) —
+not one narrow bug to fix, a systemic non-signal. **Direct inspection ruled
+out**: unlike the eye-buffer readback path (`vr_xr_submit.hpp`'s
+`dumpEyeBufferToBmp()`), the `GXCopyTex` destination pointer used for this
+capture is only a GPU-texture-cache key in this PC port
+(`extern/aurora/lib/dolphin/gx/GXFrameBuffer.cpp`'s `copy_tex()` — `dest`
+is a `CopyTextureKey`, real pixels are GPU-resident) — no cheap CPU-side
+pixel readout is possible; a real answer would require a full RenderDoc,
+per-material investigation, the same open-ended effort that never fully
+resolved for water's alpha. **Fix chosen instead (explicit user tradeoff,
+not a default)**: derive alpha from the captured COLOR itself — a "luma
+key". `drawHudBillboard()` uses 3 TEV stages, repurposing
+`GX_TEV_SWAP1`/`2`/`3` (leaving `SWAP0`'s identity default untouched) to
+read the texture's red/green/blue channels one at a time into the alpha
+slot, accumulating `R+G+B` (saturating) as the final alpha via
+`GX_CA_APREV`-chained `ADD` ops — background (capture's black clear color)
+→ alpha ≈ 0 → transparent; any real HUD content (colored) → higher alpha →
+visible. Not pixel-perfect (a near-black icon pixel would read as
+transparent too) but requires no per-material investigation and looks
+correct for real icon art in practice — confirmed in-headset. **If this
+ever needs revisiting**: the honest fallback if the luma-key look isn't
+good enough is the full RenderDoc per-material investigation described
+above, not another blind heuristic.
+
+**Performance, measured (not assumed) 2026-07-30**: `std::chrono` timing
+around both the extra `fpcM_DrawIterater()` call and `captureHudBillboard()`
+itself, logged in 90-frame running averages. Normal gameplay: ~0.09-0.14ms
++ ~0.04-0.07ms. Menu/pause screens (more 2D content, less 3D actor
+traversal): up to ~0.5ms combined at the observed worst case. Against a
+72-90Hz VR frame budget (~11-14ms), that's roughly 1-4% at worst, under 2%
+typically — not a measurable perf concern, not worth optimizing further
+absent new evidence. Diagnostic timing code removed after confirming this;
+if perf ever needs re-checking, the pattern (accumulate
+`std::chrono::high_resolution_clock` deltas over N frames, log the average,
+reset) is simple to re-add at the same two call sites in `vr_main.cpp`'s
+`tick()`.
+
+**Follow-up same day: damping added, user reported the head-locked panel
+felt "really shaky"** — expected, since it was rigidly glued to raw
+per-frame head tracking with zero filtering. Fixed via
+`vr_stereo_render.hpp`'s `updateHudSmoothing()`/`computeHudPose()`: a
+persistent, GAME-WORLD-space direction (`g_hudSmoothedWorldForward`) is
+low-pass-filtered toward the real head direction once per frame
+(`kHudDampingAlpha = 0.08`, lerp-per-frame, not frame-time-corrected),
+computed via `updateHudSmoothing()` (called once, `vr_main.cpp`'s `tick()`,
+alongside `captureHudBillboard()`) by reusing `eyePoseToViewMtx()` — already
+validated, drives the whole working 3D scene — purely for its rotation math
+(zero position delta, dummy `linkEyeGame`, only reads back row 2 of the
+resulting matrix). **Deliberately damps ORIENTATION only, not position** —
+position tracks the head instantly, matching how shipped VR games' actual
+body-locked UI behaves (translating with you feels natural; only rotational
+lag reads as "steadier"). `computeHudPose()` re-projects the damped
+world-space direction into whichever eye is CURRENTLY drawing via that
+eye's own (un-damped, current) `view->viewMtx` rotation each call — this is
+what keeps the panel's own plane always flat-facing you (right/up axes stay
+purely eye-local, never rotated) while only the CENTER's angular position
+lags.
+
+**Bug hit and fixed same round**: first version double-negated the
+distance — `dist` was still the OLD pre-signed constant
+(`-(kHudDistanceMeters*kHudUnitsPerMetre)`) left over from the original
+fixed-offset code, but the new re-projected direction `(ex,ey,ez)` ALSO
+already carries the correct sign (≈`(0,0,-1)` in eye-local space when
+undamped) — multiplying two negatives together flipped the panel to
+directly behind the camera, making it disappear entirely (**user report:
+"the huds gone"**). Fixed by making `dist` a plain positive magnitude
+(`kHudDistanceMeters * kHudUnitsPerMetre`, no sign) since the direction
+vector now supplies the sign. **Lesson for next time a "reproject a
+direction into local space" pattern gets added here**: any pre-existing
+sign baked into a distance/offset constant from an OLDER fixed-vector
+version needs auditing once that constant starts being multiplied by an
+actual direction vector instead of used directly as a raw offset — the two
+conventions (signed offset vs. positive-magnitude-times-signed-direction)
+look superficially similar but silently double-negate if mixed. Confirmed
+fixed and steady in-headset after the correction — user: "That looks really
+nice."
+
+**Unrelated incident during this session, worth flagging**:
+`extern/aurora/lib/gfx/common.cpp` (a file untouched by any of this HUD
+work) had its `wait_for_gpu_progress()` function's closing `}` replaced
+with literal garbled text (`Why ca}`, then — after being fixed once —
+regenerated a SECOND time as `Why caYea}`, i.e. it grew rather than just
+reappearing identically) mid-session, breaking the build both times. Fixed
+both times (restored the plain `}`); this pattern (same exact line,
+growing between occurrences) strongly suggests something on the user's
+end — an editor, autocomplete, or dictation tool — was actively typing into
+that specific file while it had focus, not a one-off fluke or anything
+these code changes caused. Flagged to the user; if the build ever breaks
+again at this exact spot, check for a stray focused window/editor on
+`extern/aurora/lib/gfx/common.cpp` before assuming it's a real regression.
+
+### 8. VR minimap black with color-corruption pixels — FIXED 2026-07-30
+
+**Symptom**: the small in-game HUD minimap (and, it turns out, the
+pause-screen full map by the same mechanism) rendered as solid black with a
+scattering of stray colorful pixels — VR only, fine on flatscreen. Pattern
+is the classic signature of an uninitialized/never-written GPU texture
+(garbage memory content), not a shader or blend bug.
+
+**Root cause**: the minimap renders its own source texture via a dedicated
+`GXCreateFrameBuffer` offscreen pass — `d_map_path.cpp`'s
+`dRenderingMap_c::renderingMap()`, reached through
+`dComIfGd_drawCopy2D()` → `dDlst_list_c::drawCopy2D()` → virtual `draw()`
+on the registered `dMap_c` (small minimap) or `dMenu_FmapMap_c` (pause
+map) instance. That call site fires once per eye from inside
+`mDoGph_Painter()` (`m_Do_graphic.cpp`), i.e. *after* `beginEye()` has
+already opened that eye's own protected offscreen pass — nesting a second
+one there would crash, same class of bug as the water-reflection capture
+(section 3). An earlier session had already guarded against exactly that,
+by making `renderingMap()` (and `postRenderingMap()`'s internal capture
+step) return early whenever `dusk::vr::isRenderingToHeadset()` was true.
+The bug: that flag is true for the *entire* VR-rendering `tick()` call
+(set at `vr_main.cpp` ~line 506, well before the per-eye loop even starts),
+not just while an eye pass is actually open — despite older comments
+nearby assuming the narrower meaning. So the guard fired on every single
+call, every frame, meaning the minimap's texture **never rendered at all
+during VR** and stayed at whatever garbage was in that GPU memory at
+allocation time. The minimap's on-screen picture (`mMapJ2DPicture`) was
+still being composited correctly as part of the already-fixed HUD
+billboard (section 7) — it was faithfully displaying a texture that
+simply never got written.
+
+**Fix** (mirrors section 7's HUD billboard architecture exactly): added a
+new, narrower flag/accessor, `dusk::vr::isEyePassOpen()`
+(`vr_main.hpp`/`.cpp`, backed by `g_duskVREyePassOpen`), true only between
+a given `beginEye()` and its matching `endEye()` inside the per-eye loop —
+unlike `isRenderingToHeadset()`, which is true for the whole frame. Added
+`mDoGph_gInf_c::captureMapCopy2D()` (`m_Do_graphic.cpp`, declared in
+`m_Do_graphic.h` next to `captureHudBillboard()`), which reproduces the
+same `J2DOrthoGraph`/`dComIfGp_setCurrentGrafPort()` setup
+`mDoGph_Painter()` does right before its own `dComIfGd_drawCopy2D()` call
+(needed because `postRenderingMap()` reads back the current graf port to
+call `setup2D()`), then calls `dComIfGd_drawCopy2D()` itself. Called once
+per frame from `vr_main.cpp`'s `tick()`, right after
+`captureHudBillboard()` and before the per-eye loop opens any eye pass —
+the same safe window HUD's capture already uses. Changed
+`d_map_path.cpp`'s two guards (`renderingMap()`'s early-return and
+`postRenderingMap()`'s `skipCapture`) from `isRenderingToHeadset()` to
+`isEyePassOpen()`, so the minimap now actually renders during this safe
+pre-loop window but still correctly no-ops during the redundant per-eye
+call from inside `mDoGph_Painter()` (avoiding the nested-offscreen-pass
+crash the original guard existed to prevent).
+
+**Confirmed fixed in-headset same session** — user: "Surprisingly easy fix.
+Bug closed." Since the pause-screen map (`dMenu_FmapMap_c`) funnels through
+the exact same `dRenderingMap_c::renderingMap()`/`postRenderingMap()`
+guards, it should be fixed by the same change, but this was not separately
+confirmed in-headset — if it's ever reported still broken, start here
+rather than assuming a new bug.
+
+**Lesson worth remembering**: `g_duskVRRenderingToHeadset`/
+`isRenderingToHeadset()` reads like a "we are currently rendering an eye"
+flag from its name, but it's actually scoped to the whole `tick()` call
+once a gameplay view is ready — not to the narrower "an eye's protected
+offscreen pass is currently open" window. Any future code that needs to
+know specifically whether nesting a `GXCreateFrameBuffer` right now would
+crash should check `isEyePassOpen()`, not `isRenderingToHeadset()` — the
+same mistake (assuming the broader flag meant the narrower thing) is what
+caused this bug in the first place, and the flag's own old comments
+predating this fix still described it inaccurately.
+
+### 9. Model/mesh-level frustum culling behind Link's facing direction — FIXED 2026-07-30 (built, NOT yet tested in-headset)
+
+Distinct from section 2's `mDoLib_clipper` fix (the actor-visibility
+frustum, already fixed) — this is a separate clipper class, `J3DUClipper`,
+used for per-mesh J3D model geometry culling (background objects: rocks,
+buildings, etc.). **Symptom**: objects fully disappear (not just fade, per
+section 2's already-fixed issue) when Link faces away from them — because a
+VR headset's head can look around independently of Link's body-facing
+direction, but this clipper's frustum was still derived from the stale
+flatscreen-camera-facing direction, same underlying class of bug as
+section 2 just in a different subsystem.
+
+**Found via the user's direct contact with the dusklight devs**: the
+(excluded-from-build) `shadow_mod` mod already ships a "No Frustum
+Clipping" toggle (`mods/shadow_mod/src/mod.cpp`,
+`g_cvarNoFrustumClipping`/`on_frustum_clip_pre()`) that works by
+runtime-hooking both `J3DUClipper::clip` overloads via the project's
+mod-hook framework (`DEFINE_HOOK`/`hook_add_pre`) and forcing the return
+value to `0` (not culled) while active. The dev's guidance: this can be
+done directly in `J3DUClipper::clip` itself, without needing `shadow_mod`
+or its hooking machinery at all.
+
+**Fix applied directly in `libs/JSystem/src/J3DU/J3DUClipper.cpp`**: both
+`clip()` overloads now check `g_duskVRRenderingToHeadset` (declared
+`extern "C" bool`, same pattern already used in `d_drawlist.cpp`) at entry
+and return `0` immediately when true — culling never fires while rendering
+to the headset. Flatscreen keeps normal culling (a real perf optimization
+there, and not reported as buggy on flatscreen) — deliberately scoped to
+VR only via this flag, unlike shadow_mod's global on/off toggle.
+`J3DUClipper.cpp` only compiles into the `JSystem_J3DU` static lib
+(`files.cmake`), which is not linked into any mod DLL build, so — unlike
+`d_com_inf_game.h` (see section 1's Round 1 fix) — no
+`TARGET_PC`/`DUSK_BUILDING_GAME` guard is needed here.
+
+**Status: built successfully (RelWithDebInfo), NOT yet confirmed
+in-headset.** Next step for whoever picks this up: launch in VR, turn to
+face away from a known object (rock/building) that previously vanished,
+confirm it now stays visible, and check for any new problems (e.g.
+increased draw calls/perf cost from disabling this optimization, though
+given section 7's HUD billboard perf numbers this is expected to be
+negligible against the VR frame budget).
+
+**Unrelated incident hit while building this fix**: `extern/aurora/lib/gfx/
+common.cpp`'s `wait_for_gpu_progress()` had its closing `}` replaced with
+garbled text (`Ty`) again — a further occurrence of the exact pattern
+flagged in section 7's "Unrelated incident" note (previously `Why ca}`,
+then `Why caYea}`). Fixed by restoring the plain `}`; this is the third
+time this exact line has been corrupted mid-session, reinforcing that it's
+something on the user's end (an editor/dictation/autocomplete tool with
+focus on that file) rather than a regression from any code change in this
+project. If the build ever fails at this exact spot again, check here
+before assuming a real regression.
+
+### 10. Goron Mines "heat wave" effect — ROOT-CAUSED AND REMOVED 2026-07-31
+
+**Symptom** (user-confirmed, VR only): entering Goron Mines showed "a bunch
+of squares flying up" that "have a similar effect to the heatwaves where I
+see my view duplicated and displayed in the texture" — visually related to
+section 5's floating-portal bug, but Goron Mines had already been checked
+clear of every kagerou spawn site section 5 found and fixed. User wanted
+this removed entirely (not VR-gated) for both VR and flatscreen, unlike
+this project's usual "disable in VR only" pattern for this class of bug —
+an explicit, one-off choice for this location.
+
+**Method**: same as section 5 — the existing `[dusk::particle]
+set`/`setSimple` diagnostic logging (still in the tree from that session,
+gated on `g_duskVRSessionActive`) was already sufficient; no new logging
+needed. User reproduced in-headset, pasted Output-window lines, three
+separate rounds of "still there" narrowed it to three distinct spawn
+sites — each confirmed fixed (absent from the next log) before moving to
+the next, rather than guessing all three up front.
+
+**Three separate spawn sites found, all sharing the same root mechanism**
+(the "dummy"-texture live-screen-capture substitution documented in
+section 5 — `dPa_control_c::createCommon()`/`createRoomScene()` swap any
+particle literally textured `"dummy"` for the shared screen-capture
+texture; VR's stereo/per-eye ambiguity turns that into a duplicated-scene
+artifact):
+
+1. **Magma Pole head-burst** (`d_a_obj_firepillar2.cpp`,
+   `daObjFPillar2_c::actionOnInit()`, `KIND_MAGMA_POLE`): the erupting
+   lava-geyser hazard's "head" burst VFX, ids `l_yogan_headS/M/L_id`
+   (`0x84E4`–`0x84EC`, i.e. `ID_ZI_S_YOGANBASHIRA_{S,M,L}_HEAD_{A,B,C}` —
+   "Yougan Bashira" = lava pillar). Found by cross-referencing the user's
+   very first log (`0x84e7-0x84e9`, masked via `dPa_RM`'s `0x8000` flag —
+   see `getRM_ID()`/`dPa_group_id_change()` in `d_particle.cpp`) directly
+   against the particle-name header's `/* 0x4E7 */` comments. Disabled
+   unconditionally by removing the whole spawn loop; the pillar's
+   hazard/damage/animation logic is untouched, only this burst VFX is gone.
+2. **Pipe Fire jet** (same file, same actor class's `KIND_PIPE_FIRE`
+   variant — a separate, continuous upward fire-jet hazard sharing the
+   same `Obj_yogan` JPA archive): both its idle pilot-light particles
+   (`Create()`'s `0x84df`/`0x84e0`) and its rate/lifetime-driven directional
+   jet (`actionOnWaitInit()`'s `l_pipe_fire_id`, `0x84E1`-`0x84E3`)
+   disabled the same way. This was the strongest match for "flying up" of
+   the three, being a sustained jet rather than a one-shot burst — but
+   turned out not to be the whole story either.
+3. **`daYkgr_c` ("Dragon Mountain Heat Haze")** — the actual primary
+   cause, found last: `src/d/actor/d_a_ykgr.cpp`, internal HIO label "竜の
+   山陽炎" (literally "Dragon Mountain Heat Haze"), matching the
+   `AK_SP_MtDragonKagerou.jpa` asset name noticed early in this
+   investigation but never traced to a call site until the log pointed
+   back to it. Spawns `0x80e2` = `dPa_RM(ID_ZI_S_SCREENKAGEROU01)` — the
+   same dedicated "screen kagerou" id already seen (harmlessly) in
+   `d_kankyo.cpp`'s `#if DEBUG`-only HIO test menu, but invoked here via a
+   raw hex literal rather than the id constant's name, which is why the
+   original whole-codebase name grep in section 5 missed it. Confirmed
+   Goron-Mines-specific via `_draw()`'s `strcmp(dComIfGp_getStartStageName(),
+   "D_MN04A") == 0` check (a Goron Mines room, tied to boss health via
+   `dComIfGs_BossLife_public_Get()`). **Why this one actually matched the
+   symptom**: unlike the other two (world-space particles at a fixed
+   hazard), `daYkgr_c::set_mtx()` re-anchors the effect to the **camera's**
+   eye position/lookat direction every frame — i.e. it's camera-locked, not
+   world-locked. A VR headset's free head rotation sweeping a camera-locked
+   screen-capture distortion effect is exactly what would read as "a bunch
+   of squares flying up" as the view whips around, far more than a
+   world-anchored hazard effect only breaks when you're standing right
+   next to it. Disabled by returning `cPhs_COMPLEATE_e` at the top of
+   `_create()` before the particle-set call — this actor exists solely to
+   drive this one effect (no collision, no other gameplay role), so
+   skipping creation entirely (rather than just skipping the spawn and
+   leaving a dangling emitter-less instance) is the clean fix.
+
+**User-confirmed fixed in-headset** after the `daYkgr_c` fix specifically —
+the first two fixes alone were each confirmed (via absence from the next
+log) to have actually stopped spawning, but neither alone stopped the
+visible symptom, meaning genuinely all three needed fixing rather than the
+first match being sufficient. **This matches section 5's "grep the entire
+codebase for every other call site" lesson exactly, but one level harder**:
+that lesson assumed every spawn site shares a common id name to grep for —
+here, three *different* ids across three *different* archives all fed the
+same visual symptom, and one of the three was invoked by numeric literal
+with no name at its call site at all. **Reusable lesson**: when a "dummy"-
+texture-style bug resists a single fix, don't assume the first confirmed-
+and-disabled instance was the only one just because it's a strong
+circumstantial match (world-space "flying up" particles felt like an
+obvious fit) — camera-locked/screen-anchored effects are a categorically
+different (and easy to overlook) instance of the same underlying
+mechanism, and are actually the more VR-disruptive case since they track
+head movement directly rather than requiring proximity to a hazard.
+
+**Scope note**: per explicit user request, all three fixes here are
+unconditional (no VR guard) — this removes the effects on flatscreen too,
+unlike every other kagerou/heat-wave fix in this file. If a future session
+is asked to restore flatscreen's heat-wave visuals in Goron Mines
+specifically, these three sites (not section 5's candle/torch/sun sites)
+are where to look.
 
 ## Key lesson learned this session
 

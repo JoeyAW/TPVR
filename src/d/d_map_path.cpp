@@ -553,11 +553,23 @@ void dRenderingMap_c::renderingMap() {
     // Since the minimap HUD renders every single frame during normal
     // gameplay, this was firing constantly, not just around saves --
     // guarding only postRenderingMap()'s copy left this wide open. Skip the
-    // whole pre/draw/post sequence while actually rendering stereo eyes;
-    // the minimap texture just won't update that frame instead of
+    // whole pre/draw/post sequence while an eye pass is actually open;
+    // the minimap texture just won't update from THIS call site instead of
     // corrupting VR's eye pass.
+    //
+    // UPDATE (minimap black-screen investigation): changed from
+    // isRenderingToHeadset() to isEyePassOpen(). The former is true for
+    // this whole frame once VR is rendering at all, which meant this always
+    // skipped -- including the one call site (vr_main.cpp's tick(),
+    // mDoGph_gInf_c::captureMapCopy2D(), called before the per-eye loop
+    // opens any eye pass) that's actually safe and is now how the minimap's
+    // texture gets rendered during VR. isEyePassOpen() is only true between
+    // beginEye()/endEye(), so this still correctly skips the redundant
+    // per-eye call from inside mDoGph_Painter() (dComIfGd_drawCopy2D(),
+    // m_Do_graphic.cpp), which really would nest a second offscreen pass
+    // inside the eye's own.
 #ifdef TARGET_PC
-    if (dusk::vr::isRenderingToHeadset()) {
+    if (dusk::vr::isEyePassOpen()) {
         return;
     }
 #endif
@@ -679,8 +691,16 @@ void dRenderingFDAmap_c::postRenderingMap() {
     // always kept working fine before this fix). Only skip the actual
     // GXCopyTex/GXRestoreFrameBuffer capture, not the rest of the function's
     // GX state setup.
+    //
+    // UPDATE (minimap black-screen investigation): changed from
+    // isRenderingToHeadset() to isEyePassOpen(), same reasoning as
+    // renderingMap()'s own guard above -- this function is now only ever
+    // reached (via renderingMap()) when isEyePassOpen() is false (either
+    // flatscreen, or VR's safe pre-eye-loop capture window), so checking
+    // isRenderingToHeadset() here would still incorrectly skip the real
+    // capture during that safe window even though it's fine to run there.
 #ifdef TARGET_PC
-    const bool skipCapture = dusk::vr::isRenderingToHeadset();
+    const bool skipCapture = dusk::vr::isEyePassOpen();
     const auto [rw, rh] = map_render_size_for(mTexWidth, mTexHeight);
     if (!skipCapture) {
         GXSetTexCopySrc(0, 0, rw, rh);

@@ -53,6 +53,7 @@
 #include "f_op/f_op_view.h"        // view_class, lookat_class, Mtx44, Mtx
 #include "m_Do/m_Do_lib.h"         // mDoLib_clipper::setup()
 #include <dolphin/mtx.h>           // C_MTXPerspective, mDoMtx_lookAt (or equivalent)
+#include <dolphin/gx.h>            // GXBegin/GXEnd/etc. -- drawHudBillboard()
 #include <JSystem/J3DGraphBase/J3DSys.h> // j3dSys.setViewMtx()
 
 #include <algorithm>
@@ -536,6 +537,266 @@ inline aurora::gfx::ResolvedTargets endEye() {
     return targets;
     // targets.color is now a wgpu::TextureView of this eye's rendered frame.
     // Pass it to vr_xr_submit::submitEye() once that file is written.
+}
+
+// ---------------------------------------------------------------------------
+// Head-locked HUD billboard
+//
+// The flat 2D HUD (hearts, rupees, message boxes -- see m_Do_graphic.cpp's
+// mDoGph_drawHud2D()) used to be drawn per-eye with a raw screen-space
+// orthographic projection, identical in both eye textures -- zero stereo
+// disparity, which reads as either "painted on the lens" or an otherwise
+// uncomfortable, badly-defined depth. Instead, mDoGph_gInf_c::
+// captureHudBillboard() (m_Do_graphic.cpp) renders that same flat HUD once
+// per frame, before either eye's pass opens, into a small shared texture --
+// getHudBillboardTexObj() -- and this draws that texture as a real 3D quad
+// using the eye's actual asymmetric projection, so it gets correct per-eye
+// convergence like a real object sitting a fixed distance away instead of a
+// flat image glued to each eye's raster grid.
+//
+// The panel derives its alpha from the captured COLOR itself (a "luma key")
+// rather than the captured texture's own per-pixel alpha channel:
+// individual HUD element materials don't reliably produce a usable alpha
+// value (confirmed in-headset -- real per-pixel alpha blending made the
+// whole panel invisible even though the captured color content was
+// verified correct via a forced-opaque debug pass; same class of "this
+// material's translucency isn't simple texture alpha" finding as
+// CLAUDE.md's water-reflection investigation, which was never fully
+// root-caused there either; and unlike the eye-buffer readback path,
+// aurora's GXCopyTex destination pointer here is only a GPU-texture-cache
+// key, not real CPU-readable pixel data, so directly inspecting captured
+// alpha values from code isn't an option either). The capture's clear
+// color is black, so summing R+G+B (see drawHudBillboard()) gives ~0 alpha
+// for empty background and higher alpha for any real HUD content --
+// not pixel-perfect (a near-black icon pixel would read as transparent
+// too) but avoids an open-ended per-material investigation.
+// ---------------------------------------------------------------------------
+
+// Game units per metre -- same constant/value as kEyePosScale above, kept as
+// its own name here since this isn't converting an HMD pose, just sizing a
+// panel in the same unit system.
+inline constexpr float kHudUnitsPerMetre = kEyePosScale;
+
+// Tunable placement/size, first-pass values -- retune empirically in-headset
+// (this project's usual workflow, see CLAUDE.md's Build Workflow section)
+// rather than deriving analytically; "comfortable, unobtrusive" is a
+// subjective target.
+inline constexpr float kHudDistanceMeters = 2.0f;
+inline constexpr float kHudWidthMeters = 1.4f; // bumped up from 1.0f per user feedback
+inline constexpr float kHudHeightMeters = kHudWidthMeters * (448.0f / 608.0f); // matches FB_HEIGHT/FB_WIDTH
+
+// Damping: the panel is still drawn flat-facing-you every frame (its own
+// local right/up axes always match the CURRENT eye, so it never looks
+// tilted/warped -- see computeHudPose()), but the direction its CENTER sits
+// in is a low-pass-filtered ("damped") version of head orientation instead
+// of the raw per-frame pose, so small tracking jitter doesn't translate
+// directly into visible shake. Only orientation is damped, not position --
+// position tracks the head instantly, matching how shipped VR games'
+// body-locked UI usually behaves (translating with you feels natural;
+// lagging your rotation is what actually reads as "steadier", not laggy).
+//
+// g_hudSmoothedWorldForward is maintained in GAME-WORLD space (not
+// eye-local) specifically so it's meaningful across frames regardless of
+// which eye is currently rendering -- updateHudSmoothing() computes it once
+// per frame (vr_main.cpp's tick(), before the eye loop, alongside
+// mDoGph_gInf_c::captureHudBillboard()); computeHudPose() re-projects it
+// into whichever eye is currently drawing.
+inline cXyz g_hudSmoothedWorldForward{0.f, 0.f, -1.f};
+inline bool g_hudSmoothingInitialized = false;
+
+// Per-frame lerp factor toward the raw head direction -- smaller = more lag
+// (steadier but slower to catch up when you turn on purpose), larger = less
+// lag (closer to the original shaky head-locked behavior). Not
+// frame-time-corrected (VR here runs at a fairly stable fixed refresh, and
+// this project already accepts similar simplifications elsewhere) --
+// retune empirically in-headset like the other constants in this section.
+inline constexpr float kHudDampingAlpha = 0.08f;
+
+inline void normalizeInPlace(cXyz& v) {
+    const float len = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+    if (len > 0.0001f) {
+        v.x /= len; v.y /= len; v.z /= len;
+    }
+}
+
+// Called once per frame (not per eye) to advance the damped reference
+// direction toward the current real head pose.
+inline void updateHudSmoothing(const XrPosef& headPose) {
+    // Reuses eyePoseToViewMtx (already validated -- it drives the entire
+    // working 3D VR scene) purely for its rotation math: passing the same
+    // position as both the pose and the reference gives a zero position
+    // delta, and a dummy zero linkEyeGame, since only the ROTATION rows are
+    // used below -- this function's translation output is discarded.
+    Mtx headViewMtx;
+    eyePoseToViewMtx(headViewMtx, headPose, headPose.position, cXyz(0.f, 0.f, 0.f));
+
+    // headViewMtx's rotation submatrix is R^T (world-to-head), per
+    // eyePoseToViewMtx's own comment ("View matrix = transpose(R) | ...").
+    // World-space forward = R * localForward, localForward = (0,0,-1)
+    // (OpenXR's local-space forward convention, matching the sign already
+    // validated for computeHudPose()'s un-damped distance below) = R's
+    // third column negated = R^T's third ROW negated = -(row 2 of
+    // headViewMtx). This is a derivation, not a guess -- if it's ever wrong
+    // it will self-evidently invert (panel points away instead of toward
+    // you) rather than subtly misbehave.
+    cXyz rawForward(-headViewMtx[2][0], -headViewMtx[2][1], -headViewMtx[2][2]);
+    normalizeInPlace(rawForward);
+
+    if (!g_hudSmoothingInitialized) {
+        // Snap on the very first frame -- avoids a pop-in lerp from the
+        // arbitrary (0,0,-1) default toward wherever the player actually
+        // starts looking.
+        g_hudSmoothedWorldForward = rawForward;
+        g_hudSmoothingInitialized = true;
+        return;
+    }
+
+    g_hudSmoothedWorldForward.x += (rawForward.x - g_hudSmoothedWorldForward.x) * kHudDampingAlpha;
+    g_hudSmoothedWorldForward.y += (rawForward.y - g_hudSmoothedWorldForward.y) * kHudDampingAlpha;
+    g_hudSmoothedWorldForward.z += (rawForward.z - g_hudSmoothedWorldForward.z) * kHudDampingAlpha;
+    // Lerping two unit vectors shrinks the result -- renormalize.
+    normalizeInPlace(g_hudSmoothedWorldForward);
+}
+
+// One quad's worth of eye-space corners, in draw order (top-left, top-right,
+// bottom-right, bottom-left -- matches mDoGph_drawFilterQuad's texcoord
+// convention elsewhere in this codebase). Deliberately its own function,
+// separate from the actual GX draw call below: this is the ONE place that
+// decides where the panel sits.
+struct HudQuadCorners {
+    float x[4], y[4], z[4];
+};
+
+inline HudQuadCorners computeHudPose() {
+    view_class* view = dComIfGd_getView();
+    assert(view != nullptr && "VR: computeHudPose() called outside gameplay?");
+
+    const float halfW = kHudWidthMeters * 0.5f * kHudUnitsPerMetre;
+    const float halfH = kHudHeightMeters * 0.5f * kHudUnitsPerMetre;
+    // Magnitude only -- NOT pre-signed like the old fixed-offset version
+    // used to be. (ex,ey,ez) below already carries the correct sign
+    // (≈(0,0,-1) in eye-local space when undamped, the same convention
+    // confirmed working pre-damping), so multiplying by an ALSO-negated
+    // distance here would double-negate and flip the panel behind the
+    // camera -- exactly the bug that first version of this function had.
+    const float dist = kHudDistanceMeters * kHudUnitsPerMetre;
+
+    // Re-project the damped WORLD-space forward direction into THIS eye's
+    // local space via the eye's own (already-current, un-damped) view
+    // matrix rotation -- this is what keeps the panel's own plane always
+    // flat-facing the current eye (no tilt/warp) while only its center
+    // position lags. When g_hudSmoothedWorldForward is fully caught up
+    // (matches the current eye's actual forward), (ex,ey,ez) round-trips to
+    // exactly (0,0,-1) -- i.e. identical to the original undamped
+    // behavior -- confirming the math, not just asserting it.
+    const Mtx& m = view->viewMtx;
+    const cXyz& f = g_hudSmoothedWorldForward;
+    const float ex = m[0][0] * f.x + m[0][1] * f.y + m[0][2] * f.z;
+    const float ey = m[1][0] * f.x + m[1][1] * f.y + m[1][2] * f.z;
+    const float ez = m[2][0] * f.x + m[2][1] * f.y + m[2][2] * f.z;
+
+    const float cx = ex * dist, cy = ey * dist, cz = ez * dist;
+
+    HudQuadCorners c;
+    c.x[0] = cx - halfW; c.y[0] = cy + halfH; c.z[0] = cz;  // top-left
+    c.x[1] = cx + halfW; c.y[1] = cy + halfH; c.z[1] = cz;  // top-right
+    c.x[2] = cx + halfW; c.y[2] = cy - halfH; c.z[2] = cz;  // bottom-right
+    c.x[3] = cx - halfW; c.y[3] = cy - halfH; c.z[3] = cz;  // bottom-left
+    return c;
+}
+
+// Call once per eye, from mDoGph_Painter()'s per-eye HUD call site (replaces
+// the flat mDoGph_drawHud2D() call there while in VR). Must run after the
+// eye's real scene draw (so it draws on top) and needs `hudTex` already
+// populated for this frame by mDoGph_gInf_c::captureHudBillboard().
+inline void drawHudBillboard(TGXTexObj* hudTex) {
+    view_class* view = dComIfGd_getView();
+    assert(view != nullptr && "VR: drawHudBillboard() called outside gameplay?");
+
+    // GXSetProjection is a stateful register write, not automatic -- the 3D
+    // world draw and the (skipped-in-VR, but still state-touching) HUD path
+    // both clobber it earlier this frame. Reassert this eye's real
+    // asymmetric projection immediately before drawing, same idiom
+    // d_menu_collect.cpp's dMenu_Collect3D_c::setupItem3D() already uses for
+    // "one real-perspective 3D draw sandwiched inside 2D UI code".
+    GXSetProjection(view->projMtx, GX_PERSPECTIVE);
+    // Identity position matrix: quad vertices below are authored directly in
+    // eye/camera-local space, so no view-matrix multiply is needed. This is
+    // what makes the panel head-locked "for free" -- it's rigidly glued to
+    // wherever this eye is looking, every frame, with zero extra tracking
+    // logic.
+    GXLoadPosMtxImm(cMtx_getIdentity(), GX_PNMTX0);
+    GXSetCurrentMtx(0);
+
+    GXClearVtxDesc();
+    GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
+    GXSetVtxDesc(GX_VA_TEX0, GX_DIRECT);
+    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
+    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
+
+    GXSetNumChans(0);
+    GXSetNumTexGens(1);
+    GXSetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, 0x3C);
+
+    // Color = real captured texture color (stage 0, default identity swap).
+    // Alpha = derived from that SAME color (R+G+B, saturating), NOT the
+    // texture's own alpha channel -- see this section's header comment for
+    // why the real per-material alpha turned out unusable. Background is
+    // black (the capture's clear color) -> alpha ~0 -> transparent; any real
+    // HUD content is colored -> higher alpha -> visible. A "luma key"
+    // (classic technique, not something new to this codebase's GX usage --
+    // channel-swap tricks like this already appear in the bloom code around
+    // this same file). Not pixel-perfect (a near-black icon pixel would read
+    // as transparent too) but needs no per-material investigation.
+    // GX_TEV_SWAP1/2/3 are repurposed here as "alpha reads channel X"
+    // tables (SWAP0 is left as the untouched identity default for color).
+    GXSetTevSwapModeTable(GX_TEV_SWAP1, GX_CH_RED, GX_CH_GREEN, GX_CH_BLUE, GX_CH_RED);
+    GXSetTevSwapModeTable(GX_TEV_SWAP2, GX_CH_RED, GX_CH_GREEN, GX_CH_BLUE, GX_CH_GREEN);
+    GXSetTevSwapModeTable(GX_TEV_SWAP3, GX_CH_RED, GX_CH_GREEN, GX_CH_BLUE, GX_CH_BLUE);
+
+    GXSetNumTevStages(3);
+
+    // Stage 0: real color; alpha = texture's red channel (via SWAP1).
+    GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR_NULL);
+    GXSetTevSwapMode(GX_TEVSTAGE0, GX_TEV_SWAP0, GX_TEV_SWAP1);
+    GXSetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_TEXC);
+    GXSetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+    GXSetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_TEXA);
+    GXSetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+    // Stage 1: color unchanged; alpha += texture's green channel (SWAP2).
+    GXSetTevOrder(GX_TEVSTAGE1, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR_NULL);
+    GXSetTevSwapMode(GX_TEVSTAGE1, GX_TEV_SWAP0, GX_TEV_SWAP2);
+    GXSetTevColorIn(GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_CPREV);
+    GXSetTevColorOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+    GXSetTevAlphaIn(GX_TEVSTAGE1, GX_CA_TEXA, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+    GXSetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+    // Stage 2: color unchanged; alpha += texture's blue channel (SWAP3).
+    GXSetTevOrder(GX_TEVSTAGE2, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR_NULL);
+    GXSetTevSwapMode(GX_TEVSTAGE2, GX_TEV_SWAP0, GX_TEV_SWAP3);
+    GXSetTevColorIn(GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_CPREV);
+    GXSetTevColorOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+    GXSetTevAlphaIn(GX_TEVSTAGE2, GX_CA_TEXA, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+    GXSetTevAlphaOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+    GXSetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_SET);
+    // Disabled Z-test/write: the panel always draws on top of the 3D world,
+    // same as the flat ortho HUD it replaces (never occluded by scene
+    // geometry -- getting close to a wall shouldn't make hearts disappear).
+    GXSetZMode(GX_DISABLE, GX_ALWAYS, GX_DISABLE);
+    GXSetCullMode(GX_CULL_NONE);
+    GXSetAlphaCompare(GX_ALWAYS, 0, GX_AOP_OR, GX_ALWAYS, 0);
+
+    GXLoadTexObj(hudTex, GX_TEXMAP0);
+
+    const HudQuadCorners c = computeHudPose();
+    GXBegin(GX_QUADS, GX_VTXFMT0, 4);
+    GXPosition3f32(c.x[0], c.y[0], c.z[0]); GXTexCoord2f32(0.0f, 0.0f);
+    GXPosition3f32(c.x[1], c.y[1], c.z[1]); GXTexCoord2f32(1.0f, 0.0f);
+    GXPosition3f32(c.x[2], c.y[2], c.z[2]); GXTexCoord2f32(1.0f, 1.0f);
+    GXPosition3f32(c.x[3], c.y[3], c.z[3]); GXTexCoord2f32(0.0f, 1.0f);
+    GXEnd();
 }
 
 // ---------------------------------------------------------------------------

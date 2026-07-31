@@ -131,34 +131,14 @@ inline int daYkgr_c::_create() {
     }
 
     if (m_emitter == NULL) {
-        fopAc_ac_c* player = dComIfGp_getPlayer(0);
-        OS_REPORT("##\n##\n## particle set Ykgr\n##\n##\n");
-        this->current.pos = player->current.pos;
-        m_emitter = dComIfGp_particle_set(0x80e2, &this->current.pos, NULL, NULL);
-        if (m_emitter != NULL) {
-            m_emitter->setParticleCallBackPtr(&YkgrCB);
-            YkgrCB.setParam(-3.0f);
-        } else {
-            OS_REPORT("エミッターの生成に失敗しました！！\n");
-            return cPhs_ERROR_e;
-        }
-        fopAcM_setStageLayer(this);
-        if (uVar1 == 1) {
-            setAlpha(0xff);
-            m_emitter->setGlobalAlpha(0xff);
-            field_0x5a4 = 0.5f;
-            field_0x5a8 = 0.0f;
-            start();
-        } else {
-            setAlpha(0);
-            m_emitter->setGlobalAlpha(0);
-            field_0x5a4 = 0.5f;
-            field_0x5a8 = 0.0f;
-            stop();
-        }
-#if DEBUG
-        l_HIO.entryHIO("竜の山陽炎");
-#endif
+        // daYkgr_c ("Dragon Mountain Heat Haze" / Goron Mines' ambient
+        // camera-locked screen-kagerou effect, 0x80e2 =
+        // dPa_RM(ID_ZI_S_SCREENKAGEROU01), the same live-screen-capture
+        // "dummy" texture as the magma-pole/pipe-fire particles disabled
+        // above) removed entirely per explicit request -- this actor has
+        // no other purpose, so skip creating it rather than leaving a
+        // half-initialized emitter-less instance around.
+        return cPhs_COMPLEATE_e;
     } else {
         if (uVar1 == 1) {
             start();

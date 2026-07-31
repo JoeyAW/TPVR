@@ -247,6 +247,19 @@ public:
     static ResTIMG* getZbufferTimg() { return mZbufferTimg; }
     static void* getFrameBufferTex() { return mFrameBufferTex; }
     static void* getZbufferTex() { return mZbufferTex; }
+#if TARGET_PC
+    // VR head-locked HUD billboard: a shared, alpha-preserving capture of
+    // the flat 2D HUD (see mDoGph_drawHud2D()/captureHudBillboard()),
+    // reused by both eyes as the texture for a real stereo 3D quad instead
+    // of each eye drawing the flat HUD independently at zero disparity.
+    static TGXTexObj* getHudBillboardTexObj() { return &m_hudBillboardTexObj; }
+    static void captureHudBillboard();
+    // VR minimap/pause-map fix: renders the minimap's own render-to-texture
+    // pass (dComIfGd_drawCopy2D() -> d_map_path.cpp's renderingMap()) once
+    // per frame, before the VR per-eye loop opens any eye pass -- see this
+    // function's own comment (m_Do_graphic.cpp) for why.
+    static void captureMapCopy2D();
+#endif
     static void setFadeRate(f32 rate) { mFadeRate = rate; }
     static f32 getFadeRate() { return mFadeRate; }
     static f32 getFadeSpeed() { return mFadeSpeed; }
@@ -336,6 +349,12 @@ public:
     static DUSK_GAME_DATA ResTIMG* m_fullFrameBufferTimg;
     static DUSK_GAME_DATA void* m_fullFrameBufferTex;
     static DUSK_GAME_DATA TGXTexObj m_fullFrameBufferTexObj;
+#endif
+
+#if TARGET_PC
+    static DUSK_GAME_DATA ResTIMG* m_hudBillboardTimg;
+    static DUSK_GAME_DATA void* m_hudBillboardTex;
+    static DUSK_GAME_DATA TGXTexObj m_hudBillboardTexObj;
 #endif
 
     #if PLATFORM_WII || PLATFORM_SHIELD

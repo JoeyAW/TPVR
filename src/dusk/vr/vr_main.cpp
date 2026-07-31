@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "SSystem/SComponent/c_API_graphic.h"  // cAPIGph_Painter
+#include "m_Do/m_Do_graphic.h"                  // mDoGph_gInf_c::captureHudBillboard
 #include "f_pc/f_pc_manager.h"                  // fpcM_DrawIterater, fpcM_Draw
 #include "dusk/game_clock.h"                    // dusk::game_clock::MainLoopPacer
 
@@ -54,6 +55,19 @@ extern "C" bool g_duskVRSessionActive = false;
 // g_duskVRRenderingToHeadset, for the same reason (usable from
 // extern/aurora's gx.cpp without namespace/mangling issues).
 extern "C" uint32_t g_duskVRCurrentEyeIndex = 0;
+// NEW this session (minimap black-screen investigation): unlike
+// g_duskVRRenderingToHeadset above -- which, despite its old comment
+// claiming otherwise, is actually true for the ENTIRE tick() call once a
+// gameplay view is ready, not just within an open eye pass -- this is true
+// ONLY between a given beginEye() and its matching endEye(). Needed because
+// some render-to-texture systems (the minimap/map-screen's own
+// GXCreateFrameBuffer pass, d_map_path.cpp's dRenderingMap_c::renderingMap())
+// are safe to run in the window AFTER isViewReady() but BEFORE the per-eye
+// loop opens an eye's protected offscreen pass (same safe window
+// captureHudBillboard() already uses), but NOT safe while nested inside an
+// actual open eye pass -- g_duskVRRenderingToHeadset can't distinguish those
+// two cases, only this can.
+extern "C" bool g_duskVREyePassOpen = false;
 
 namespace dusk::vr {
 
@@ -224,8 +238,16 @@ bool isRenderingToHeadset() {
     return g_renderedToHeadsetThisFrame;
 }
 
+bool isEyePassOpen() {
+    return g_duskVREyePassOpen;
+}
+
 void getEyeSymmetricFov(float* fovyDeg, float* aspect) {
     vr_render::getEyeSymmetricFov(fovyDeg, aspect);
+}
+
+void drawHudBillboard(TGXTexObj* hudTex) {
+    vr_render::drawHudBillboard(hudTex);
 }
 
 // Call once at startup, after an aurora::gfx device exists (per the
@@ -373,6 +395,7 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     // per-eye loop further down flips this true.
     g_renderedToHeadsetThisFrame = false;
     g_duskVRRenderingToHeadset = false;
+    g_duskVREyePassOpen = false;
 
     if (!g_session) {
         logTickReasonOnChange("no-session");
@@ -591,6 +614,72 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     std::vector<XrCompositionLayerProjectionView> projViews(viewCount);
     std::vector<PendingEyeReadback> pendingEyes(viewCount);
 
+    // Advance the HUD billboard's damped reference direction once per frame
+    // (not per eye) -- see vr_stereo_render.hpp's updateHudSmoothing()/
+    // computeHudPose() comments. Added per user feedback that the
+    // head-locked panel felt "really shaky" with raw per-frame tracking.
+    vr_render::updateHudSmoothing(hmdPose);
+
+    // CONFIRMED this session (first HUD-billboard in-headset test came back
+    // solid black): mDoGph_drawHud2D() draws nothing until fpcM_DrawIterater()
+    // has run at least once this frame -- whatever populates/refreshes the
+    // persistent 2D HUD draw-list content (actor updates, meter state, etc.)
+    // happens as a side effect of that call, not independently of it. A
+    // hand-drawn marker quad in the same capture pass proved the
+    // offscreen-pass/GXCopyTex pipeline itself was fine even while this was
+    // broken, isolating the problem to content timing specifically. Calling
+    // it here, before captureHudBillboard(), guarantees real content is
+    // ready for the capture; eye 0/eye 1's own later calls to this same
+    // function (inside the loop below) are unaffected -- confirmed via
+    // real HUD content (icons, not black) rendering correctly afterward.
+    //
+    // MEASURED this session: ~0.09-0.14ms/frame during normal gameplay,
+    // rising to ~0.5ms combined with captureHudBillboard() below when a
+    // menu/pause screen is open (more 2D content to draw, less 3D actor
+    // traversal to do) -- under 2-4% of a single frame's budget even at the
+    // worst observed moment against a 72-90Hz VR target. Not a measurable
+    // perf concern; not worth optimizing further absent new evidence.
+    fpcM_DrawIterater((fpcM_DrawIteraterFunc)fpcM_Draw);
+
+    // Capture the flat 2D HUD into a shared offscreen texture ONCE, before
+    // either eye's protected offscreen pass opens (see captureHudBillboard()'s
+    // own comment for why this ordering matters -- GXCreateFrameBuffer only
+    // supports one level of nesting, so this must never run between
+    // beginEye()/endEye()). Both eyes then draw it as the same stereo
+    // billboard (vr_render::drawHudBillboard(), invoked from
+    // mDoGph_Painter()'s per-eye HUD call site) instead of each eye
+    // redrawing the flat HUD independently at zero disparity.
+    //
+    // MEASURED this session: ~0.04-0.07ms/frame during normal gameplay,
+    // rising to ~0.15-0.49ms when a menu/pause screen is open (more 2D
+    // content to draw) -- see fpcM_DrawIterater()'s comment above for the
+    // combined-cost assessment against a VR frame budget.
+    mDoGph_gInf_c::captureHudBillboard();
+
+    // ROOT-CAUSED this session: the minimap (and pause-screen map) render
+    // their own source texture via a SEPARATE GXCreateFrameBuffer offscreen
+    // pass (d_map_path.cpp's dRenderingMap_c::renderingMap(), reached via
+    // dComIfGd_drawCopy2D() -> dDlst_list_c::drawCopy2D()), normally
+    // triggered once per eye from inside mDoGph_Painter() -- i.e. AFTER
+    // beginEye() has already opened that eye's own protected offscreen pass,
+    // where nesting a second one would crash (same class of bug as water's
+    // reflection capture). renderingMap() has always unconditionally skipped
+    // itself there via isRenderingToHeadset(), which -- because that flag is
+    // true for this whole function, not just inside an eye pass -- also
+    // meant the minimap's texture NEVER got rendered at all during VR,
+    // leaving it at whatever uninitialized GPU memory it started with (the
+    // reported "black with scattered colorful corruption pixels"). The
+    // minimap's actual on-screen picture (mMapJ2DPicture, drawn as part of
+    // the flat 2D HUD) was already being captured/displayed correctly by
+    // captureHudBillboard() above -- only the texture IT SAMPLES was stale.
+    // Fix: render it here instead, once per frame, in this same safe window
+    // captureHudBillboard() already uses (no eye pass open yet). renderingMap()
+    // and postRenderingMap()'s capture guard were changed from
+    // isRenderingToHeadset() to the new, narrower isEyePassOpen() (false
+    // here, true during mDoGph_Painter()'s later per-eye call) so it actually
+    // runs now instead of skipping again.
+    mDoGph_gInf_c::captureMapCopy2D();
+
     for (uint32_t eye = 0; eye < viewCount; ++eye) {
         vr_render::EyeParams eyeParams{
             views[eye].pose,
@@ -607,6 +696,7 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
         // non-null at this point.
         g_duskVRCurrentEyeIndex = eye;
         vr_render::beginEye(eyeParams);
+        g_duskVREyePassOpen = true;
 
         fpcM_DrawIterater((fpcM_DrawIteraterFunc)fpcM_Draw);
         cAPIGph_Painter();
@@ -616,6 +706,7 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
         // aurora::gfx::push_custom_draw(g_handDrawState.typeId, &payload, sizeof(payload));
 
         aurora::gfx::ResolvedTargets targets = vr_render::endEye();
+        g_duskVREyePassOpen = false;
 
         // ROOT-CAUSED this session (VR_MOD_HANDOFF_10 follow-up): endEye()
         // now uses resolve_pass_checked() internally and returns an empty

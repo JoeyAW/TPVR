@@ -96,12 +96,9 @@ int daObjFPillar2_c::Create() {
                           l_cull_box.max.z);
     fopAcM_SetMtx(this, mMtx);
     mSoundObj.init(&mSoundPos, 1);
-    if (getKind() == KIND_PIPE_FIRE) {
-        field_0x980 = dComIfGp_particle_set(0x84df, &current.pos, &current.angle, 0, 0xff, 0,
-                                            fopAcM_GetRoomNo(this), 0, 0, 0);
-        field_0x984 = dComIfGp_particle_set(0x84e0, &current.pos, &current.angle, 0, 0xff, 0,
-                                            fopAcM_GetRoomNo(this), 0, 0, 0);
-    }
+    // 0x84df/0x84e0 share the "Obj_yogan" archive's "dummy"-textured
+    // resource with l_yogan_head_id (see actionOnInit()'s comment) --
+    // disabled unconditionally for the same reason.
     actionOffInit();
     return 1;
 }
@@ -281,11 +278,12 @@ void daObjFPillar2_c::actionOff() {
 
 void daObjFPillar2_c::actionOnWaitInit() {
     if (getKind() == KIND_PIPE_FIRE) {
-        for (int i = 0; i < 3; i++) {
-            mPipeFireEmitters[i] = dComIfGp_particle_set(l_pipe_fire_id[i], &current.pos,
-                                                         &current.angle, 0, 0xff, 0,
-                                                         fopAcM_GetRoomNo(this), 0, 0, 0);
-        }
+        // l_pipe_fire_id disabled for the same "Obj_yogan" dummy-texture
+        // reason as l_yogan_head_id/0x84df/0x84e0 above -- this is the
+        // sustained, rate/lifetime-driven upward jet, the strongest match
+        // for the user's "bunch of squares flying up, duplicated view"
+        // report (a continuous jet reads as "flying up" far more than the
+        // magma pole's one-shot head burst already disabled).
     } else {
         if (getKind() == KIND_MAGMA_POLE) {
             for (int i = 0; i < 3; i++) {
@@ -327,15 +325,18 @@ void daObjFPillar2_c::actionOnWait() {
 
 void daObjFPillar2_c::actionOnInit() {
     if (getKind() == KIND_MAGMA_POLE) {
-        for (int i = 0; i < 3; i++) {
-            mMagmaPoleEmitters[i] = dComIfGp_particle_set(
-                l_yogan_head_id[getSize()][i],
-                &current.pos, &current.angle, 0, 0xff, 0, fopAcM_GetRoomNo(this), 0, 0, 0);
-            if (mMagmaPoleEmitters[i] != NULL) {
-                mMagmaPoleEmitters[i]->becomeImmortalEmitter();
-                mMagmaPoleEmitters[i]->setGlobalRTMatrix(mModel->getAnmMtx(0));
-            }
-        }
+        // l_yogan_head_id's JPA texture resolves to "dummy" in this scene's
+        // resource manager, so dPa_control_c::createRoomScene()'s
+        // mSceneResMng->swapTexture(getFrameBufferTimg(), "dummy") silently
+        // substitutes the live screen-capture texture here -- the same
+        // mechanism documented for the sun/candle/torch kagerou effects
+        // (CLAUDE.md section 5), just a scene-local archive ("Obj_yogan")
+        // instead of a common one. Confirmed via the particle-id logging
+        // added for that investigation: user reproduced the "heat wave"
+        // floating-scene-duplicate artifact in Goron Mines and only ids
+        // 0x84e7-0x84e9 (l_yogan_headM_id) were newly spawned. Disabled
+        // unconditionally (not VR-gated) per explicit request -- this is
+        // just the geyser's burst VFX, not its hazard/damage logic.
         mBck->setFrame(0.0f);
         mBck->setPlaySpeed(1.0f);
         mActionTimer = 125;

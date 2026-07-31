@@ -8,6 +8,7 @@
 // own comments below for why the split exists.
 
 #include "dusk/game_clock.h"  // dusk::game_clock::MainLoopPacer
+#include "helpers/gx_helper.h"  // TGXTexObj
 
 namespace dusk::vr {
 
@@ -35,6 +36,19 @@ bool isActive();
 // just 3D gameplay.
 bool isRenderingToHeadset();
 
+// True ONLY while a VR eye's own protected offscreen pass is actually open
+// (between a given beginEye() and its matching endEye() inside tick()'s
+// per-eye loop) -- unlike isRenderingToHeadset() above, which is true for
+// tick()'s entire duration once a gameplay view is ready, including the
+// window before the per-eye loop even starts. Render-to-texture systems
+// that open their OWN GXCreateFrameBuffer pass (e.g. the minimap/map-screen,
+// d_map_path.cpp's dRenderingMap_c::renderingMap()) must check this, not
+// isRenderingToHeadset(), to tell "unsafe to nest a second offscreen pass
+// right now" apart from "VR is active this frame but no eye pass is open
+// yet" -- the latter is exactly the safe window captureHudBillboard() and
+// captureMapCopy2D() (m_Do_graphic.cpp) already render into.
+bool isEyePassOpen();
+
 // Only meaningful while isRenderingToHeadset() is true (returns the last
 // computed values otherwise, harmlessly stale). The smallest symmetric
 // fovy/aspect frustum that fully contains the current eye's real asymmetric
@@ -46,6 +60,18 @@ bool isRenderingToHeadset();
 // vr_stereo_render.hpp's getEyeSymmetricFov() comment for why those fields
 // are deliberately left alone.
 void getEyeSymmetricFov(float* fovyDeg, float* aspect);
+
+// Draws the head-locked HUD billboard into the CURRENTLY OPEN eye pass --
+// call from mDoGph_Painter()'s per-eye HUD call site (m_Do_graphic.cpp),
+// after the 3D world draw, in place of the flat mDoGph_drawHud2D() call
+// used on flatscreen. `hudTex` must already be populated for this frame by
+// mDoGph_gInf_c::captureHudBillboard() (called once, before tick()'s per-eye
+// loop -- see that function's own comment for why the ordering matters).
+// Thin forward to vr_render::drawHudBillboard() (vr_stereo_render.hpp) --
+// kept out of this header so callers like m_Do_graphic.cpp don't need to
+// include the heavier OpenXR/aurora headers vr_stereo_render.hpp pulls in,
+// same reasoning as isRenderingToHeadset()/getEyeSymmetricFov() above.
+void drawHudBillboard(TGXTexObj* hudTex);
 
 // Runs the first half of one VR frame: xrWaitFrame/xrBeginFrame, per-eye
 // render (including the fpcM_DrawIterater/cAPIGph_Painter draw call), and

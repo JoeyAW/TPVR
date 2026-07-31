@@ -282,6 +282,12 @@ DUSK_GAME_DATA ResTIMG* mDoGph_gInf_c::m_fullFrameBufferTimg;
 DUSK_GAME_DATA void* mDoGph_gInf_c::m_fullFrameBufferTex;
 #endif
 
+#if TARGET_PC
+DUSK_GAME_DATA ResTIMG* mDoGph_gInf_c::m_hudBillboardTimg;
+DUSK_GAME_DATA void* mDoGph_gInf_c::m_hudBillboardTex;
+DUSK_GAME_DATA TGXTexObj mDoGph_gInf_c::m_hudBillboardTexObj;
+#endif
+
 DUSK_GAME_DATA ResTIMG* mDoGph_gInf_c::mFrameBufferTimg;
 
 DUSK_GAME_DATA void* mDoGph_gInf_c::mFrameBufferTex;
@@ -335,6 +341,16 @@ void mDoGph_gInf_c::create() {
     m_fullFrameBufferTimg = createTimg(FB_WIDTH, FB_HEIGHT, 6);
     JUT_ASSERT(366, m_fullFrameBufferTimg != NULL);
     m_fullFrameBufferTex = (char*)m_fullFrameBufferTimg + sizeof(ResTIMG);
+    #endif
+
+    #if TARGET_PC
+    // GX_TF_RGBA8 (not the mirror buffer's format 6/RGB565 above) --
+    // the VR HUD billboard needs real per-pixel alpha so empty HUD
+    // background shows the 3D world through the panel instead of an
+    // opaque rectangle.
+    m_hudBillboardTimg = createTimg(FB_WIDTH, FB_HEIGHT, GX_TF_RGBA8);
+    JUT_ASSERT(366, m_hudBillboardTimg != NULL);
+    m_hudBillboardTex = (char*)m_hudBillboardTimg + sizeof(ResTIMG);
     #endif
 
     mFrameBufferTimg = createTimg(FB_WIDTH / 2, FB_HEIGHT / 2, GX_TF_RGBA8);
@@ -2226,6 +2242,163 @@ static void drawItem3D() {
     j3dSys.reinitGX();
 }
 
+// Extracted from mDoGph_Painter() so it can be called standalone: once
+// inline per eye on flatscreen (unchanged behavior), or once into an
+// offscreen capture texture in VR (see mDoGph_captureHudBillboard()) so
+// both eyes can reuse the same rendered HUD as a stereo billboard instead
+// of drawing this flat ortho content into each eye independently.
+static void mDoGph_drawHud2D() {
+    J2DOrthoGraph ortho(0.0f, 0.0f, FB_WIDTH, FB_HEIGHT, -1.0f, 1.0f);
+    ortho.setOrtho(mDoGph_gInf_c::getMinXF(), mDoGph_gInf_c::getMinYF(),
+                   mDoGph_gInf_c::getWidthF(), mDoGph_gInf_c::getHeightF(),
+                   100000.0f, -100000.0f);
+    ortho.setPort();
+    dComIfGp_setCurrentGrafPort(&ortho);
+
+    GXSetClipMode(GX_CLIP_ENABLE);
+#if TARGET_PC
+    if (dusk::frame_interp::get_ui_tick_pending())
+#endif
+    {
+        dDlst_list_c::calcWipe();
+    }
+    j3dSys.reinitGX();
+
+    ortho.setOrtho(mDoGph_gInf_c::getMinXF(), mDoGph_gInf_c::getMinYF(),
+                   mDoGph_gInf_c::getWidthF(), mDoGph_gInf_c::getHeightF(),
+                   100000.0f, -100000.0f);
+    ortho.setPort();
+
+    #if DEBUG
+    captureScreenSetPort();
+    #endif
+
+#if TARGET_PC
+    dusk::mods::gfx_run_stage(GFX_STAGE_FRAME_BEFORE_HUD);
+#endif
+
+    if (fapGmHIO_get2Ddraw()) {
+        Mtx m4;
+        cMtx_copy(j3dSys.getViewMtx(), m4);
+
+        Mtx m5;
+        MTXTrans(m5, FB_WIDTH_BASE / 2, FB_HEIGHT_BASE / 2, 0.0f);
+
+        JPADrawInfo draw_info3(m5, 0.0f, FB_HEIGHT_BASE, 0.0f, FB_WIDTH_BASE);
+
+        if (!dComIfGp_isPauseFlag()) {
+            GX_DEBUG_GROUP(dComIfGp_particle_draw2Dback, &draw_info3);
+        }
+
+        GX_DEBUG_GROUP(dComIfGp_particle_draw2DmenuBack, &draw_info3);
+        ortho.setPort();
+
+        GX_DEBUG_GROUP(dComIfGd_draw2DOpa);
+        GX_DEBUG_GROUP(drawItem3D);
+        ortho.setPort();
+
+        #if DEBUG
+        captureScreenSetPort();
+        #endif
+
+        GX_DEBUG_GROUP(dComIfGd_draw2DOpaTop);
+        GX_DEBUG_GROUP(dComIfGd_draw2DXlu);
+
+        if (dComIfGp_isPauseFlag()) {
+            GX_DEBUG_GROUP(dComIfGp_particle_draw2Dfore, &draw_info3);
+        }
+
+#if DEBUG
+        j3dSys.setViewMtx(m5);
+        dComIfGd_drawListCursor();
+#endif
+
+        if (strcmp(dComIfGp_getStartStageName(), "F_SP127") == 0 || (mDoGph_gInf_c::isFade() & 0x80) != 0)
+        {
+            mDoGph_gInf_c::calcFade();
+        }
+
+        GX_DEBUG_GROUP(dComIfGp_particle_draw2DmenuFore, &draw_info3);
+        j3dSys.setViewMtx(m4);
+    } else {
+        // No camera window active — still draw 2D display lists
+        // (needed for logo scene, which has no 3D camera)
+        static int sElseLogCount = 0;
+        if (sElseLogCount < 10) {
+            DuskLog.debug("mDoGph_Painter else: drawing 2D lists (frame {})", sElseLogCount);
+            sElseLogCount++;
+        }
+        ortho.setPort();
+        dComIfGd_draw2DOpa();
+        dComIfGd_draw2DOpaTop();
+        dComIfGd_draw2DXlu();
+    }
+
+#if TARGET_PC
+    dusk::mods::gfx_run_stage(GFX_STAGE_FRAME_AFTER_HUD);
+#endif
+}
+
+#if TARGET_PC
+// Renders the flat 2D HUD into a small, alpha-preserving offscreen texture
+// once per frame, so both VR eyes can draw it as a single shared stereo
+// billboard (vr_render::drawHudBillboard(), called from mDoGph_Painter()'s
+// per-eye HUD call site) instead of each eye independently drawing the flat
+// HUD at zero disparity. Must be called BEFORE the VR per-eye loop opens its
+// protected offscreen eye pass -- GXCreateFrameBuffer only supports one
+// level of nesting (see extern/aurora/lib/gfx/common.cpp's
+// begin_offscreen()/end_offscreen() comments; a prior session already hit a
+// real crash trying to nest a second offscreen pass inside a VR eye pass
+// for the water-reflection capture). Calling this while only the normal EFB
+// pass is open -- the same single-level pattern bloom/the minimap renderer
+// already use every frame -- avoids that entirely.
+void mDoGph_gInf_c::captureHudBillboard() {
+    GXCreateFrameBuffer(FB_WIDTH, FB_HEIGHT);
+    GXSetViewport(0.0f, 0.0f, FB_WIDTH, FB_HEIGHT, 0.0f, 1.0f);
+    GXSetScissor(0, 0, FB_WIDTH, FB_HEIGHT);
+
+    mDoGph_drawHud2D();
+
+    GXSetTexCopySrc(0, 0, FB_WIDTH, FB_HEIGHT);
+    GXSetTexCopyDst(FB_WIDTH, FB_HEIGHT, GX_TF_RGBA8, GX_FALSE);
+    GXCopyTex(m_hudBillboardTex, GX_FALSE);
+    GXPixModeSync();
+    GXInvalidateTexAll();
+    GXRestoreFrameBuffer();
+
+    mDoLib_setResTimgObj(m_hudBillboardTimg, &m_hudBillboardTexObj, 0, NULL);
+}
+
+// ROOT-CAUSED this session (minimap black-with-corruption-pixels
+// investigation): the minimap and pause-screen map render their own source
+// texture via dComIfGd_drawCopy2D() (below, normally called once per eye
+// from mDoGph_Painter() at its usual call site further down), which reaches
+// d_map_path.cpp's dRenderingMap_c::renderingMap() -- a SEPARATE
+// GXCreateFrameBuffer offscreen pass, same single-level-nesting constraint
+// as captureHudBillboard() above. That call site runs AFTER beginEye() has
+// already opened the eye's own protected pass, so renderingMap() has always
+// unconditionally skipped itself there in VR -- meaning the minimap texture
+// never rendered at all, leaving it at whatever uninitialized GPU memory it
+// started with. Mirrors captureHudBillboard(): call this once per frame,
+// BEFORE the VR per-eye loop opens any eye pass (vr_main.cpp's tick()), so
+// renderingMap() (now gated on dusk::vr::isEyePassOpen(), not
+// isRenderingToHeadset() -- see d_map_path.cpp) actually runs. Reproduces
+// the same J2DOrthoGraph/current-graf-port setup mDoGph_Painter() does
+// immediately before its own dComIfGd_drawCopy2D() call below -- needed
+// because postRenderingMap() (d_map_path.cpp) reads back the current graf
+// port via dComIfGp_getCurrentGrafPort()->setup2D().
+void mDoGph_gInf_c::captureMapCopy2D() {
+    J2DOrthoGraph ortho(0.0f, 0.0f, FB_WIDTH, FB_HEIGHT, -1.0f, 1.0f);
+    ortho.setOrtho(mDoGph_gInf_c::getMinXF(), mDoGph_gInf_c::getMinYF(),
+                   mDoGph_gInf_c::getWidthF(), mDoGph_gInf_c::getHeightF(),
+                   -1.0f, 1.0f);
+    ortho.setPort();
+    dComIfGp_setCurrentGrafPort(&ortho);
+
+    dComIfGd_drawCopy2D();
+}
+#endif
+
 int mDoGph_Painter() {
     ZoneScoped;
 
@@ -2938,88 +3111,11 @@ int mDoGph_Painter() {
     }
     #endif
 
-    GXSetClipMode(GX_CLIP_ENABLE);
-#if TARGET_PC
-    if (dusk::frame_interp::get_ui_tick_pending())
-#endif
-    {
-        dDlst_list_c::calcWipe();
-    }
-    j3dSys.reinitGX();
-
-    ortho.setOrtho(mDoGph_gInf_c::getMinXF(), mDoGph_gInf_c::getMinYF(),
-                   mDoGph_gInf_c::getWidthF(), mDoGph_gInf_c::getHeightF(),
-                   100000.0f, -100000.0f);
-    ortho.setPort();
-
-    #if DEBUG
-    captureScreenSetPort();
-    #endif
-
-#if TARGET_PC
-    dusk::mods::gfx_run_stage(GFX_STAGE_FRAME_BEFORE_HUD);
-#endif
-
-    if (fapGmHIO_get2Ddraw()) {
-        Mtx m4;
-        cMtx_copy(j3dSys.getViewMtx(), m4);
-
-        Mtx m5;
-        MTXTrans(m5, FB_WIDTH_BASE / 2, FB_HEIGHT_BASE / 2, 0.0f);
-
-        JPADrawInfo draw_info3(m5, 0.0f, FB_HEIGHT_BASE, 0.0f, FB_WIDTH_BASE);
-
-        if (!dComIfGp_isPauseFlag()) {
-            GX_DEBUG_GROUP(dComIfGp_particle_draw2Dback, &draw_info3);
-        }
-
-        GX_DEBUG_GROUP(dComIfGp_particle_draw2DmenuBack, &draw_info3);
-        ortho.setPort();
-
-        GX_DEBUG_GROUP(dComIfGd_draw2DOpa);
-        GX_DEBUG_GROUP(drawItem3D);
-        ortho.setPort();
-
-        #if DEBUG
-        captureScreenSetPort();
-        #endif
-
-        GX_DEBUG_GROUP(dComIfGd_draw2DOpaTop);
-        GX_DEBUG_GROUP(dComIfGd_draw2DXlu);
-
-        if (dComIfGp_isPauseFlag()) {
-            GX_DEBUG_GROUP(dComIfGp_particle_draw2Dfore, &draw_info3);
-        }
-
-#if DEBUG
-        j3dSys.setViewMtx(m5);
-        dComIfGd_drawListCursor();
-#endif
-
-        if (strcmp(dComIfGp_getStartStageName(), "F_SP127") == 0 || (mDoGph_gInf_c::isFade() & 0x80) != 0)
-        {
-            mDoGph_gInf_c::calcFade();
-        }
-
-        GX_DEBUG_GROUP(dComIfGp_particle_draw2DmenuFore, &draw_info3);
-        j3dSys.setViewMtx(m4);
+    if (!dusk::vr::isRenderingToHeadset()) {
+        mDoGph_drawHud2D();
     } else {
-        // No camera window active — still draw 2D display lists
-        // (needed for logo scene, which has no 3D camera)
-        static int sElseLogCount = 0;
-        if (sElseLogCount < 10) {
-            DuskLog.debug("mDoGph_Painter else: drawing 2D lists (frame {})", sElseLogCount);
-            sElseLogCount++;
-        }
-        ortho.setPort();
-        dComIfGd_draw2DOpa();
-        dComIfGd_draw2DOpaTop();
-        dComIfGd_draw2DXlu();
+        dusk::vr::drawHudBillboard(mDoGph_gInf_c::getHudBillboardTexObj());
     }
-
-#if TARGET_PC
-    dusk::mods::gfx_run_stage(GFX_STAGE_FRAME_AFTER_HUD);
-#endif
 
     #if DEBUG
     if (dJcame_c::get()) {

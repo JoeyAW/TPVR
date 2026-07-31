@@ -5,6 +5,8 @@
 #include <cmath>
 #include "global.h"
 
+extern "C" bool g_duskVRRenderingToHeadset;
+
 void J3DUClipper::init() {
     mNear = 1.0f;
     mFar = 100000.0f;
@@ -30,6 +32,10 @@ void J3DUClipper::calcViewFrustum() {
 }
 
 int J3DUClipper::clip(f32 const (*param_0)[4], Vec param_1, f32 param_2) const {
+    if (g_duskVRRenderingToHeadset) {
+        return 0;
+    }
+
     Vec vec1;
     MTXMultVec(param_0, &param_1, &vec1);
     if (-vec1.z < mNear - param_2) {
@@ -61,6 +67,10 @@ int J3DUClipper::clip(f32 const (*param_0)[4], Vec param_1, f32 param_2) const {
 
 
 int J3DUClipper::clip(f32 const (*param_1)[4], Vec* param_2, Vec* param_3) const {
+    if (g_duskVRRenderingToHeadset) {
+        return 0;
+    }
+
     s32 local_98[6];
     for (int i = 0; i < 6; i++) {
         local_98[i] = 0;

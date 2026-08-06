@@ -9459,6 +9459,21 @@ void daAlink_c::setStickData() {
         mMoveValue = mStickValue;
         mMoveAngle = mStickAngle + dCam_getControledAngleY(dComIfGp_getCamera(field_0x317c));
 
+        // VR smooth-turn (2026-08-05, see vr_smooth_turn.hpp): the right
+        // thumbstick no longer drives the flatscreen C-stick/camera at all
+        // in VR (unbound per explicit user request), so its yaw offset
+        // never reaches dCam_getControledAngleY() above the normal way.
+        // Add it in here directly instead, so "forward" on the movement
+        // stick keeps meaning forward-relative-to-the-smooth-turned-view
+        // instead of forward-relative-to-a-camera-angle-that-never-moved
+        // -- the standard expectation for VR smooth-turn locomotion (look
+        // around AND walk in the direction you're now facing). cM_rad2s
+        // converts the stored radians into the same s16 binary-angle unit
+        // mStickAngle/mMoveAngle already use.
+        if (dusk::vr::isRenderingToHeadset()) {
+            mMoveAngle += cM_rad2s(dusk::vr::getSmoothTurnYawRad());
+        }
+
         if (checkMagneBootsOn()) {
             if (field_0x2fb9 == 1 ||
                 (field_0x2fb9 == 0 && field_0x3114 != -0x8000 && field_0x3114 <= 0x6000))
@@ -19643,6 +19658,34 @@ int daAlink_c::draw() {
         dComIfGd_setList();
     } else {
         setDrawHand();
+
+#if TARGET_PC
+        // VR tracked sword/shield: mSwordModel/mShieldModel are normally
+        // positioned once per frame (setItemMatrix()) from
+        // mpLinkModel->getAnmMtx(mLeftItemJntNo/mRightItemJntNo) -- NOTE:
+        // mLeftItemJntNo/mRightItemJntNo (10/0xF) are a DIFFERENT joint
+        // from mLeftHandJntNo/mRightHandJntNo (9/0xE, what setDrawHand()
+        // above feeds into mpLinkHandModel's joints 1/2) -- confirmed via
+        // d_a_alink_wolf.inc's human-form reset block, which sets all four
+        // fields distinctly. An earlier version of this fix wrongly
+        // assumed item and hand shared the same joint; see
+        // dusk::vr::applyTrackedItemMtx()'s comment for the full story and
+        // why preserving the item joint's relative offset from the hand
+        // joint (rather than substituting the tracked hand matrix
+        // directly) is what actually orients the sword/shield correctly.
+        // Also only applies when setItemMatrix() decided this frame that
+        // the sword/shield is actually the currently-equipped/held item;
+        // otherwise it uses a completely different belt/back-relative
+        // resting pose, detected the same way. Re-applied every eye, right
+        // after setDrawHand(), same reasoning as its own tracked-hand call.
+        if (dusk::vr::isRenderingToHeadset()) {
+            dusk::vr::applyTrackedItemMtx(mSwordModel, mShieldModel,
+                                           mpLinkModel->getAnmMtx(mLeftItemJntNo),
+                                           mpLinkModel->getAnmMtx(mLeftHandJntNo),
+                                           mpLinkModel->getAnmMtx(mRightItemJntNo),
+                                           mpLinkModel->getAnmMtx(mRightHandJntNo));
+        }
+#endif
 
         if (dComIfGp_checkCameraAttentionStatus(field_0x317c, 0x20)) {
             if (field_0x06e8 != NULL) {

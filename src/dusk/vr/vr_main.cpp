@@ -31,6 +31,7 @@
 #include "dusk/vr/vr_stereo_render.hpp"         // vr_render::
 #include "dusk/vr/vr_swing_detector.hpp"        // vr_combat::
 #include "dusk/vr/vr_link_visibility.hpp"       // vr_link::
+#include "dusk/vr/vr_smooth_turn.hpp"           // dusk::vr::updateSmoothTurn/getSmoothTurnYawRad
 #include "dusk/vr/vr_xr_submit.hpp"             // dusk::vr::Session
 #include "dusk/vr/vr_main.hpp"
 
@@ -77,7 +78,45 @@ namespace dusk::vr {
 namespace {
 Session* g_session = nullptr;
 std::unique_ptr<Session> g_ownedSession;  // vr_main.cpp owns the Session; g_session just points to it
-vr_combat::SwingDetector g_rightSwing;
+vr_combat::SwingDetector g_rightSwing;  // still deferred/unused, see its call site's comment below
+
+// LEFT hand -> B (attack), wired below -- sword is Link's LEFT hand
+// (section 16 of vr-mod-notes), so a swing of the hand actually holding the
+// sword is the physically-intuitive gesture for this, unlike the deferred
+// right-hand attempt above.
+//
+// TUNED 2026-08-05, ROUND 2 (real [dusk::vr::swingdiag] capture analyzed --
+// see git history/vr-mod-notes for the full log breakdown, not repeated
+// here). Round 1 (triggerSpeed=1.4/resetSpeed=0.4/minSwingDistance=0.08,
+// user feedback "technically worked but very unresponsive" on the
+// untouched 2.5/0.8/0.15 defaults) turned out to be tuned TOO far down:
+// the captured log showed one frame of ordinary "hold the controller
+// neutrally and turn around" movement hitting 1.44 m/s -- just over
+// round 1's 1.4 m/s trigger -- firing a spurious attack (confirms the
+// "swings when I move normally" report). The dt source itself (predDt vs.
+// pacing.presentation_dt_seconds, logged side by side specifically to
+// check this) tracked each other almost exactly throughout that phase, so
+// this was a plain threshold problem, not a timing/jitter bug. The SAME
+// capture's real-swing phase logged 13 separate triggers (speeds ~1.5 up
+// to ~17 m/s) against only ~5 visible in-game sword swings -- likely
+// Link's own attack-animation lock absorbing extra virtual B-presses
+// (same as mashing the real button), not under-detection, so round 2 only
+// raises thresholds (to comfortably clear the observed 1.44 m/s false-
+// positive peak with real margin) rather than trying to make it MORE
+// sensitive. resetSpeed/cooldownSec also nudged up to reduce the chance of
+// one continuous swing motion dipping-and-re-arming into a double count.
+// Tuned here rather than in the shared header so g_rightSwing (or any
+// future user of SwingDetector) isn't silently affected by tuning specific
+// to this one gesture.
+vr_combat::SwingDetector g_leftSwing = [] {
+    vr_combat::SwingDetector d;
+    d.triggerSpeed = 2.2f;        // round 1: 1.4 (too low -- false-fired at 1.44
+                                    // during ordinary movement); default: 2.5
+    d.resetSpeed = 0.7f;          // round 1: 0.4; default: 0.8
+    d.minSwingDistance = 0.12f;   // round 1: 0.08; default: 0.15
+    d.cooldownSec = 0.15;         // round 1/default: 0.12
+    return d;
+}();
 
 // NEW this session: needed so tick()'s event pump (below) can call
 // xrPollEvent without needing Session to expose its private instance_.
@@ -282,6 +321,18 @@ void drawHudBillboard(TGXTexObj* hudTex) {
 
 void applyTrackedHandMtx(J3DModel* handModel) {
     vr_link::applyTrackedHandMtx(handModel);
+}
+
+void applyTrackedItemMtx(J3DModel* swordModel, J3DModel* shieldModel,
+                          float (*leftItemJointMtx)[4], float (*leftHandJointMtx)[4],
+                          float (*rightItemJointMtx)[4], float (*rightHandJointMtx)[4]) {
+    vr_link::applyTrackedItemMtx(swordModel, shieldModel,
+                                  leftItemJointMtx, leftHandJointMtx,
+                                  rightItemJointMtx, rightHandJointMtx);
+}
+
+float getSmoothTurnYawRad() {
+    return dusk::vr::g_smoothTurnYawRad;
 }
 
 // Call once at startup, after an aurora::gfx device exists (per the
@@ -634,14 +685,26 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     // scenario (can't touch a screen overlay while wearing a headset) so
     // not guarded against here.
     //
-    // Mapping -- REVISED 2026-08-04 per explicit user request ("bind X to
-    // right squeeze, Y to right trigger, DPAD up to Y, DPAD left to X, and
-    // Z to left stick click"), superseding this comment block's previous
-    // version (still visible in git history). No longer mirrors the
-    // default Xbox-controller layout 1:1 -- see the individual entries
+    // Mapping -- REVISED 2026-08-05 per explicit user request ("add smooth
+    // camera rotation to the right stick and also unbind the C stick"),
+    // superseding this comment block's previous version (still visible in
+    // git history) for the right-thumbstick entry only. No longer mirrors
+    // the default Xbox-controller layout 1:1 -- see the individual entries
     // below for what moved where and why:
     //   left thumbstick  -> main stick (movement) -- unchanged
-    //   right thumbstick -> C-stick (camera) -- unchanged
+    //   right thumbstick -> VR smooth-turn (see vr_smooth_turn.hpp), NOT
+    //                        the C-stick/substick anymore. Right thumbstick
+    //                        used to feed padStatus.substickX/Y directly
+    //                        (the game's normal C-stick, which smoothly
+    //                        orbits the flatscreen third-person camera) --
+    //                        removed per the user's explicit "unbind the C
+    //                        stick" request. The smooth-turn yaw offset
+    //                        this reads instead is also added into
+    //                        daAlink_c's mMoveAngle (d_a_alink.cpp, VR-
+    //                        gated) so movement direction stays consistent
+    //                        with the rotated view -- see
+    //                        dusk::vr::getSmoothTurnYawRad()'s call site
+    //                        there.
     //   left trigger     -> analog L -- unchanged
     //   right A click    -> A (context action) -- unchanged
     //   right B click    -> B (attack) -- unchanged -- ALSO triggered by
@@ -705,21 +768,90 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     const bool rightStickClickHeld = getBoolAction(g_stickClickAction, g_rightHandPath);
     const bool leftStickClickHeld = getBoolAction(g_stickClickAction, g_leftHandPath);
 
-    // Swing-gesture -> attack: DEFERRED per explicit user request 2026-08-03
-    // ("remove the swing controls for now, that's something for another
-    // session") -- was wired here (see git history: fixed a dead
+    // Swing-gesture -> attack, LEFT hand: added 2026-08-05 per explicit user
+    // request ("swinging your left hand in front of you acts as pressing the
+    // b button"). The right-hand version of this was drafted 2026-08-03 then
+    // explicitly deferred (see git history: fixed a dead
     // `!pacing.is_interpolating` gate that meant g_rightSwing.update() had
-    // never actually run, then OR'd swingEvent.triggered into PAD_BUTTON_B
-    // alongside the real B button), but pulled back out without having been
-    // tested/tuned yet. g_rightSwing (vr_combat::SwingDetector, declared
-    // above) and vr_swing_detector.hpp are left in place, just not called
-    // from here -- real infrastructure to pick back up later, not dead code
-    // to re-derive from scratch.
+    // never actually run, then pulled the wiring back out without having
+    // tested it) -- g_rightSwing/vr_swing_detector.hpp were left in place
+    // specifically so this didn't need to be re-derived from scratch. Using
+    // the LEFT hand here rather than reviving the right-hand attempt is
+    // deliberate, not arbitrary: section 16 of vr-mod-notes established the
+    // sword is Link's LEFT-hand item (mLeftItemJntNo), so swinging the hand
+    // that's actually holding the sword is the physically-intuitive gesture,
+    // where a right-hand swing never would have been.
+    //
+    // vr_combat::SwingDetector is engine-agnostic (see vr_swing_detector.hpp)
+    // and only needs a position + monotonic timestamp per frame -- feed it
+    // the left grip pose already located above and the frame's predicted
+    // display time (XrTime is int64 nanoseconds; converting to seconds here
+    // is just for the detector's dt math, no epoch meaning is assumed
+    // anywhere). `triggered` is a one-frame edge (the detector itself
+    // enforces a cooldown + must-drop-below-resetSpeed-to-rearm hysteresis so
+    // one swing can't repeat-fire) -- OR'd into PAD_BUTTON_B for that single
+    // frame is sufficient, same as a real button's down-edge would look to
+    // PADRead() at this pad rate.
+    const vr_combat::Pose leftSwingPose{
+        {leftPose.position.x, leftPose.position.y, leftPose.position.z},
+        static_cast<double>(time) * 1e-9};
+    const vr_combat::SwingEvent leftSwingEvent = g_leftSwing.update(leftSwingPose);
+
+    // DIAGNOSTIC (temporary -- added 2026-08-05 to investigate "swings when
+    // I move my hand normally, doesn't trigger on a real swing"). Two
+    // things to check with real data instead of guessing again: (1) is the
+    // detector's dt source (differencing predictedDisplayTime, an XrTime
+    // meant for pose PREDICTION, not guaranteed to be a clean wall-clock
+    // delta between calls) glitching to something tiny/unstable and
+    // inflating ordinary jitter into a false "swing" -- logged side by side
+    // against pacing.presentation_dt_seconds (the real measured frame time,
+    // already used for updateSmoothTurn()) so the two can be compared
+    // directly; and (2) what does the instantaneous speed actually look
+    // like during a real intended swing vs. normal movement -- the
+    // triggerSpeed/resetSpeed tuning pass earlier this session was a guess
+    // without this data. Throttled to ~9Hz (every 10 frames, matching
+    // section 12's proven capture cadence) so a ~15-20s capture (do a few
+    // seconds of normal hand movement, then a few real swings) stays
+    // readable; every actual trigger is logged unconditionally regardless
+    // of the throttle since triggers are already rate-limited by the
+    // detector's own cooldown. Remove once the detector's actual behavior
+    // is understood and confirmed fixed -- this project's normal practice.
+    {
+        static XrVector3f s_prevPos{};
+        static double s_prevTimeSec = 0.0;
+        static bool s_hasPrev = false;
+        static int s_frameCounter = 0;
+        const double nowSec = static_cast<double>(time) * 1e-9;
+        if (s_hasPrev) {
+            ++s_frameCounter;
+            const float dx = leftPose.position.x - s_prevPos.x;
+            const float dy = leftPose.position.y - s_prevPos.y;
+            const float dz = leftPose.position.z - s_prevPos.z;
+            const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+            const double predDt = nowSec - s_prevTimeSec;
+            const double pacingDt = static_cast<double>(pacing.presentation_dt_seconds);
+            const float speedPredDt = predDt > 0.0 ? static_cast<float>(dist / predDt) : -1.f;
+            const float speedPacingDt = pacingDt > 0.0 ? static_cast<float>(dist / pacingDt) : -1.f;
+            if (leftSwingEvent.triggered || (s_frameCounter % 10) == 0) {
+                char msg[256];
+                _snprintf_s(msg, _TRUNCATE,
+                    "[dusk::vr::swingdiag] pos=(%.4f,%.4f,%.4f) predDt=%.5f pacingDt=%.5f "
+                    "dist=%.4f speedPredDt=%.3f speedPacingDt=%.3f TRIGGERED=%d\n",
+                    leftPose.position.x, leftPose.position.y, leftPose.position.z,
+                    predDt, pacingDt, dist, speedPredDt, speedPacingDt,
+                    leftSwingEvent.triggered ? 1 : 0);
+                OutputDebugStringA(msg);
+            }
+        }
+        s_prevPos = leftPose.position;
+        s_prevTimeSec = nowSec;
+        s_hasPrev = true;
+    }
 
     PADStatus padStatus{};
     padStatus.err = PAD_ERR_NONE;
     if (rightAHeld) padStatus.button |= PAD_BUTTON_A;
-    if (rightBHeld) padStatus.button |= PAD_BUTTON_B;
+    if (rightBHeld || leftSwingEvent.triggered) padStatus.button |= PAD_BUTTON_B;
     if (leftXHeld) padStatus.button |= PAD_BUTTON_RIGHT;  // D-pad right (was D-pad left, was X)
     if (leftYHeld) padStatus.button |= PAD_BUTTON_UP;     // D-pad up (was Y)
     if (leftMenuHeld || rightStickClickHeld) padStatus.button |= PAD_BUTTON_START;
@@ -742,15 +874,15 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
         padStatus.stickX = static_cast<s8>(std::clamp(leftStick.x, -1.f, 1.f) * 127.f);
         padStatus.stickY = static_cast<s8>(std::clamp(leftStick.y, -1.f, 1.f) * 127.f);
     }
-    if (std::abs(rightStick.x) > kStickDeadzone || std::abs(rightStick.y) > kStickDeadzone) {
-        padStatus.substickX = static_cast<s8>(std::clamp(rightStick.x, -1.f, 1.f) * 127.f);
-        padStatus.substickY = static_cast<s8>(std::clamp(rightStick.y, -1.f, 1.f) * 127.f);
-    }
+    // Right thumbstick: UNBOUND from the C-stick/substick as of 2026-08-05
+    // (see the mapping comment above) -- deliberately does NOT write
+    // padStatus.substickX/Y anymore. Drives VR smooth-turn instead; see
+    // updateSmoothTurn() below.
+    dusk::vr::updateSmoothTurn(rightStick.x, pacing.presentation_dt_seconds);
 
     constexpr u32 kVrPadPort = PAD_CHAN0;
     const bool wantsVirtualPad = padStatus.button != 0 || padStatus.stickX != 0 ||
-                                  padStatus.stickY != 0 || padStatus.substickX != 0 ||
-                                  padStatus.substickY != 0 || padStatus.triggerLeft != 0 ||
+                                  padStatus.stickY != 0 || padStatus.triggerLeft != 0 ||
                                   padStatus.triggerRight != 0;
     if (wantsVirtualPad) {
         PADSetVirtualStatus(kVrPadPort, &padStatus);
@@ -759,7 +891,8 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     }
 
     // --- Link head hide + hand matrix mapping ---
-    vr_link::FrameInput frameInput{hmdPose, rightPose, leftPose, rightAimPose, leftAimPose};
+    vr_link::FrameInput frameInput{hmdPose, rightPose, leftPose, rightAimPose, leftAimPose,
+                                    dusk::vr::getSmoothTurnYawRad()};
     vr_link::updateFrame(frameInput);
 
     // World-space point both eyes anchor their view matrix to this frame --
@@ -842,7 +975,7 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     // (not per eye) -- see vr_stereo_render.hpp's updateHudSmoothing()/
     // computeHudPose() comments. Added per user feedback that the
     // head-locked panel felt "really shaky" with raw per-frame tracking.
-    vr_render::updateHudSmoothing(hmdPose);
+    vr_render::updateHudSmoothing(hmdPose, dusk::vr::getSmoothTurnYawRad());
 
     // CONFIRMED this session (first HUD-billboard in-headset test came back
     // solid black): mDoGph_drawHud2D() draws nothing until fpcM_DrawIterater()
@@ -912,6 +1045,7 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
             configViews[eye].recommendedImageRectHeight,
             hmdPose.position,
             vrCameraEyeAnchor,
+            dusk::vr::getSmoothTurnYawRad(),
         };
 
         // Safe to call unconditionally here: the isViewReady() check earlier

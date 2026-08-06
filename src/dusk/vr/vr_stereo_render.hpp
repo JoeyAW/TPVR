@@ -49,6 +49,7 @@
 #include <aurora/gfx.hpp>          // aurora::gfx::create_pass, resolve_pass, etc.
 #include <openxr/openxr.h>
 
+#include "dusk/vr/vr_smooth_turn.hpp"  // dusk::vr::rotateYawXr/rotateYawQuat
 #include "d/d_com_inf_game.h"      // dComIfGd_getView()
 #include "f_op/f_op_view.h"        // view_class, lookat_class, Mtx44, Mtx
 #include "m_Do/m_Do_lib.h"         // mDoLib_clipper::setup()
@@ -113,15 +114,26 @@ inline void eyePoseToViewMtx(
     const XrPosef&    pose,
     const XrVector3f& hmdRefPos,
     const cXyz&       linkEyeGame,
-    float             scale = kEyePosScale)
+    float             scale = kEyePosScale,
+    float             yawRad = 0.f)
 {
-    const auto& q = pose.orientation;
     const auto& p = pose.position;
 
     // Offset of this eye from the head-center reference pose, in metres.
-    const float dx = p.x - hmdRefPos.x;
-    const float dy = p.y - hmdRefPos.y;
-    const float dz = p.z - hmdRefPos.z;
+    float dx = p.x - hmdRefPos.x;
+    float dy = p.y - hmdRefPos.y;
+    float dz = p.z - hmdRefPos.z;
+
+    // VR smooth-turn (vr_smooth_turn.hpp): rotate both the tracked offset
+    // and the orientation quaternion by the same persistent yaw offset, in
+    // OpenXR's own native tracking-space convention, BEFORE any of the
+    // existing game-convention math below runs. Applying this first keeps
+    // it fully orthogonal to the position/orientation handedness fix a few
+    // lines down -- this operates purely within OpenXR's own coordinate
+    // system and never interacts with that conversion.
+    const XrVector3f rotatedOffset = dusk::vr::rotateYawXr(XrVector3f{dx, dy, dz}, yawRad);
+    dx = rotatedOffset.x; dy = rotatedOffset.y; dz = rotatedOffset.z;
+    const XrQuaternionf q = dusk::vr::rotateYawQuat(pose.orientation, yawRad);
 
     // Scale to game units and anchor to Link's actual game-world eye
     // position for this frame.
@@ -293,6 +305,10 @@ struct EyeParams {
     // the same "heavier dependency, unrelated concern" reason kEyePosScale's
     // comment above gives for not including vr_link_visibility.hpp here.
     cXyz eyeAnchor;
+    // VR smooth-turn yaw offset (vr_smooth_turn.hpp), read once per frame
+    // via dusk::vr::getSmoothTurnYawRad() and copied in here for both eyes
+    // -- see eyePoseToViewMtx's yawRad parameter.
+    float smoothTurnYawRad = 0.f;
 };
 
 // ---------------------------------------------------------------------------
@@ -383,7 +399,8 @@ inline aurora::gfx::ResolvedTargets beginEye(const EyeParams& eye) {
     // during cutscenes -- see EyeParams::eyeAnchor's comment) rather than
     // treating the raw XR pose as an absolute world position -- see
     // eyePoseToViewMtx's comment.
-    eyePoseToViewMtx(view->viewMtx, eye.pose, eye.hmdRefPos, eye.eyeAnchor);
+    eyePoseToViewMtx(view->viewMtx, eye.pose, eye.hmdRefPos, eye.eyeAnchor,
+                      kEyePosScale, eye.smoothTurnYawRad);
     j3dSys.setViewMtx(view->viewMtx);
 
     // Inverse view for anything that needs world-from-view (shadow maps, etc.)
@@ -650,15 +667,21 @@ inline void normalizeInPlace(cXyz& v) {
 }
 
 // Called once per frame (not per eye) to advance the damped reference
-// direction toward the current real head pose.
-inline void updateHudSmoothing(const XrPosef& headPose) {
+// direction toward the current real head pose. `yawRad` is the VR
+// smooth-turn offset (vr_smooth_turn.hpp) -- passed through so the HUD's
+// world-forward reference rotates along with the rest of the scene
+// instead of staying pinned to the un-rotated raw head direction, which
+// would otherwise make the HUD appear to drift out of sync with the
+// smooth-turned view.
+inline void updateHudSmoothing(const XrPosef& headPose, float yawRad) {
     // Reuses eyePoseToViewMtx (already validated -- it drives the entire
     // working 3D VR scene) purely for its rotation math: passing the same
     // position as both the pose and the reference gives a zero position
     // delta, and a dummy zero linkEyeGame, since only the ROTATION rows are
     // used below -- this function's translation output is discarded.
     Mtx headViewMtx;
-    eyePoseToViewMtx(headViewMtx, headPose, headPose.position, cXyz(0.f, 0.f, 0.f));
+    eyePoseToViewMtx(headViewMtx, headPose, headPose.position, cXyz(0.f, 0.f, 0.f),
+                      kEyePosScale, yawRad);
 
     // headViewMtx's rotation submatrix is R^T (world-to-head), per
     // eyePoseToViewMtx's own comment ("View matrix = transpose(R) | ...").

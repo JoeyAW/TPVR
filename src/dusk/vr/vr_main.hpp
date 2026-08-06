@@ -92,6 +92,53 @@ void drawHudBillboard(TGXTexObj* hudTex);
 // drawHudBillboard() above is.
 void applyTrackedHandMtx(J3DModel* handModel);
 
+// Re-points mSwordModel/mShieldModel's base transform so they track the
+// real tracked hands, preserving the body rig's own relative offset
+// between the HAND joint (9/0xE, what drives mpLinkHandModel) and the
+// separate ITEM joint (10/0xF -- confirmed a DIFFERENT joint, not the same
+// one; see vr_link::applyTrackedItemMtx()'s comment for how that was
+// found and why an earlier version of this fix wrongly assumed they were
+// the same), then recalculates. Call site: d_a_alink.cpp, right after
+// setDrawHand() (see applyTrackedHandMtx() above for why "right after" --
+// same per-eye, last-write-before-draw ordering). Either model pointer may
+// be NULL (e.g. sword/shield not currently equipped) -- a no-op for that
+// one.
+//
+// leftItemJointMtx/leftHandJointMtx (and the right-hand equivalents): the
+// caller's own mpLinkModel->getAnmMtx(mLeftItemJntNo)/
+// getAnmMtx(mLeftHandJntNo) (and mRightItemJntNo/mRightHandJntNo),
+// evaluated THIS frame. itemJointMtx doubles as the gate -- detects
+// whether setItemMatrix() actually attached this model to the hand joint
+// this frame, vs. its separate belt/back-relative resting pose (an
+// earlier version without this gate made sheathed/stowed sword+shield
+// float at the tracked hand instead of staying put) -- and as the
+// numerator of the hand-to-item relative-offset preservation described
+// above; handJointMtx is the offset's denominator.
+//
+// Guard the call site on isRenderingToHeadset(). Thin forward to
+// vr_link::applyTrackedItemMtx() (vr_link_visibility.hpp), same "keep the
+// heavier OpenXR/aurora header out of core game files" reasoning as
+// drawHudBillboard()/applyTrackedHandMtx() above. Takes plain
+// `float (*)[4]` rather than the MtxP typedef -- vr_main.hpp deliberately
+// only forward-declares J3DModel and doesn't pull in the (dolphin
+// mtx.h-dependent) J3DModel.h just for this one typedef; the two types are
+// identical (MtxP is `f32 (*)[4]`, f32 is `float`).
+void applyTrackedItemMtx(J3DModel* swordModel, J3DModel* shieldModel,
+                          float (*leftItemJointMtx)[4], float (*leftHandJointMtx)[4],
+                          float (*rightItemJointMtx)[4], float (*rightHandJointMtx)[4]);
+
+// The current VR smooth-turn yaw offset (vr_smooth_turn.hpp), in radians --
+// 0 outside VR or before the right thumbstick has been used to turn.
+// Exposed here (a plain float, no OpenXR types in the signature) so
+// gameplay code like d_a_alink.cpp can fold it into movement-direction
+// math without including vr_smooth_turn.hpp/vr_stereo_render.hpp directly
+// -- same "thin forward, keep heavier VR headers out of core game files"
+// reasoning as isRenderingToHeadset()/applyTrackedHandMtx() above. Callers
+// should gate on isRenderingToHeadset() themselves if they only want this
+// while actually rendering to the headset -- this always returns whatever
+// is currently accumulated, VR-active or not.
+float getSmoothTurnYawRad();
+
 // Runs the first half of one VR frame: xrWaitFrame/xrBeginFrame, per-eye
 // render (including the fpcM_DrawIterater/cAPIGph_Painter draw call), and
 // encodes (but does not yet submit) the eye-texture copy for each eye.

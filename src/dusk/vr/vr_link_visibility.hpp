@@ -12,6 +12,7 @@
 
 #include <openxr/openxr.h>
 
+#include "dusk/vr/vr_smooth_turn.hpp"  // dusk::vr::rotateYawXr/rotateYawQuat
 #include "d/actor/d_a_alink.h"
 #include "d/d_com_inf_game.h"
 #include "dusk/frame_interpolation.h"
@@ -451,12 +452,21 @@ inline void buildHandMtx(
     const XrPosef&    controllerPoseXR,
     const cXyz&       linkEyeGame,
     float             scale,
-    bool              isLeftHand)
+    bool              isLeftHand,
+    float             yawRad = 0.f)
 {
     // Offset of controller from HMD in tracking space (metres)
-    const float dx = controllerPoseXR.position.x - hmdPosXR.x;
-    const float dy = controllerPoseXR.position.y - hmdPosXR.y;
-    const float dz = controllerPoseXR.position.z - hmdPosXR.z;
+    float dx = controllerPoseXR.position.x - hmdPosXR.x;
+    float dy = controllerPoseXR.position.y - hmdPosXR.y;
+    float dz = controllerPoseXR.position.z - hmdPosXR.z;
+
+    // VR smooth-turn (vr_smooth_turn.hpp): rotate the hand's offset from
+    // the head, and its orientation, by the same persistent yaw offset
+    // eyePoseToViewMtx applies to the camera -- keeps tracked hands
+    // visually consistent with the smooth-turned view instead of staying
+    // pinned to their pre-turn position/orientation relative to it.
+    const XrVector3f rotatedOffset = dusk::vr::rotateYawXr(XrVector3f{dx, dy, dz}, yawRad);
+    dx = rotatedOffset.x; dy = rotatedOffset.y; dz = rotatedOffset.z;
 
     // CONFIRMED this session: front/back was specifically swapped (hand
     // appeared behind the player instead of in front) -- fixed by removing
@@ -466,7 +476,7 @@ inline void buildHandMtx(
     const float gy = linkEyeGame.y + dy * scale;
     const float gz = linkEyeGame.z + dz * scale;
 
-    const auto& q = controllerPoseXR.orientation;
+    const XrQuaternionf q = dusk::vr::rotateYawQuat(controllerPoseXR.orientation, yawRad);
 
     if (!isLeftHand) {
         // Calibration-derived rotation, mapped straightforwardly (right=
@@ -535,6 +545,10 @@ struct FrameInput {
     // photos instead (see section 12's later updates).
     XrPosef rightAimPose;
     XrPosef leftAimPose;
+    // VR smooth-turn yaw offset (vr_smooth_turn.hpp), read once per frame by
+    // vr_main.cpp via dusk::vr::getSmoothTurnYawRad() -- see buildHandMtx's
+    // yawRad parameter.
+    float smoothTurnYawRad = 0.f;
 };
 
 // Arm- and ear-related material indices on mpLinkModel (Link's body),
@@ -663,8 +677,8 @@ inline void updateFrame(const FrameInput& input) {
     const cXyz eyePos = getVrCameraEyeAnchor(view->lookat.eye);
     const XrVector3f& hmdPos = input.hmdPose.position;
 
-    buildHandMtx(detail::s_rightHandMtx, hmdPos, input.rightControllerPose, eyePos, VR_SCALE_FACTOR, false);
-    buildHandMtx(detail::s_leftHandMtx, hmdPos, input.leftControllerPose, eyePos, VR_SCALE_FACTOR, true);
+    buildHandMtx(detail::s_rightHandMtx, hmdPos, input.rightControllerPose, eyePos, VR_SCALE_FACTOR, false, input.smoothTurnYawRad);
+    buildHandMtx(detail::s_leftHandMtx, hmdPos, input.leftControllerPose, eyePos, VR_SCALE_FACTOR, true, input.smoothTurnYawRad);
     detail::s_handMtxValid = true;
 
     // TEMP DIAGNOSTIC (position-not-tracking investigation, remove once
@@ -724,6 +738,167 @@ inline void applyTrackedHandMtx(J3DModel* handModel) {
     if (!handModel || !detail::s_handMtxValid) return;
     handModel->setAnmMtx(RIGHT_HAND_JOINT, detail::s_rightHandMtx);
     handModel->setAnmMtx(LEFT_HAND_JOINT, detail::s_leftHandMtx);
+}
+
+// Sword/shield tracked attachment -- same underlying bug class as
+// mpLinkHandModel above ("floats where it'd be on Link's regular model"),
+// different mechanism/fix shape.
+//
+// On flatscreen, mSwordModel/mShieldModel are entirely separate J3DModel
+// instances positioned once per frame (daAlink_c::setItemMatrix(), NOT
+// per-eye) via
+//   mSwordModel->setBaseTRMtx(mpLinkModel->getAnmMtx(mLeftItemJntNo));
+//   mShieldModel->setBaseTRMtx(mpLinkModel->getAnmMtx(mRightItemJntNo));
+//
+// CORRECTED (round 3, same session): mLeftItemJntNo/mRightItemJntNo are
+// NOT the same joints as the hand joints setDrawHand() feeds into
+// mpLinkHandModel's joints 1/2. Confirmed via d_a_alink_wolf.inc's
+// "revert from wolf to human" reset block, which sets ALL FOUR fields at
+// once: mLeftHandJntNo=9, mRightHandJntNo=0xE, mLeftItemJntNo=10,
+// mRightItemJntNo=0xF -- i.e. in human form the ITEM (sword/shield) joint
+// is a DIFFERENT joint (10/0xF) from the HAND joint (9/0xE), presumably a
+// child/sibling joint in the rig encoding the fixed grip offset between
+// "where the wrist is" and "where a held object sits/is oriented in that
+// grip." An earlier version of this fix wrongly assumed they were the
+// same joint (they share a NUMBER-LOOKING resemblance -- 9/0xE for hands,
+// 10/0xF for items, off by exactly one -- easy to misread quickly) and
+// substituted the tracked HAND matrix directly for the item's position,
+// which looked fine for the shield (a roughly flat/symmetric shape,
+// forgiving of a moderate rotational offset) but visibly wrong for the
+// sword (a long blade, where the same offset is obvious at the tip) --
+// user-reported as "sheaths and unsheathes [correctly now] but is still
+// facing the wrong way."
+//
+// Fix: don't substitute the tracked hand matrix directly. Instead,
+// preserve whatever relative offset the body rig defines between the hand
+// joint and the item joint, recomputed fresh every frame from mpLinkModel's
+// own CURRENT animated matrices (works regardless of whether that offset
+// is a rig constant or itself varies per-animation):
+//   relativeOffset = inverse(handJointWorldMtx) * itemJointWorldMtx
+//   trackedItemMtx = trackedHandMtx * relativeOffset
+// i.e. "re-express the item's real current local relationship to the hand
+// joint, but rooted at the TRACKED hand pose instead of the body's
+// animated one." This is the same "insight" applyStaticCorrection's
+// history (section 12) already contains in a different guise: composing a
+// correction onto a LOCAL relationship (here, hand-to-item) rather than
+// applying it after the fact to something already in world space is what
+// makes it correct in general, not just at one reference pose.
+//
+// Unlike applyTrackedHandMtx() above, this can't just poke mMtxBuffer
+// directly: setAnmMtx() there overwrites an already-resolved joint-world
+// matrix inside mpLinkHandModel's OWN joint hierarchy (mMtxBuffer), read
+// directly at draw time with no further recalculation needed. Sword/shield
+// have no such per-joint override -- setBaseTRMtx() only assigns
+// J3DModel::mBaseTransformMtx, a plain member that calcAnmMtx() (called
+// from calc()) reads to resolve the model's OWN joint tree the NEXT time
+// calc() runs (J3DModel.cpp: calcAnmMtx() -> getJointTree().calc(mMtxBuffer,
+// mBaseScale, mBaseTransformMtx)). Since these models were already calc()'d
+// once this frame (setItemMatrix(), with the stale flatscreen-joint base
+// matrix), changing mBaseTransformMtx alone here would have zero visible
+// effect until some later frame's calc() happened to pick it up -- calc()
+// must be called again right here, per eye, for the new base matrix to
+// actually reach the draw. Sword/shield are small, simple models, so a
+// second (or third, across both eyes) calc() per frame is not a
+// perf concern (same reasoning as section 7's HUD billboard capture cost).
+//
+// FIRST VERSION OF THIS FIX (unconditional override) WAS WRONG -- reverted
+// same session after in-headset testing. setItemMatrix() does NOT always
+// attach sword/shield to the hand joint: it switches per frame between the
+// hand-joint matrix above (sword: only when `mEquipItem == 0x103`, i.e.
+// sword is Link's currently-EQUIPPED weapon -- `param_0` is always 0 at
+// every real call site, so that's the whole condition in practice; shield:
+// a wider OR-chain covering actively guarding/attacking/etc.) and a
+// completely different, computed BELT/BACK-relative offset matrix (the
+// `else` branch in setItemMatrix() -- e.g. sword sheathed while a DIFFERENT
+// item like the bow is equipped, or shield stowed on the back) for
+// everything else. The unconditional version overwrote BOTH cases with the
+// tracked hand position, so a sheathed sword (while some other item was
+// equipped) or a stowed shield ended up floating at the player's tracked
+// hand instead of properly out of the way at the hip/back -- reported
+// in-headset as "I see the shield when it's not equipped" and "I see the
+// sword hilt when it's not equipped."
+//
+// Fix: only substitute the tracked matrix when setItemMatrix() actually
+// chose the hand-joint branch THIS frame for THIS model -- detected
+// structurally (comparing the model's current base transform against
+// mpLinkModel->getAnmMtx(mLeftItemJntNo/mRightItemJntNo), evaluated by the
+// caller right before this call, same frame) rather than by duplicating
+// setItemMatrix()'s own multi-condition boolean logic here, which would be
+// one more place that silently drifts out of sync if that logic ever
+// changes (same "don't infer, verify structurally" spirit as this
+// project's other VR-vs-flatscreen guards). When the model is currently in
+// its belt/back-relative pose, this is a no-op and the base game's own
+// computed offset is left completely alone -- correct for VR too, since
+// that pose was never meant to track a hand in the first place.
+//
+// Called from d_a_alink.cpp right after setDrawHand(), unconditionally
+// (matches setDrawHand()'s own "always set these" reasoning for hands) --
+// guarded on isRenderingToHeadset() at the call site, not here.
+//
+// Known gap: mHeldItemModel (bow, lantern, boomerang, etc. -- a separate,
+// broader "currently equipped item" model, also positioned from
+// mLeftItemJntNo/mRightItemJntNo in several places in d_a_alink.cpp) very
+// likely has the exact same floating-in-VR symptom, by the same mechanism.
+// Not fixed here -- only sword/shield were reported/requested.
+inline bool mtxNearlyEqual(MtxP a, MtxP b) {
+    if (!a || !b) return false;
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            if (std::fabs(a[r][c] - b[r][c]) > 0.01f) return false;
+        }
+    }
+    return true;
+}
+
+// itemJointMtx/handJointMtx: this frame's mpLinkModel->getAnmMtx(mXxxItemJntNo)
+// / getAnmMtx(mXxxHandJntNo) for one side, evaluated by the caller.
+// itemJointMtx doubles as the gate (compare against the model's current
+// base transform -- only proceed if setItemMatrix() actually chose the
+// hand-attached branch this frame) and as the numerator of the relative
+// offset; handJointMtx is the offset's denominator. trackedHandMtx is
+// s_leftHandMtx/s_rightHandMtx. Returns false (caller should leave the
+// model untouched) if the model isn't currently hand-attached, or if
+// MTXInverse fails (should not happen for a well-formed rigid joint
+// matrix, but MTXInverse's own return value is trusted over assuming
+// success -- leaving the base game's existing transform in place is a
+// safe fallback either way).
+inline bool computeTrackedItemMtx(
+    Mtx dest, MtxP currentBaseMtx, MtxP itemJointMtx, MtxP handJointMtx,
+    MtxP trackedHandMtx)
+{
+    if (!mtxNearlyEqual(currentBaseMtx, itemJointMtx)) return false;
+
+    Mtx handInv;
+    if (!MTXInverse(handJointMtx, handInv)) return false;
+
+    Mtx relativeOffset;
+    MTXConcat(handInv, itemJointMtx, relativeOffset);
+    MTXConcat(trackedHandMtx, relativeOffset, dest);
+    return true;
+}
+
+inline void applyTrackedItemMtx(
+    J3DModel* swordModel, J3DModel* shieldModel,
+    MtxP leftItemJointMtx, MtxP leftHandJointMtx,
+    MtxP rightItemJointMtx, MtxP rightHandJointMtx)
+{
+    if (!detail::s_handMtxValid) return;
+
+    Mtx trackedMtx;
+    if (swordModel &&
+        computeTrackedItemMtx(trackedMtx, swordModel->getBaseTRMtx(),
+                               leftItemJointMtx, leftHandJointMtx, detail::s_leftHandMtx))
+    {
+        swordModel->setBaseTRMtx(trackedMtx);
+        swordModel->calc();
+    }
+    if (shieldModel &&
+        computeTrackedItemMtx(trackedMtx, shieldModel->getBaseTRMtx(),
+                               rightItemJointMtx, rightHandJointMtx, detail::s_rightHandMtx))
+    {
+        shieldModel->setBaseTRMtx(trackedMtx);
+        shieldModel->calc();
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -37,6 +37,7 @@
 #include "d/actor/d_a_tag_mmsg.h"
 #include "d/actor/d_a_tag_lantern.h"
 #include "d/actor/d_a_horse.h"
+#include "dusk/vr/vr_main.hpp"
 #include "m_Do/m_Do_controller_pad.h"
 #include "d/d_bomb.h"
 #include "d/d_meter2_info.h"
@@ -19012,6 +19013,19 @@ void daAlink_c::setDrawHand() {
     // Doing it regardless of interpolation being active seems harmless.
     mpLinkHandModel->setAnmMtx(1, mpLinkModel->getAnmMtx(9));
     mpLinkHandModel->setAnmMtx(2, mpLinkModel->getAnmMtx(0xE));
+
+    // VR tracked hands: this re-sync above runs every eye, right before
+    // mpLinkHandModel actually draws, and unconditionally overwrites
+    // anything written earlier in the frame -- including VR's own
+    // controller-tracked pose (vr_link::updateFrame(), which runs once
+    // before the per-eye loop even opens). Re-applying it here, as the
+    // LAST write before the draw, is what makes it actually stick -- see
+    // dusk::vr::applyTrackedHandMtx()'s comment (vr_main.hpp) for the full
+    // story of how "controllers do nothing" was root-caused to this exact
+    // ordering. No-op on flatscreen.
+    if (dusk::vr::isRenderingToHeadset()) {
+        dusk::vr::applyTrackedHandMtx(mpLinkHandModel);
+    }
 #endif
 
     if (var_r30 == 0xFE || var_r30 == 0xFB) {

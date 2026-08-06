@@ -191,6 +191,270 @@ inline XrSession createXrSession(const Bootstrap& boot, const XrGraphicsDevice& 
     return session;
 }
 
+// ---------------------------------------------------------------------------
+// Hand tracking: grip-pose action set
+// ---------------------------------------------------------------------------
+//
+// Prior to this, g_rightGripSpace/g_leftGripSpace (vr_main.cpp) were bare
+// XR_NULL_HANDLE globals with nothing to ever assign them -- see the TODO
+// that used to sit above their declaration. locateSpace() silently fell
+// back to an identity pose for a null space (same fallback g_viewSpace hit
+// before it got a real xrCreateReferenceSpace(VIEW) call -- see
+// createXrSession's comment), so vr_link::buildHandMtx() has been
+// rendering hands at tracking-space origin ever since it was written. This
+// is the actual xrCreateActionSet/xrCreateAction/xrCreateActionSpace setup
+// that was missing.
+//
+// One POSE action ("grip_pose") with two subaction paths (/user/hand/left,
+// /user/hand/right) rather than two separate actions -- the idiomatic
+// OpenXR pattern, and it lets both hands share one binding suggestion per
+// profile below instead of two.
+struct HandActions {
+    XrActionSet actionSet = XR_NULL_HANDLE;
+    XrAction gripPoseAction = XR_NULL_HANDLE;
+    // NEW (rotation-calibration follow-up): the OpenXR "aim" pose is a
+    // SEPARATE standard pose from grip -- spec-defined with -Z as "the
+    // direction the user would point the controller to indicate a target",
+    // computed by the runtime from real controller geometry/calibration, not
+    // derived from anything this app assumes. Grip and aim poses are always
+    // available simultaneously from the same physical controller at the same
+    // instant. This exists specifically to replace the previous rotation
+    // correction's reliance on an unverified "the camera was looking where
+    // the controller pointed" proxy (see vr_link_visibility.hpp's
+    // applyStaticCorrection comment / CLAUDE.md section 12) with a
+    // self-consistent, runtime-provided reference that needs no assumption
+    // about the player's gaze at all.
+    XrAction aimPoseAction = XR_NULL_HANDLE;
+
+    // NEW (gameplay controller input, 2026-08-03): real button/axis actions
+    // driving actual game input (movement, attack, items), as opposed to
+    // the two pose actions above which only ever fed hand-tracking visuals.
+    // Same one-action-two-subaction-paths idiom as gripPoseAction/
+    // aimPoseAction -- see createHandActionSet()'s bindings for exactly
+    // which physical input each subaction path is bound to.
+    XrAction triggerValueAction = XR_NULL_HANDLE;   // FLOAT: index trigger, both hands
+    XrAction squeezeValueAction = XR_NULL_HANDLE;   // FLOAT: grip squeeze, both hands
+    XrAction thumbstickAction = XR_NULL_HANDLE;     // VECTOR2F: thumbstick, both hands
+    XrAction primaryClickAction = XR_NULL_HANDLE;   // BOOL: A (right) / X (left)
+    XrAction secondaryClickAction = XR_NULL_HANDLE; // BOOL: B (right) / Y (left)
+    XrAction menuClickAction = XR_NULL_HANDLE;      // BOOL: menu button, left only
+    // NEW (2026-08-04, per explicit user request "make the right stick
+    // click the pause menu"): right thumbstick click, OR'd into PAD_BUTTON_START
+    // alongside the pre-existing left menu button below -- both trigger
+    // pause, neither was removed. One action, both subaction paths bound
+    // (see createHandActionSet()'s touch-profile bindings below) -- right
+    // click -> pause, left click -> D-pad right (added same day, see
+    // vr_main.cpp's tick()).
+    XrAction stickClickAction = XR_NULL_HANDLE;     // BOOL: thumbstick click, both hands
+
+    XrPath leftHandPath = XR_NULL_PATH;
+    XrPath rightHandPath = XR_NULL_PATH;
+};
+
+// Suggests bindings for every controller profile actually relevant to this
+// project (see Build workflow notes on which runtimes are tested):
+// khr/simple_controller is the universal fallback every conformant OpenXR
+// runtime must accept remapping through, and the other three are the
+// native profiles for the controllers actually in use (Touch for Meta
+// Link; Index/Vive covering the common SteamVR/Virtual Desktop hardware).
+// A profile that isn't present on the active runtime just silently fails
+// its own xrSuggestInteractionProfileBindings call -- not fatal, so this
+// doesn't use checkResult() the way the rest of this file does.
+inline HandActions createHandActionSet(XrInstance instance) {
+    HandActions actions;
+
+    XrActionSetCreateInfo setInfo{XR_TYPE_ACTION_SET_CREATE_INFO};
+    std::strncpy(setInfo.actionSetName, "dusklight_hands", XR_MAX_ACTION_SET_NAME_SIZE - 1);
+    std::strncpy(setInfo.localizedActionSetName, "Dusklight Hands",
+                 XR_MAX_LOCALIZED_ACTION_SET_NAME_SIZE - 1);
+    setInfo.priority = 0;
+    checkResult(xrCreateActionSet(instance, &setInfo, &actions.actionSet), "xrCreateActionSet");
+
+    checkResult(xrStringToPath(instance, "/user/hand/left", &actions.leftHandPath),
+                "xrStringToPath(/user/hand/left)");
+    checkResult(xrStringToPath(instance, "/user/hand/right", &actions.rightHandPath),
+                "xrStringToPath(/user/hand/right)");
+    XrPath subactionPaths[] = {actions.leftHandPath, actions.rightHandPath};
+
+    XrActionCreateInfo actionInfo{XR_TYPE_ACTION_CREATE_INFO};
+    actionInfo.actionType = XR_ACTION_TYPE_POSE_INPUT;
+    std::strncpy(actionInfo.actionName, "grip_pose", XR_MAX_ACTION_NAME_SIZE - 1);
+    std::strncpy(actionInfo.localizedActionName, "Grip Pose",
+                 XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
+    actionInfo.countSubactionPaths = 2;
+    actionInfo.subactionPaths = subactionPaths;
+    checkResult(xrCreateAction(actions.actionSet, &actionInfo, &actions.gripPoseAction),
+                "xrCreateAction(grip_pose)");
+
+    // NEW (rotation-calibration follow-up, see HandActions::aimPoseAction's
+    // comment): identical setup to grip_pose above, just a different
+    // standard pose action/binding path.
+    XrActionCreateInfo aimActionInfo{XR_TYPE_ACTION_CREATE_INFO};
+    aimActionInfo.actionType = XR_ACTION_TYPE_POSE_INPUT;
+    std::strncpy(aimActionInfo.actionName, "aim_pose", XR_MAX_ACTION_NAME_SIZE - 1);
+    std::strncpy(aimActionInfo.localizedActionName, "Aim Pose",
+                 XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
+    aimActionInfo.countSubactionPaths = 2;
+    aimActionInfo.subactionPaths = subactionPaths;
+    checkResult(xrCreateAction(actions.actionSet, &aimActionInfo, &actions.aimPoseAction),
+                "xrCreateAction(aim_pose)");
+
+    // NEW (gameplay controller input): trigger/squeeze/thumbstick/click
+    // actions, same two-subaction-path idiom as the pose actions above.
+    auto createAction = [&](XrActionType type, const char* name, const char* localizedName,
+                             XrAction* out) {
+        XrActionCreateInfo info{XR_TYPE_ACTION_CREATE_INFO};
+        info.actionType = type;
+        std::strncpy(info.actionName, name, XR_MAX_ACTION_NAME_SIZE - 1);
+        std::strncpy(info.localizedActionName, localizedName, XR_MAX_LOCALIZED_ACTION_NAME_SIZE - 1);
+        info.countSubactionPaths = 2;
+        info.subactionPaths = subactionPaths;
+        checkResult(xrCreateAction(actions.actionSet, &info, out), name);
+    };
+    createAction(XR_ACTION_TYPE_FLOAT_INPUT, "trigger_value", "Trigger", &actions.triggerValueAction);
+    createAction(XR_ACTION_TYPE_FLOAT_INPUT, "squeeze_value", "Squeeze", &actions.squeezeValueAction);
+    createAction(XR_ACTION_TYPE_VECTOR2F_INPUT, "thumbstick", "Thumbstick", &actions.thumbstickAction);
+    createAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "primary_click", "Primary Button", &actions.primaryClickAction);
+    createAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "secondary_click", "Secondary Button", &actions.secondaryClickAction);
+    createAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "menu_click", "Menu", &actions.menuClickAction);
+    createAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "stick_click", "Stick Click", &actions.stickClickAction);
+
+    XrPath leftBindingPath = XR_NULL_PATH;
+    XrPath rightBindingPath = XR_NULL_PATH;
+    XrPath leftAimBindingPath = XR_NULL_PATH;
+    XrPath rightAimBindingPath = XR_NULL_PATH;
+    xrStringToPath(instance, "/user/hand/left/input/grip/pose", &leftBindingPath);
+    xrStringToPath(instance, "/user/hand/right/input/grip/pose", &rightBindingPath);
+    xrStringToPath(instance, "/user/hand/left/input/aim/pose", &leftAimBindingPath);
+    xrStringToPath(instance, "/user/hand/right/input/aim/pose", &rightAimBindingPath);
+    XrActionSuggestedBinding bindings[] = {
+        {actions.gripPoseAction, leftBindingPath},
+        {actions.gripPoseAction, rightBindingPath},
+        {actions.aimPoseAction, leftAimBindingPath},
+        {actions.aimPoseAction, rightAimBindingPath},
+    };
+
+    auto suggestForProfile = [&](const char* profilePath, const XrActionSuggestedBinding* bindingsArr,
+                                  uint32_t count) -> XrResult {
+        XrPath profile = XR_NULL_PATH;
+        if (XR_FAILED(xrStringToPath(instance, profilePath, &profile))) return XR_ERROR_PATH_INVALID;
+
+        XrInteractionProfileSuggestedBinding suggest{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+        suggest.interactionProfile = profile;
+        suggest.countSuggestedBindings = count;
+        suggest.suggestedBindings = bindingsArr;
+        return xrSuggestInteractionProfileBindings(instance, &suggest);
+    };
+
+    // Pose-only bindings for every profile this project has ever tested
+    // against (see Build workflow notes) -- unchanged from before this
+    // session, still needed for hand-tracking visuals on all of them.
+    suggestForProfile("/interaction_profiles/khr/simple_controller", bindings, 4);
+    suggestForProfile("/interaction_profiles/htc/vive_controller", bindings, 4);
+    suggestForProfile("/interaction_profiles/valve/index_controller", bindings, 4);
+
+    // Gameplay button/axis bindings, scoped to oculus/touch_controller only
+    // (Quest 3's native profile, and what SteamVR/Virtual Desktop/Meta Link
+    // all report for Touch controllers regardless of runtime) per explicit
+    // user request ("set up the quest 3 controllers"). NOT extended to the
+    // other 3 profiles above -- their button/axis layouts genuinely differ
+    // (vive has a trackpad not a thumbstick, khr/simple has neither trigger
+    // nor thumbstick at all) and would need their own verified binding
+    // paths, not attempted here since no non-Quest hardware is in scope for
+    // this pass. xrSuggestInteractionProfileBindings REPLACES all bindings
+    // for a profile on each call, so the pose bindings must be repeated
+    // here too, not just the new ones, or hand-tracking would silently stop
+    // working on Quest specifically.
+    XrPath leftTriggerPath = XR_NULL_PATH, rightTriggerPath = XR_NULL_PATH;
+    XrPath leftSqueezePath = XR_NULL_PATH, rightSqueezePath = XR_NULL_PATH;
+    XrPath leftStickPath = XR_NULL_PATH, rightStickPath = XR_NULL_PATH;
+    XrPath leftXClickPath = XR_NULL_PATH, rightAClickPath = XR_NULL_PATH;
+    XrPath leftYClickPath = XR_NULL_PATH, rightBClickPath = XR_NULL_PATH;
+    XrPath leftMenuClickPath = XR_NULL_PATH;
+    XrPath rightStickClickPath = XR_NULL_PATH;
+    XrPath leftStickClickPath = XR_NULL_PATH;
+    xrStringToPath(instance, "/user/hand/left/input/trigger/value", &leftTriggerPath);
+    xrStringToPath(instance, "/user/hand/right/input/trigger/value", &rightTriggerPath);
+    xrStringToPath(instance, "/user/hand/left/input/squeeze/value", &leftSqueezePath);
+    xrStringToPath(instance, "/user/hand/right/input/squeeze/value", &rightSqueezePath);
+    xrStringToPath(instance, "/user/hand/left/input/thumbstick", &leftStickPath);
+    xrStringToPath(instance, "/user/hand/right/input/thumbstick", &rightStickPath);
+    xrStringToPath(instance, "/user/hand/left/input/x/click", &leftXClickPath);
+    xrStringToPath(instance, "/user/hand/right/input/a/click", &rightAClickPath);
+    xrStringToPath(instance, "/user/hand/left/input/y/click", &leftYClickPath);
+    xrStringToPath(instance, "/user/hand/right/input/b/click", &rightBClickPath);
+    xrStringToPath(instance, "/user/hand/left/input/menu/click", &leftMenuClickPath);
+    xrStringToPath(instance, "/user/hand/right/input/thumbstick/click", &rightStickClickPath);
+    xrStringToPath(instance, "/user/hand/left/input/thumbstick/click", &leftStickClickPath);
+
+    XrActionSuggestedBinding touchBindings[] = {
+        {actions.gripPoseAction, leftBindingPath},
+        {actions.gripPoseAction, rightBindingPath},
+        {actions.aimPoseAction, leftAimBindingPath},
+        {actions.aimPoseAction, rightAimBindingPath},
+        {actions.triggerValueAction, leftTriggerPath},
+        {actions.triggerValueAction, rightTriggerPath},
+        {actions.squeezeValueAction, leftSqueezePath},
+        {actions.squeezeValueAction, rightSqueezePath},
+        {actions.thumbstickAction, leftStickPath},
+        {actions.thumbstickAction, rightStickPath},
+        {actions.primaryClickAction, leftXClickPath},
+        {actions.primaryClickAction, rightAClickPath},
+        {actions.secondaryClickAction, leftYClickPath},
+        {actions.secondaryClickAction, rightBClickPath},
+        {actions.menuClickAction, leftMenuClickPath},
+        {actions.stickClickAction, rightStickClickPath},
+        {actions.stickClickAction, leftStickClickPath},
+    };
+    suggestForProfile("/interaction_profiles/oculus/touch_controller", touchBindings, 17);
+
+    return actions;
+}
+
+// Attaches the action set to the session (must happen exactly once, before
+// the first xrSyncActions call -- see tick()'s per-frame sync in
+// vr_main.cpp) and creates the per-hand action spaces used to locate grip
+// (and, as of the rotation-calibration follow-up, aim) poses each frame the
+// same way g_viewSpace already locates the head.
+inline void attachAndCreateHandSpaces(XrSession session, const HandActions& actions,
+                                       XrSpace* outLeftGripSpace, XrSpace* outRightGripSpace,
+                                       XrSpace* outLeftAimSpace, XrSpace* outRightAimSpace) {
+    XrSessionActionSetsAttachInfo attachInfo{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    attachInfo.countActionSets = 1;
+    attachInfo.actionSets = &actions.actionSet;
+    checkResult(xrAttachSessionActionSets(session, &attachInfo), "xrAttachSessionActionSets");
+
+    const XrPosef identityPose{{0, 0, 0, 1}, {0, 0, 0}};
+
+    XrActionSpaceCreateInfo leftSpaceInfo{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+    leftSpaceInfo.action = actions.gripPoseAction;
+    leftSpaceInfo.subactionPath = actions.leftHandPath;
+    leftSpaceInfo.poseInActionSpace = identityPose;
+    checkResult(xrCreateActionSpace(session, &leftSpaceInfo, outLeftGripSpace),
+                "xrCreateActionSpace(left grip)");
+
+    XrActionSpaceCreateInfo rightSpaceInfo{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+    rightSpaceInfo.action = actions.gripPoseAction;
+    rightSpaceInfo.subactionPath = actions.rightHandPath;
+    rightSpaceInfo.poseInActionSpace = identityPose;
+    checkResult(xrCreateActionSpace(session, &rightSpaceInfo, outRightGripSpace),
+                "xrCreateActionSpace(right grip)");
+
+    XrActionSpaceCreateInfo leftAimSpaceInfo{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+    leftAimSpaceInfo.action = actions.aimPoseAction;
+    leftAimSpaceInfo.subactionPath = actions.leftHandPath;
+    leftAimSpaceInfo.poseInActionSpace = identityPose;
+    checkResult(xrCreateActionSpace(session, &leftAimSpaceInfo, outLeftAimSpace),
+                "xrCreateActionSpace(left aim)");
+
+    XrActionSpaceCreateInfo rightAimSpaceInfo{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+    rightAimSpaceInfo.action = actions.aimPoseAction;
+    rightAimSpaceInfo.subactionPath = actions.rightHandPath;
+    rightAimSpaceInfo.poseInActionSpace = identityPose;
+    checkResult(xrCreateActionSpace(session, &rightAimSpaceInfo, outRightAimSpace),
+                "xrCreateActionSpace(right aim)");
+}
+
 }  // namespace vr_xr
 
 // --- Next wiring step (not yet done anywhere) ---

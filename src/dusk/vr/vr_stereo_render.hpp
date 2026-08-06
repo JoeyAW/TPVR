@@ -123,35 +123,50 @@ inline void eyePoseToViewMtx(
     const float dy = p.y - hmdRefPos.y;
     const float dz = p.z - hmdRefPos.z;
 
-    // Scale to game units and flip Z, then anchor to Link's actual game-world
-    // eye position for this frame (matches buildHandMtx's convention).
-    // ROOT-CAUSED this session (VR shadow-stretching investigation): kept
-    // in double precision here and through the translation dot-products
-    // below. Diagnostic logging showed this specific area's world
-    // coordinates run to ~100,000+ units (stage-specific origin offset far
-    // from the visible geometry) -- at that magnitude float32 only has
-    // ~0.01-0.02 units of precision left, and objects with small local
-    // scale (e.g. a shadow blob with radius ~20) concatenated against a
-    // huge-magnitude view matrix translation are exactly where that
-    // rounding error becomes visually obvious (stretching/distortion).
-    // This construction is entirely new this session (eyePoseToViewMtx
-    // didn't anchor to game position at all before), so it never got the
-    // numerical conditioning the original mDoMtx_lookAt-based flatscreen
-    // camera path presumably has; computing in double here and truncating
-    // to f32 only at the final Mtx write reduces that error without
-    // changing the Mtx storage format GX expects.
+    // Scale to game units and anchor to Link's actual game-world eye
+    // position for this frame.
+    //
+    // ROOT-CAUSED 2026-08-05 (section 14, "eyes swap near 90 degree yaw"):
+    // this used to flip Z here (`linkEyeGame.z - dz*scale`), with a
+    // comment claiming that "matches buildHandMtx's convention" -- true
+    // when this code was written, but buildHandMtx's OWN position formula
+    // had that identical Z flip removed later the same day (see CLAUDE.md
+    // section 12, "front/back mirrored... fixed by removing the earlier
+    // 'flip Z'") after being confirmed wrong there. Nobody came back to
+    // update this copy to match. Root cause of THIS bug is that stale,
+    // already-proven-wrong flip, not the orientation math below (which a
+    // same-day attempt at "fixing" turned out to reverse pitch/yaw
+    // entirely -- see the removed F*R*F attempt in git history / the
+    // dated note below; reverted once that regression was reported).
+    //
+    // Verified in a standalone script before reapplying here: with the Z
+    // flip removed on THIS side, and the orientation matrix below left
+    // completely alone (unflipped, as it always was and is now confirmed
+    // it must stay), the identity Rt(q) * R(q) * local_offset ==
+    // local_offset holds EXACTLY regardless of head yaw -- i.e. a point
+    // fixed to the camera's physical right reads as view-space right at
+    // every yaw angle tested, not approximately (as the rejected
+    // orientation-side fix only managed) but exactly, since it reduces to
+    // multiplying by a rotation matrix and its own transpose. This also
+    // matches hand tracking's own confirmed-working fix in shape, not just
+    // in outcome.
     const double wx_ = static_cast<double>(linkEyeGame.x) + static_cast<double>(dx) * scale;
     const double wy_ = static_cast<double>(linkEyeGame.y) + static_cast<double>(dy) * scale;
-    const double wz_ = static_cast<double>(linkEyeGame.z) - static_cast<double>(dz) * scale;
+    const double wz_ = static_cast<double>(linkEyeGame.z) + static_cast<double>(dz) * scale;
 
-    // Orientation: use the eye's raw quaternion UNFLIPPED. Confirmed this
-    // session -- flipping qz here (mirroring buildHandMtx's convention,
-    // which is right for hand POSITION/mesh-space, not this) inverted pitch
-    // and roll (looking down looked up, tilting left looked right). The
-    // pre-existing (pre-anchor-fix) code already used the raw quaternion
-    // directly and head look-around was already confirmed correct back
-    // then -- only the POSITION needed the anchor+flip treatment above, the
-    // rotation matrix build below was never broken.
+    // Orientation: raw quaternion, UNFLIPPED. CONFIRMED (not just assumed)
+    // this must stay this way: a 2026-08-05 attempt to also apply a
+    // coordinate-handedness correction here (mirroring the Z flip that
+    // used to be on the position above via F*R*F) was tried, built, and
+    // reported by the user as reversing pitch/yaw entirely ("turning left
+    // turns right, looking up looks down") -- confirmed by re-deriving the
+    // matrix by hand afterward: F*R*F reverses the sign of the rotation
+    // angle for any rotation that touches the Z axis (yaw, pitch), which
+    // is a much worse regression than the narrow 90-degree-yaw stereo
+    // symptom it was meant to fix. Reverted the same session. Do not
+    // reattempt an orientation-side fix for this bug without a much
+    // stronger reason than "matches the position side's flip" -- see the
+    // fix actually applied above instead (position-side, not this).
     const float qx = q.x, qy = q.y, qz = q.z, qw = q.w;
 
     // Quaternion → rotation (row-major 3x3)
@@ -265,6 +280,19 @@ struct EyeParams {
     // anchored to Link's game position via this delta rather than using
     // `pose` as an absolute world position.
     XrVector3f hmdRefPos;
+    // World-space position this eye is anchored to (the `linkEyeGame`
+    // argument to eyePoseToViewMtx). During normal gameplay this is Link's
+    // actual head/eye position (daAlink_c::getSubjectEyePos() -- form- and
+    // mount-aware); during cutscenes/events it falls back to the authored
+    // camera's own view->lookat.eye instead, since an authored shot may not
+    // even be looking at Link -- snapping to his head there would put the
+    // viewer inside his skull for shots never designed to be seen from
+    // there. Computed once per frame (not per eye) by
+    // vr_link::getVrCameraEyeAnchor() in vr_main.cpp's tick(), which is
+    // where daAlink_c is actually available -- kept out of this header for
+    // the same "heavier dependency, unrelated concern" reason kEyePosScale's
+    // comment above gives for not including vr_link_visibility.hpp here.
+    cXyz eyeAnchor;
 };
 
 // ---------------------------------------------------------------------------
@@ -350,10 +378,12 @@ inline aurora::gfx::ResolvedTargets beginEye(const EyeParams& eye) {
     view_class* view = dComIfGd_getView();
     assert(view != nullptr && "VR: no active view_class — called outside gameplay?");
 
-    // Build and apply the view matrix, anchored to Link's actual game-world
-    // eye position (view->lookat.eye) rather than treating the raw XR pose
-    // as an absolute world position -- see eyePoseToViewMtx's comment.
-    eyePoseToViewMtx(view->viewMtx, eye.pose, eye.hmdRefPos, view->lookat.eye);
+    // Build and apply the view matrix, anchored to eye.eyeAnchor (Link's
+    // real head position during gameplay, or the authored camera's eye
+    // during cutscenes -- see EyeParams::eyeAnchor's comment) rather than
+    // treating the raw XR pose as an absolute world position -- see
+    // eyePoseToViewMtx's comment.
+    eyePoseToViewMtx(view->viewMtx, eye.pose, eye.hmdRefPos, eye.eyeAnchor);
     j3dSys.setViewMtx(view->viewMtx);
 
     // Inverse view for anything that needs world-from-view (shadow maps, etc.)

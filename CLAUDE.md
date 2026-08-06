@@ -97,7 +97,48 @@ gone in-headset. Note this section 10 fix **removes the effect entirely**
 (both VR and flatscreen) rather than VR-gating it like section 5's fixes —
 an explicit user choice for this specific location, not the project's
 general VR-bug-fix pattern.
-Other known issues below.
+The VR camera is now anchored to Link's actual head position (true
+first-person) during normal human-form gameplay, instead of the old
+third-person-eye-plus-HMD-delta composition, as of 2026-07-31 — see
+section 11; user-confirmed smooth in-headset, including the
+form-dependent third-person fallback for Wolf Link. **Not yet tested**:
+Epona (horse) riding or snowboarding — see section 11's gaps.
+Tracked VR hands (driving `mpLinkHandModel` from real controller poses,
+the last of the three-part VR embodiment plan) got real OpenXR controller
+input wired up for the first time as of 2026-07-31 — see section 12.
+**Position tracking is fixed and confirmed working in-headset.**
+**Rotation is now FULLY FIXED AND CONFIRMED as of 2026-08-02**, after
+three sessions of attempts (2026-07-31, its continuation, and this final
+session). Two genuinely separate bugs were involved, both now resolved:
+(1) `rotateVecByQuat()` was computing the INVERSE rotation instead of the
+forward one (verified numerically against a reference implementation) —
+this explained why every previous "verified correct" static correction
+still came out wrong in general headset movement, since it was being
+composed with a rotation that ran backwards; and (2) once that was fixed,
+a residual static offset (a fixed rotation between the calibrated local
+axes and how the mesh's own facing/palm/thumb axes are actually authored)
+needed one final calibration pass, ultimately solved by testing all three
+possible single-axis rotation planes against real in-headset photos taken
+at multiple different controller orientations, which is what finally
+confirmed a fix that holds up across general movement rather than just
+one reference pose. Section 12 has the full history — genuinely one of
+the hardest bugs in this project, worth reading in full before attempting
+anything similar (rotation calibration, quaternion conventions, or
+photo/data-based derivation of a fixed correction) elsewhere in this
+codebase. **Left hand is now also fully calibrated and confirmed working
+in-headset, as of 2026-08-03** — turned out much simpler than the right
+hand (identity local axes + live in-headset iteration on the static
+offset, no aim-pose data capture needed), see section 12's left-hand
+writeup. This closes out the three-part VR embodiment plan (camera,
+arms/ears/hat hiding, tracked hands) entirely. Separately, Quest 3
+controllers now also drive real GAMEPLAY input (movement, camera, attack,
+items, pause) — not just hand visuals — as of 2026-08-03, user-confirmed
+working in-headset; see section 13, including a genuinely tricky root
+cause (three independent, unrelated code paths all clearing the same
+shared virtual-pad slot every frame, from a touch-screen-overlay system
+that predates VR and never anticipated a second writer). A swing-gesture
+attack was drafted but explicitly deferred to a future session. Other
+known issues below.
 
 ## Currently uncommitted working-tree changes
 
@@ -1477,6 +1518,1113 @@ unlike every other kagerou/heat-wave fix in this file. If a future session
 is asked to restore flatscreen's heat-wave visuals in Goron Mines
 specifically, these three sites (not section 5's candle/torch/sun sites)
 are where to look.
+
+### 11. VR camera anchored to Link's head (true first-person) — FIXED 2026-07-31
+
+**Goal** (explicit user request, first of a planned three-part sequence —
+see also the not-yet-started "hide arms/ears/hat" and "physical tracked
+hands" follow-ups discussed the same session, not written up here since
+neither has been started): put the VR camera at Link's actual head
+position during normal gameplay, instead of the pre-existing behavior of
+anchoring HMD head-tracking on top of the flatscreen third-person camera's
+eye position (correct stereo/no-crash, but never actually first-person).
+
+**Where the anchor point lives**: `vr_stereo_render.hpp`'s
+`eyePoseToViewMtx()` already composed the view matrix as "HMD positional
+delta from `hmdRefPos`, scaled/Z-flipped, added onto a `linkEyeGame`
+world-space anchor" — this pre-dates this session (see section on the
+cutscene-out-of-bounds fix). Previously `linkEyeGame` was always
+`view->lookat.eye` (the flatscreen camera's own eye, whatever the base game
+computed that frame — normal follow-cam or an authored cutscene camera).
+This session added a new `EyeParams::eyeAnchor` field, computed ONCE per
+frame (not per eye — same value fed to both) in `vr_main.cpp`'s `tick()` via
+`vr_link::getVrCameraEyeAnchor()` (new, `vr_link_visibility.hpp`), and used
+in place of `view->lookat.eye` at `beginEye()`'s `eyePoseToViewMtx()` call
+site.
+
+**The anchor value itself**: `daAlink_c::getSubjectEyePos()`
+(`field_0x3768`) — the SAME value `d_camera.cpp` already reads for its own
+default camera-attention fallback, already computed every sim tick by
+`setBodyPartPos()`, and already form-/mount-aware for free (wolf form uses
+a different joint + local offset internally; canoe/board/horse mounts each
+get their own offset branch). No new position-tracking code was needed —
+the game already tracks where Link's eyes are, this just reads it.
+
+**Two fallback cases, both intentionally still third-person** (return the
+caller's `view->lookat.eye` instead of the head anchor):
+- **Cutscenes/events** (`daAlink_c::checkEventRun()`): an authored cutscene
+  camera isn't guaranteed to be looking at Link at all — snapping to his
+  head there would put the viewer inside his skull for shots never
+  designed to be seen from there. This narrows (doesn't remove)
+  `eyePoseToViewMtx()`'s original design guarantee that `view->lookat.eye`
+  works "whether that's normal follow-cam or an authored cutscene camera"
+  down to cutscenes specifically.
+- **Wolf form** (`daAlink_c::checkWolf()`, a base-class player-state flag —
+  `d_a_player.h`): added per explicit user request the same session, as a
+  deliberate, permanent form-dependent split — **first-person as human,
+  third-person as Wolf Link**, always, not just a temporary limitation.
+  Reasoning given: Wolf Link's model/gait/head joint are different enough
+  (four-legged, separate `wlLocalEye` branch in `setBodyPartPos()`) that
+  the wolf's own head was never designed to be viewed from inside it. Both
+  fallback cases reset `getVrCameraEyeAnchor()`'s interpolation state
+  (`s_eyeAnchorValid = false`) so gameplay doesn't lerp FROM a stale
+  pre-cutscene/pre-transformation head position the next time first-person
+  resumes.
+- **User has explicitly flagged wanting to revisit this later**: possibly
+  making SOME cutscenes first-person after all (not proposed as "remove the
+  guard" — cutscenes vary too much in whether they're even looking at Link
+  for a blanket flip; would need per-cutscene opt-in, not attempted this
+  session). If picked up, `getVrCameraEyeAnchor()`'s `checkEventRun()`
+  branch in `vr_link_visibility.hpp` is the place to start.
+
+**Jitter bug found and fixed same session** (first in-headset test after
+the initial implementation): camera motion AND Link's own nearby body both
+looked badly jittery. **Root cause**: `getSubjectEyePos()`/`field_0x3768`
+is only recomputed once per SIM TICK (`setBodyPartPos()`, called from
+`fapGm_Execute()` inside `m_Do_main.cpp`'s fixed-rate sim-tick loop —
+GameCube-era game logic, well under VR's 72-90Hz render rate). Reading it
+directly every render frame stair-steps: the value only changes once every
+few frames, which combined with the HMD's continuously-updating tracking
+delta on top reads as jitter — and because the camera now sits right at
+Link's head, that stair-stepping made his own nearby body geometry look
+like it was jittering too, even though his mesh itself still rendered
+smoothly in world space (unaffected — see below). `view->lookat.eye` never
+had this problem because `dusk::frame_interp` (`frame_interpolation.cpp`,
+pre-existing) already lerps IT every render frame between the previous and
+current sim tick's recorded camera position
+(`s_cam_prev`/`s_cam_curr`/`interp_view()`).
+
+**Fix**: reproduced that exact same prev/curr-snapshot-and-lerp technique
+for Link's head position specifically, entirely from VR mod code (no core
+engine changes) — see `vr_link_visibility.hpp`'s `getVrCameraEyeAnchor()`
+and its `detail::` namespace state. New-sim-tick detection uses
+`dusk::frame_interp::sim_tick_seq()` (incremented once per real sim tick
+via `begin_sim_tick()`) rather than `is_sim_frame()` — **non-obvious
+gotcha**: by the time `vr_main.cpp`'s `tick()` runs each frame,
+`m_Do_main.cpp` has already unconditionally reset `is_sim_frame()` to
+`false` for the presentation phase (its `begin_frame()` call sequence
+flips it false right after the sim-tick loop, before `dusk::vr::tick()` is
+ever reached), so `is_sim_frame()` can't tell VR code whether THIS
+iteration actually ran a sim tick — `sim_tick_seq()` changing is what
+actually works. `get_interpolation_step()` was confirmed (by reading both
+`begin_frame()` call sites in `m_Do_main.cpp`) to stay populated from
+`game_clock` regardless of the user's "enable frame interpolation" setting
+— only `interp_view()`'s OWN early-out respects that setting — so this
+head-position lerp doesn't need its own separate settings gate. **Why
+Link's body itself was never actually broken**: his mesh is drawn through
+the game's normal (already-interpolated) draw pipeline every eye, same as
+flatscreen — the "jitter" was entirely the camera stair-stepping around a
+smoothly-rendered body, not the body's own animation being wrong. This is
+worth remembering if a similar "reads real gameplay state directly, looks
+jittery in VR" symptom shows up elsewhere in this project: check whether
+the value being read is sim-tick-rate (raw) vs. already going through
+`dusk::frame_interp` before assuming a new bug.
+
+**Confirmed fixed in-headset** (movement smooth) and confirmed working for
+the wolf/human third-person/first-person split, same session.
+
+**Not yet tested** (explicitly flagged by user, not started): Epona (horse)
+riding and snowboarding. Both already have dedicated offset branches inside
+`setBodyPartPos()` (`horseLocalEyeFromRoot`, `boardLocalEyeFromRoot`) that
+`getSubjectEyePos()` picks up automatically — so these are *expected* to
+work with zero additional code, but this has not been confirmed in-headset
+and should not be assumed correct until it is. If either looks wrong, start
+by confirming in-headset which of the two conditions is actually active for
+that mount (`dComIfGp_checkPlayerStatus0(0, 0x2000)` / the
+`checkCanoeRide()`/`checkBoardRide()`/`checkReinRide()` branch in
+`setBodyPartPos()`) before assuming the interpolation or anchor logic
+itself is at fault — those offset branches are pre-existing base-game code,
+not something this session touched or can rule out independently.
+
+### 12. VR tracked hands — POSITION FIXED, ROTATION STILL WRONG (unresolved, follow-up needed)
+
+**Goal** (third of the three-part VR embodiment plan — camera done in
+section 11, arms/ears/hat hiding done separately, this is the last piece):
+drive `mpLinkHandModel`'s two hand joints from real controller poses, so
+Link's existing hand geometry (sword/shield already attached to it) tracks
+the player's actual hands in VR.
+
+**Real OpenXR controller input didn't exist at all before this session.**
+`g_rightGripSpace`/`g_leftGripSpace` (`vr_main.cpp`) were bare
+`XR_NULL_HANDLE` globals nothing ever assigned — `locateSpace()`'s identity
+fallback meant `vr_link_visibility.hpp`'s pre-existing (but never-actually-
+tested-with-real-data) `buildHandMtx()`/`FrameInput` consumers had been
+rendering hands at tracking-space origin the whole time. Fixed by adding a
+real `XrActionSet`/pose `XrAction`/`XrActionSpace` setup
+(`vr_xr_bootstrap.hpp`'s `createHandActionSet()`/
+`attachAndCreateHandSpaces()`, called from `startup()`; one POSE action
+with `/user/hand/left` and `/user/hand/right` subaction paths, bindings
+suggested for `khr/simple_controller` plus the native Touch/Vive/Index
+profiles), plus a per-frame `xrSyncActions()` call in `tick()` before the
+grip spaces are located. **Confirmed working** — real, continuously
+changing grip-pose data flows in (verified via logged position deltas
+swinging over a full meter-plus range while the user waved a hand, with
+`eyePos`/Link's own position held still).
+
+**Joint mapping bug found and fixed**: `HAND_ROOT_JOINT = 0` (assumed,
+never verified) turned out to be `mpLinkHandModel`'s `world_root` joint —
+the shared PARENT both hands hang off of, not either hand specifically.
+Confirmed via a one-time joint-name dump (same technique as section 2's
+material-name dump): `mpLinkHandModel` has exactly 3 joints — `0
+world_root`, `1 al_handsL`, `2 al_handsR`. Fixed to `LEFT_HAND_JOINT = 1`,
+`RIGHT_HAND_JOINT = 2`, and the previously-never-implemented left hand was
+wired up alongside the right.
+
+**"Controllers do nothing" bug, root-caused and fixed**: even with correct
+joint indices and confirmed-real pose data, hands still only showed normal
+body animation. Root cause: `d_a_alink.cpp`'s `setDrawHand()`-adjacent
+draw-prep code unconditionally re-syncs `mpLinkHandModel`'s joints 1/2 from
+the BODY model's own current hand-joint matrices, EVERY EYE, immediately
+before `modelDraw(mpLinkHandModel, ...)` actually draws it —
+`mpLinkHandModel->setAnmMtx(1, mpLinkModel->getAnmMtx(9))` /
+`setAnmMtx(2, mpLinkModel->getAnmMtx(0xE))`, present already with the
+comment "Always set these, otherwise the hands occasionally zip to
+origin." Since this runs AFTER `vr_link::updateFrame()` (which fires once
+per frame, before the per-eye loop even opens), it was silently
+overwriting the tracked pose every single eye before anything reached the
+screen. Fixed by caching the computed hand matrices in
+`vr_link_visibility.hpp` (`detail::s_rightHandMtx`/`s_leftHandMtx`) instead
+of writing them directly in `updateFrame()`, and adding
+`dusk::vr::applyTrackedHandMtx()` (thin forward to
+`vr_link::applyTrackedHandMtx()`, same "keep the heavier OpenXR header out
+of core game files" pattern as `drawHudBillboard()`) called from
+`d_a_alink.cpp` immediately AFTER that body-joint re-sync, guarded on
+`isRenderingToHeadset()` — making the tracked pose the LAST write before
+the draw, every eye, instead of the first.
+
+**Position: fixed, confirmed working.** Two bugs found:
+- **Wrong anchor**: `updateFrame()` was anchoring hands to `view->
+  lookat.eye` (the old third-person camera eye) instead of
+  `vr_link::getVrCameraEyeAnchor()` (section 11's head-anchor, what the VR
+  camera actually renders from) — hands tracked relative motion correctly
+  but were offset from wherever the player's own view actually was. Fixed
+  by calling `getVrCameraEyeAnchor()` in `updateFrame()` too (forward-
+  declared earlier in the file; harmless to call twice a frame since it's
+  idempotent within a frame — see section 11's `sim_tick_seq()` gating).
+- **Front/back mirrored**: `buildHandMtx()`'s position formula used
+  `linkEyeGame.z - dz * scale` (a "flip Z" inherited from thinking it
+  needed to match the camera code's convention). User report was precise —
+  "front" and "behind" specifically swapped, not a general direction bug —
+  and removing the flip (`+ dz * scale`) fixed it outright. **Confirmed
+  in-headset**: sweeping a hand through a large motion tracks correctly at
+  the correct position, matching where the real controller is.
+
+**Rotation: STILL NOT FIXED after two full sessions of attempts.** This is
+by far the hardest unsolved piece of the whole VR mod. Full history below,
+including a session where the debugging METHOD itself improved
+substantially (isolated single-axis motion capture + script-verified math
+instead of guessing) but the actual fix still didn't land. Read the
+"reusable lessons" at the end before attempting this again — several
+things that FEEL like the obvious next step (compose one more correction,
+swap two columns) are proven traps below.
+
+**Session A (rounds 1-5, all guessed corrections, ended in a full revert
+to raw/unflipped quaternion for both hands):**
+- Round 1 (qz-unflip): fixed an initial pitch/roll-axis SWAP (tilting the
+  controller rolled the hand, rolling it tilted) by removing a `qz = -q.z`
+  flip in the rotation-matrix construction that mirrored the position
+  flip — `eyePoseToViewMtx`'s own comment (camera code, validated) already
+  documented this exact mistake. This part is correct and is still in the
+  code (folded into `rotateVecByQuat`'s unflipped `q.z` usage).
+- Rounds 2-3 (compound 90° guess, then a composition-order bug): guessed
+  90°-ish corrective quaternions composed by hand, one of which was
+  composed in the wrong order (`(rawQ * offsetX) * offsetZ` actually
+  applies Z first, X second — backwards from intent) and produced a
+  cyclic 3-axis permutation (yaw input → pitch output → roll output → yaw
+  output) as a result. **Lesson, still true**: composing corrective
+  quaternions by hand is extremely easy to get backwards under pressure,
+  and a wrong-order composition doesn't degrade gracefully — it produces a
+  qualitatively different, confusing failure that looks like a brand new
+  bug.
+- Round 4 (mirrored-mesh left-hand guess) and round 5 (a from-real-data
+  calibration attempt, reported WORSE than doing nothing, fully reverted).
+  See prior version of this file (git history) for the blow-by-blow if
+  ever needed — superseded by Session B's cleaner methodology below.
+
+**Session B (this session's continuation) — isolated single-axis motion
+capture + script-verified math, real progress on METHOD, rotation still
+not resolved:**
+- Captured three SEPARATE, slow, isolated single-axis controller motions
+  (roll, yaw, pitch — each done as "hold steady, slowly rotate ~90° over
+  3-4 seconds, hold steady", not a quick snap) via `[dusk::vr::handrot]`
+  logging (raw quaternion only). Analyzed with Python scripts (NOT by
+  hand) that segment the quaternion stream into "motion runs" and compute
+  the actual world-frame rotation axis between before/after samples via
+  axis-angle decomposition — this is a MUCH more reliable data source than
+  a verbal "it looks rotated" description, and is worth reusing as-is if
+  this is picked up again.
+- Derived `kLocalRight`/`kLocalUp`/`kLocalForward` (in
+  `vr_link_visibility.hpp`, `right_hand_cal` namespace) as the
+  MOTION-DERIVED local axes (un-rotating each measured world-frame
+  rotation axis by that test's own "before" orientation) rather than an
+  assumed static target — this fixed a real methodology flaw from
+  session A's round 5 (which used an assumed, unverified static target for
+  "up" and cross-validated 100+ degrees off). Gram-Schmidt orthogonalized
+  to force exact perpendicularity (the raw motion data was ~10° off
+  perpendicular between roll and yaw, consistent with ordinary hand-motion
+  imprecision).
+- **Confirmed, by direct measurement, that the axis MAPPING itself is
+  correct**: a dedicated isolated pitch capture showed `kLocalRight` is
+  99.88%-aligned with the real measured pitch rotation axis. Later,
+  re-testing the ORIGINAL, completely unmodified calibration (right=
+  kLocalRight, up=kLocalUp, forward=kLocalForward, zero corrections)
+  directly against all three real motion captures simultaneously confirmed
+  it cleanly discriminates all three: forward drifts 0.0° during roll,
+  right drifts 3.2° during pitch, up drifts 11.8° during yaw (matching the
+  known ~10° calibration imprecision, still far smaller than the ~70-108°
+  the OTHER two axes move during each test). **This mapping has never
+  actually been wrong** — see the critical mathematical lesson below for
+  why the several "it's swapped, let me swap two columns" fixes attempted
+  along the way could never have been genuine repairs.
+- **Critical mathematical lesson, the main reusable insight from this
+  whole session**: swapping which vector feeds two of the three dest
+  columns (even with a sign flip to preserve a proper, non-mirrored
+  rotation) is NOT a "relabel the mesh's semantics" operation — it is
+  ALWAYS mathematically equivalent to applying some fixed 90°/180°
+  rotation to the entire right/up/forward frame at once (verified this
+  algebraically: e.g. swapping right and forward columns with a
+  negation is identical to a fixed 90° rotation around the "up" vector
+  that stayed unchanged). And a fixed rotation applied uniformly to all
+  three basis vectors, by a conjugation-identity proof done this session
+  (`Rotate(angle, R*axis) = R*Rotate(angle, axis)*R^-1`), provably CANNOT
+  change which physical motion (pitch/roll/yaw) maps to which visual
+  rotation TYPE — it can only change the static resting orientation. So
+  when a "pitch looks like roll" symptom appeared to go away after a
+  column swap, that was either (a) a coincidence of the static
+  orientation changing enough to fool the eye during a quick check, or
+  (b) the axis-confusion report was never really about axis TYPE at all,
+  just an extremely-wrong static orientation making a correct pitch LOOK
+  like a roll to the observer. **Do not attempt another column swap as a
+  fix for "X acts like Y" — it cannot work, by the math above. If that
+  symptom reappears, the axis mapping itself needs re-verification via the
+  isolated-motion-capture method (which has never actually shown it to be
+  wrong), not another swap.**
+- Given the mapping was confirmed correct, all guessed 90°-at-a-time
+  static corrections (pitch-down-90, yaw-left-90, yaw-right-90 which
+  canceled the previous one out entirely since both are fixed rotations
+  around the identical world axis, then yaw-180) were removed, and a
+  SINGLE precisely-computed correction matrix was derived instead: solved
+  directly as `M = target_frame * current_frame^T` (current_frame's
+  columns are orthonormal so its transpose is its inverse), targeting
+  world `(0,1,0)` for up and the roll-test's own logged
+  `[dusk::vr::camrot]` forward direction (horizontally projected) for
+  forward. Verified before deploying: `det(M) = +1.0` (proper rotation,
+  confirmed not an accidental mirror) and `M` exactly reproduces the
+  target frame at the reference orientation (self-check passed exactly).
+  **User-tested, still not correct.** Since the mapping is independently
+  confirmed right and the correction matrix is verified bug-free by
+  construction, the remaining error must be in the INPUT DATA the matrix
+  was derived from, not the math — see next point.
+
+**Leading unverified suspect for why it's STILL wrong**: the correction
+matrix's "forward" target came from `[dusk::vr::camrot]`'s logged camera
+direction at the roll-test's timestamp, horizontally projected — i.e. an
+assumption that "the camera was looking roughly where the controller was
+pointed" during that test. This was flagged as a risk from the very first
+time this proxy was used (session A round 5) and has never actually been
+verified. If the player wasn't looking directly at their hand during the
+roll capture (quite plausible — nothing enforced it), the "forward"
+target itself is wrong by however many degrees their gaze was off, and a
+mathematically-perfect correction built from a wrong target still gives a
+wrong result. This is the single most likely place to look next.
+
+**Concrete next steps for a future session**, in order of how promising
+they seem:
+1. **Verify or replace the camera-forward proxy.** Either (a) capture a
+   NEW reference pose where the player is deliberately, verifiably looking
+   directly along the controller's pointing direction (e.g. sighting down
+   the controller like a rifle, confirmed by the player themselves, not
+   inferred), or (b) find a reference that doesn't need the camera at all
+   — e.g. OpenXR's own documented grip-pose axis convention (looked up
+   directly from the spec/runtime docs, not inferred from this project's
+   data) combined with a pure gravity reference for "up" fully determines
+   both targets without knowing where the player was looking.
+2. If a new correction matrix is computed, verify it in Python FIRST
+   (unit length, orthogonality, self-check against the reference sample it
+   was built from) exactly like this session did — that part of the
+   process worked correctly and caught real errors before they reached
+   the headset.
+3. Do NOT re-attempt a column swap to fix an "X acts like Y" symptom — see
+   the mathematical lesson above. If that symptom appears again, re-run
+   the isolated-motion-capture verification (scripts already exist and
+   worked cleanly this session) before assuming the mapping changed.
+4. Left hand has no calibration at all yet (still raw/unflipped) — once
+   the right hand is genuinely confirmed correct, the same isolated-motion
+   capture method needs repeating for the left controller specifically
+   (the meshes are presumed mirrored, per session A round 4's "left hand
+   upside down, right hand fine" report, so the right hand's calibration
+   cannot simply be reused or trivially negated without its own
+   verification).
+
+**What's still in the tree**: `logCameraBasisPeriodically()`
+(`vr_link_visibility.hpp`, called from `updateFrame()`) — logs the HMD's
+own up/forward world vectors every ~45 frames as `[dusk::vr::camrot]`,
+using the identical quaternion-to-matrix formula `buildHandMtx()` uses.
+`logHandPosesPeriodically`-equivalent raw-quaternion logging
+(`[dusk::vr::handrot]`) also still fires from `buildHandMtx()` itself.
+Both left in deliberately (harmless, no gameplay effect) since this exact
+kind of paired camera+hand real data, captured via slow isolated-axis
+motions, is what actually produced verifiable progress this session (the
+confirmed-correct axis mapping) even though the final static correction
+still isn't right.
+
+**Reusable lessons for whoever picks this up next** (compounding on top of
+session A's lessons above):
+- The mathematical lesson about column swaps (above) is the single most
+  important thing to internalize before touching this again — it would
+  have saved most of this session's later rounds.
+- Isolated, slow, single-axis motion capture + script-based (not by-hand)
+  analysis is a genuinely reliable methodology now — reuse it rather than
+  reasoning abstractly about which axis "should" do what.
+- Always verify a derived correction (matrix or quaternion) with a
+  standalone script BEFORE building/testing in-headset: check it's a
+  proper rotation (determinant +1, or equivalently that its rows/columns
+  are unit length and mutually orthogonal) and that it reproduces its own
+  reference sample exactly. This catches real bugs cheaply.
+- A "it's fixed" or "it's still broken" report from a quick in-headset
+  glance is a much noisier signal than the actual measured data — when
+  they seem to conflict (e.g. a column swap seeming to fix an axis-type
+  symptom, when the math says it can't), trust the math and look for what
+  ELSE could explain the observation (here: the static orientation being
+  so wrong it fooled a quick visual check) rather than the visual report.
+
+**Session C (2026-08-02) — replaced the camera-forward proxy with a real
+OpenXR "aim pose" reference, built but NOT yet tested in-headset:**
+
+Directly acted on Session B's #1 next step ("verify or replace the
+camera-forward proxy"), option (b): rather than trying to look up the
+grip pose's spec convention (which turned out to be moot anyway — the
+motion-derived `kLocalForward`/`kLocalUp`/`kLocalRight` vectors are
+diagonal combinations, not aligned to any single spec axis, consistent
+with real controllers' physical construction not matching the spec's
+idealized diagram exactly — so a spec-table lookup wouldn't have been a
+usable target on its own), wired up OpenXR's separate, standard **aim
+pose** action. Unlike grip pose, aim pose is spec-defined specifically as
+"the direction the user would point the controller to indicate a target"
+(-Z axis), computed by the runtime from the controller's own tracked
+geometry — not from anything this app assumes about where the player was
+looking. Grip and aim poses are both available simultaneously from the
+same physical controller at every instant, so this needs no special
+"hold still and sight down the barrel" reference pose at all (the previous
+approach's fatal assumption) — ordinary hand movement during a capture
+gives many independent (gripQuat, aimQuat) sample pairs for a proper
+least-squares fit instead of trusting one hand-picked data point.
+
+**What was built**:
+- `vr_xr_bootstrap.hpp`: `HandActions::aimPoseAction` (a second
+  `XR_ACTION_TYPE_POSE_INPUT` action, same two-subaction-path pattern as
+  `gripPoseAction`), bound to `/user/hand/{left,right}/input/aim/pose` for
+  all four profiles `createHandActionSet()` already suggests bindings for.
+  `attachAndCreateHandSpaces()` now also takes `outLeftAimSpace`/
+  `outRightAimSpace` and creates those two action spaces alongside the
+  existing grip ones.
+- `vr_main.cpp`: `g_rightAimSpace`/`g_leftAimSpace` globals, located every
+  frame in `tick()` the same way the grip spaces already are (right after
+  `xrSyncActions()`), threaded into a widened `vr_link::FrameInput`.
+- `vr_link_visibility.hpp`: `FrameInput` gained `rightAimPose`/
+  `leftAimPose` fields (calibration-only — `buildHandMtx()` still reads
+  only the grip poses for the actual draw pose, unchanged). New
+  `logHandCalibrationSample()`, called once per frame from
+  `updateFrame()`, logs the right hand's raw grip quat and raw aim quat
+  together on one line (`[dusk::vr::handcal] gripQuat=(...) aimQuat=(...)`)
+  every 10 frames (~9Hz @ 90Hz) — dense enough that a ~15-20s "wave the
+  controller through a bunch of different orientations" capture yields
+  several hundred sample pairs.
+- Built successfully (RelWithDebInfo) — only `vr_main.cpp` needed
+  recompiling, clean link, no new warnings.
+
+**Analysis plan for the next session (not yet run — needs a real
+in-headset log first)**: per sample, `current_forward = R(gripQuat) *
+kLocalForward`, `current_up = R(gripQuat) * kLocalUp` (existing
+motion-derived local axes, `right_hand_cal` namespace,
+`vr_link_visibility.hpp` — these are NOT being re-derived, only the
+static-correction TARGET is); `target_forward = R(aimQuat) * (0,0,-1)`,
+`target_up = R(aimQuat) * (0,1,0)` (OpenXR aim pose convention). Solve for
+the single best-fit rotation `M` minimizing squared error between
+`M*current_i` and `target_i` across ALL samples and both vector types at
+once (Kabsch algorithm / SVD of the cross-covariance matrix) — a proper
+least-squares fit over hundreds of real samples, not a single reference
+point the way the reverted correction was derived. **Verify in Python
+before touching the headset again** (same rule Session B learned the hard
+way): confirm `det(M) = +1` (proper rotation, not a mirror) and that `M`
+reproduces each individual sample reasonably closely (a tight scatter, not
+just the mean) before updating `applyStaticCorrection()`.
+
+**Concrete next step**: launch in VR, wave the right controller through a
+variety of orientations (rotate it around, don't just hold it still) for
+15-20 seconds, then paste back every `[dusk::vr::handcal]` line from the
+Output window. That log is the input to the analysis above — nothing else
+is needed to proceed.
+
+**UPDATE (same day, log collected and analyzed) — the aim pose data itself
+is broken on whatever runtime this was tested on; DO NOT calibrate from it
+as-is.** 177 real samples were collected and run through the Kabsch fit
+described above. Two things went wrong, in order:
+
+1. **The naive world-space fit (`M` applied after `rotateVecByQuat`, same
+   architecture as the reverted Session B correction) gave a mean residual
+   of ~68 degrees** — nowhere close to a valid fit. This is not just "bad
+   data", it's a real, generalizable finding about `applyStaticCorrection`'s
+   existing shape: a rotation matrix applied to WORLD-space vectors *after*
+   `rotateVecByQuat(q, kLocal)` can only ever match the single reference
+   orientation it was derived from — it cannot commute with arbitrary `q`,
+   so a "static correction" of this shape is mathematically incapable of
+   being globally valid across orientations, no matter how precisely its
+   coefficients are computed. (This is consistent with, and explains, why
+   every previous session's verified-correct-in-isolation matrix still
+   drifted wrong in general in-headset movement — the shape of the fix was
+   the problem, not just the specific numbers.) **The correct shape applies
+   the correction to `kLocalRight`/`kLocalUp`/`kLocalForward` themselves,
+   BEFORE `rotateVecByQuat`** (`rotateVecByQuat(q, applyStaticCorrection(kLocalForward))`
+   instead of `applyStaticCorrection(rotateVecByQuat(q, kLocalForward))`) —
+   a genuine local-frame recalibration, which — unlike the world-space
+   version — is mathematically capable of being correct for every
+   orientation at once, since it only ever touches the fixed local axes,
+   never anything that depends on `q`.
+2. **Refitting in local space also failed (mean residual ~70 degrees) — but
+   this time because the underlying grip/aim data isn't self-consistent.**
+   Per-sample analysis (see the diagnostic scripts run this session, not
+   currently checked into the repo) found that `R_grip^-1 * R_aim`, which
+   should be a CONSTANT matrix if aim pose really were a fixed local-frame
+   offset from grip pose (as the OpenXR spec's own aim-pose definition
+   implies), has a constant ANGLE (exactly 60.0000 degrees, std
+   0.0006 degrees, across all 177 samples) but a wildly varying AXIS (up to
+   144 degrees of deviation) when expressed in the controller's own local
+   frame. Re-expressing that same axis in WORLD space instead
+   (`R_grip @ local_axis`) collapses it to an almost exactly constant
+   direction — `(1, 0, 0)`, deviation under 0.3 degrees across all samples
+   — and `Rotate(60deg, world +X) @ R_grip` reproduces the logged `aimQuat`
+   to within 3e-5 (float rounding on the logged 5-decimal values) for
+   EVERY sample, regardless of how the controller was actually oriented.
+   **A real aim pose cannot behave this way** — the whole physical point of
+   aim pose is that it's a fixed offset from grip *in the controller's own
+   body frame*, so it should rotate together with the controller as the
+   user turns their wrist; a world-frame-fixed relationship (independent of
+   the controller's actual orientation) is not physically meaningful and
+   points to a genuine bug somewhere in the aim-pose codepath for whatever
+   runtime this was tested on — most likely the RUNTIME's own OpenXR aim
+   pose implementation, not this project's wiring (checked: the
+   `vr_xr_bootstrap.hpp` action/binding/space setup for aim pose mirrors
+   the already-working grip pose setup exactly, no copy-paste divergence
+   found). Notably, a real, previously-documented SteamVR bug exists in
+   this exact area ("OpenXR aim pose ... twisted", SteamVR issue tracker) —
+   consistent with, though not yet confirmed to be, what's being hit here.
+
+**Concrete next step, revised**: before trying this again, find out (a)
+which runtime (SteamVR / Virtual Desktop / Meta Link) and controller type
+the calibration capture was done on, and (b) whether aim pose behaves
+correctly (i.e. `R_grip^-1 * R_aim` is a genuinely constant LOCAL matrix,
+not just a constant-angle/wandering-axis one) on a DIFFERENT runtime — if
+so, redo the capture there instead, since the grip-pose data itself (used
+for the actual draw pose and for position tracking) has never shown this
+kind of problem and is not in question, only aim pose specifically. If
+aim pose turns out to be broken on every available runtime, this whole
+approach is a dead end and the next session should fall back to a more
+carefully-verified version of Session B's camera-gaze proxy (e.g. an
+explicit "sight down the barrel, confirmed by the player" reference pose,
+captured deliberately rather than incidentally) instead.
+
+**UPDATE 2**: confirmed the 177-sample capture was done on **Virtual
+Desktop** — notably NOT SteamVR, so the documented SteamVR aim-pose-twist
+bug doesn't explain this after all; this looks like either a Virtual
+Desktop-specific runtime issue or something not yet identified. Re-reviewed
+`vr_xr_bootstrap.hpp`'s aim-pose action/binding/space setup line by line
+against the working grip-pose setup — no divergence found. Added one more
+diagnostic before pointing further at "runtime bug" as the conclusion:
+`vr_main.cpp`'s `tick()` now logs `[dusk::vr::handcal_flags]`, once a
+second, showing whether OpenXR itself reports
+`XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT` set for both the right grip and
+right aim spaces side by side — rules out "aim action silently isn't
+bound/tracked and `xrLocateSpace` is returning some untracked fallback
+pose" as a simpler explanation than a genuine runtime bug. Built
+successfully. **Next step**: retest (same wave-the-controller-around
+capture), and this time also paste back the `[dusk::vr::handcal_flags]`
+lines. If convenient, also try the SAME capture on a different runtime
+(Meta Link ideally, since it's the native Quest OpenXR runtime and the
+most likely to have a spec-correct aim pose implementation) to check
+whether this is Virtual-Desktop-specific.
+
+**Not addressed this round, still open**: left-hand calibration (still
+raw/unflipped — per Session B's step 4, needs its own motion-capture
+verification once the right hand is actually confirmed correct, since the
+meshes are presumed mirrored rather than simply negatable). The old
+`logCameraBasisPeriodically()`/`[dusk::vr::camrot]` diagnostic is left in
+place (harmless) even though this new approach doesn't depend on it —
+removing still-possibly-useful diagnostic scaffolding before a bug is
+actually confirmed fixed isn't this project's convention.
+
+**UPDATE 3 (2026-08-02, continuation) — new capture on Virtual Desktop
+came back USABLE this time, new local-space correction derived and built,
+NOT yet tested in-headset:**
+
+A fresh ~160-sample `[dusk::vr::handcal]`/`[dusk::vr::handcal_flags]`
+capture was retested on Virtual Desktop (same runtime as the broken
+177-sample one above). `handcal_flags` showed both right grip and right
+aim spaces fully valid+tracked (`0xf`) across the entire capture, ruling
+out "the action isn't bound" again. This time the actual data was usable
+— and in the OPPOSITE way the previous capture was broken: `R_grip^-1 *
+R_aim` (relative rotation from grip to aim) came back as a genuinely
+**constant matrix expressed in the CONTROLLER'S LOCAL FRAME** (a fixed
+~60.0000-degree rotation, deviation ~0.001 degrees across all 160
+samples) — the opposite of the earlier capture, which was constant in
+WORLD frame and wandered by up to 144 degrees in local frame (physically
+impossible for a real aim pose). Local-frame constancy is exactly what a
+genuine fixed grip-to-aim body offset should look like, so this capture
+was treated as trustworthy and used as calibration ground truth. **Not
+yet understood why this capture behaved correctly when the last one on
+the same runtime didn't** — possible explanations not yet investigated:
+a Virtual Desktop update between sessions, a difference in how the
+controller was moved during the two captures, or something else. Worth
+keeping in mind if a future capture goes back to being broken.
+
+**New correction derived and applied** (`vr_link_visibility.hpp`):
+directly acted on the durable finding from the previous update in this
+section — the OLD `applyStaticCorrection` applied its matrix to
+WORLD-space vectors AFTER `rotateVecByQuat`, which is mathematically
+incapable of being correct outside the single orientation it was derived
+from. Rederived using this capture's data with the corrected shape:
+- Averaged `R_grip^-1 * R_aim` across all 160 samples, SVD-cleaned to a
+  proper rotation (`Rrel`).
+- Computed aim pose's right/up/forward axes in the grip's own local frame
+  as `Rrel @ (1,0,0)` / `Rrel @ (0,1,0)` / `Rrel @ (0,0,+1)`. Note: **+Z,
+  not OpenXR's spec convention that -Z is the aim direction** — verified
+  directly that this codebase's existing `kLocalRight`/`kLocalUp`/
+  `kLocalForward` satisfy `cross(right,up)=+forward`, the opposite
+  handedness from OpenXR's own right/up/forward-is-minus-Z convention;
+  using -Z produced a matrix with `det=-1` (a mirror) as a clear tell of
+  the mismatch, +Z gave `det=+1`. This says nothing about "true" aim
+  direction on paper — only that this project's motion-derived
+  `kLocalForward` happens to be defined antiparallel to OpenXR's spec
+  convention, which is fine as long as it's used consistently.
+- Solved `M = target_frame * current_frame^T` (current_frame's columns
+  orthonormal, so transpose is inverse), SVD-cleaned. Verified: `det(M) =
+  +1.0` exactly, and `M` applied to each of `kLocalRight`/`kLocalUp`/
+  `kLocalForward` reproduces its corresponding aim-pose target axis to
+  0.0000 degrees.
+- **Applied in the corrected shape**: `buildHandMtx()` now calls
+  `applyStaticCorrection()` on the LOCAL axis constants themselves, before
+  `rotateVecByQuat`, e.g. `rotateVecByQuat(q, applyStaticCorrection(
+  right_hand_cal::kLocalRight))` — replacing the old
+  `applyStaticCorrection(rotateVecByQuat(q, kLocalRight))` order. This is
+  the fix for the "only ever correct at one reference orientation"
+  problem identified in the previous update.
+
+Built successfully (RelWithDebInfo), clean link, no new warnings.
+**NOT yet tested in-headset** — this is a new, different correction
+matrix from anything tried before, derived from data that (unlike every
+previous attempt) is both physically self-consistent AND applied in a
+shape that's mathematically capable of holding up across general
+movement, not just one pose. Still needs a real in-headset test moving
+the hand through a variety of orientations (not just holding it at the
+calibration pose) before this can be called fixed.
+
+**Concrete next step**: launch in VR (Virtual Desktop), move the right
+hand/controller through normal gameplay motions and a range of
+orientations, and report whether rotation now tracks correctly in
+general — or how specifically it's still wrong if not (e.g. a specific
+axis mismatch, a fixed offset, gets progressively worse with movement,
+etc. — as specific a description as possible, since "still wrong" alone
+doesn't distinguish between "the mapping is somehow still off" and "a new
+bug entirely").
+
+**FINAL RESOLUTION (2026-08-02, same-day continuation) — CONFIRMED FIXED
+IN-HEADSET. Read this box first if picking up hand rotation again; the
+rest of this section is historical detail.**
+
+The above matrix was tested and initially still showed a residual roll
+offset ("hand facing right direction but rotation feels off"), which led
+to a second, genuinely separate bug being found and fixed:
+**`rotateVecByQuat()` itself (`vr_link_visibility.hpp`) was computing
+`R(q)^-1` (the INVERSE rotation) instead of `R(q)`** — verified
+numerically against a reference implementation (its off-diagonal signs
+exactly matched the transpose of the standard active-rotation matrix).
+This single bug explains why every previous "verified correct" static
+correction across two earlier sessions still drifted wrong under general
+headset/controller movement: the correction math was sound, but the
+underlying primitive it was being composed with ran the rotation
+backwards, which a STATIC correction can partially mask at one reference
+pose but not in general. Position tracking was never affected (computed
+via a separate plain-vector-addition code path, no quaternion rotation
+involved) — this is why position had been confirmed working the whole
+time while rotation kept failing.
+
+Fixing `rotateVecByQuat()` invalidated the existing static correction
+constants (they'd been empirically tuned against the buggy inverse
+rotation), requiring one more calibration pass. This was solved by
+systematically testing all THREE possible single-axis local rotation
+planes (the only three that exist for a 3-vector orthonormal frame:
+(right,up) holding forward fixed, (up,forward) holding right fixed,
+(right,forward) holding up fixed) against real screenshots taken at
+multiple different controller orientations (neutral, rolled left/right,
+pitched up/down) supplied by the user, iterating live with the user
+watching for which plane/sign actually produced the correct look — rather
+than deriving from photos assumed to share one fixed "neutral" real-world
+orientation (see the photo1-5 saga above, which taught the hard way that
+holding a consistent ROLL, e.g. "buttons straight up", does NOT mean the
+controller was aimed the same way each test, since aim direction is a
+separate, uncontrolled degree of freedom — comparing world-absolute
+directions across such photos is unreliable, which is why the final
+convergence came from testing rotation PLANES directly against live
+in-headset feedback across a range of orientations, not from another
+single-photo derivation).
+
+**Confirmed by the user in-headset**: rotation now tracks correctly
+across roll left/right, pitch up/down, and general movement, matching the
+real controller's orientation exactly ("Finalllyyyyyyyyyy it matches the
+controller"). Both position AND rotation for the right hand are now fully
+working.
+
+**Diagnostic scaffolding removed** (per this project's normal practice, now
+that the bug is confirmed fixed): the `[dusk::vr::handrot]`,
+`[dusk::vr::camrot]` (`logCameraBasisPeriodically()`), `[dusk::vr::handcal]`
+(`logHandCalibrationSample()`), and `[dusk::vr::handcal_flags]` per-frame
+`OutputDebugStringA` logs have all been removed from `vr_link_visibility.hpp`
+and `vr_main.cpp`. The underlying OpenXR aim-pose action/space plumbing
+(`vr_xr_bootstrap.hpp`'s `HandActions::aimPoseAction`, `g_rightAimSpace`/
+`g_leftAimSpace`, `FrameInput::rightAimPose`/`leftAimPose`) was
+DELIBERATELY left in place rather than removed — it's real, working
+infrastructure (not just diagnostic noise) that could be reused directly
+for left-hand calibration.
+
+**Left-hand calibration — CONFIRMED FIXED IN-HEADSET 2026-08-03.** Turned
+out to need much less work than the right hand: dynamic rotation mapping
+came out correct immediately using a plain IDENTITY local basis
+(`left_hand_cal::kLocalRight/Up/Forward` = X/Y/Z) combined with the
+now-fixed `rotateVecByQuat()` — no motion-capture or aim-pose data capture
+needed at all. Only a static resting offset was needed on top of that,
+converged on entirely via live in-headset iteration (rebuild → test →
+adjust one axis at a time, no photos or derived matrices this time,
+unlike the right hand's saga): a Z-axis rotation of 270° (equivalent
+-90°), then a Y-axis rotation of 110°, composed in that order on the
+identity basis. Several intermediate values (an X-axis rotation that
+bounced between -45°/+90°/+20° before landing back on identity/0°; a
+since-reverted attempt at zeroing the Z-axis entirely) were tried and
+abandoned along the way — full trail in `applyLeftStaticCorrection()`'s
+git history if ever needed, not reproduced here. **User-confirmed correct
+in-headset**: "The hands look correct." Both hands' position and rotation
+are now fully working, closing out the three-part VR embodiment plan
+(camera in section 11, tracked hands here).
+
+**Cleanup performed same session**: removed `logLeftHandCalibrationSample()`
+and its `[dusk::vr::handcal_left]` per-frame `OutputDebugStringA` log
+(`vr_link_visibility.hpp`) — it was added in case the left hand needed the
+same aim-pose-capture calibration approach as the right hand, but turned
+out unnecessary once identity axes + live iteration proved sufficient, so
+it never actually got used for anything. The underlying OpenXR aim-pose
+action/space plumbing (`vr_xr_bootstrap.hpp`'s `HandActions::aimPoseAction`,
+`g_rightAimSpace`/`g_leftAimSpace`, `FrameInput::rightAimPose`/
+`leftAimPose`) was left in place, same reasoning as the right hand's
+cleanup above — real working infrastructure, not diagnostic noise, in case
+a future session needs it for something else.
+
+The meshes are presumed mirrored (per the very first session's "left hand
+upside down, right hand fine" report), which is presumably why the left
+hand's final static correction (Z 270° + Y 110°) doesn't match the right
+hand's derived matrix — this was never investigated further and wasn't
+necessary to confirm the fix works.
+
+### 13. Quest 3 controllers as real gameplay input (buttons/sticks, not just hand visuals) — FIXED 2026-08-03
+
+**Goal** (explicit user request): wire real OpenXR controller input (thumbsticks,
+triggers, face buttons) into actual gameplay — movement, camera, attack,
+items, pause — as opposed to sections 11/12's camera/hand-tracking work,
+which only ever drove *visuals*, never game input.
+
+**Architecture**: extends `vr_xr_bootstrap.hpp`'s existing `HandActions`
+action set (same one already used for grip/aim pose) with six new actions
+— `trigger_value`/`squeeze_value` (float), `thumbstick` (vector2f),
+`primary_click`/`secondary_click`/`menu_click` (bool), each with the usual
+left/right subaction paths. Bindings are suggested only for
+`/interaction_profiles/oculus/touch_controller` (Quest 3's native profile,
+and what SteamVR/Virtual Desktop/Meta Link all report for Touch
+controllers) — the other 3 profiles (khr/simple, vive, index) keep only
+their pre-existing pose bindings, since their button/axis layouts
+genuinely differ and weren't in scope. `vr_main.cpp`'s `tick()` reads all
+six actions every frame (right after the existing `xrSyncActions` call),
+builds a `PADStatus`, and calls `PADSetVirtualStatus(PAD_CHAN0, ...)` —
+**the exact same mechanism the touch-screen overlay already uses**
+(`touch_controls.cpp`'s `sync_virtual_input()`) to inject input into
+`PADRead()` (`extern/aurora/lib/dolphin/pad/pad.cpp`), which merges it
+into the real controller-port status every frame. This means
+`mDoCPd_c::getTrigA/getHoldX/getStickX(...)` etc. — what `d_a_alink.cpp`
+and the rest of gameplay actually read — see it with **zero actor-code
+changes**.
+
+**Mapping** (mirrors the game's existing default Xbox-controller layout,
+`extern/aurora/lib/dolphin/pad/pad.cpp`'s SDL default binding table, so it
+behaves like a normal gamepad): left thumbstick → main stick (movement),
+right thumbstick → C-stick (camera), left trigger → analog L, right
+trigger → analog R (raise shield), right squeeze/grip → Z (target
+lock/call, digital, >50% threshold), right A → context action, right B →
+attack, left X/Y → assigned items, left menu button → Start (pause).
+
+**A swing-gesture-to-attack feature was drafted then explicitly deferred**
+per user request ("remove the swing controls for now, that's something
+for another session") — while wiring this up, a genuinely dead
+`if (!pacing.is_interpolating)` gate around the pre-existing (never
+actually working) `g_rightSwing.update()` call was found and fixed
+(that condition can never be true inside `tick()`, since `tick()` is only
+ever invoked FROM the `if (pacing.is_interpolating)` branch in
+`m_Do_main.cpp`), and the old handoff-doc note's `PAD_BUTTON_A` was
+corrected to `PAD_BUTTON_B` (confirmed via `d_a_alink.cpp`'s
+`METER2_USEBUTTON_B` gating on `BTN_B` — B is attack, A is the
+context-action button). Both fixes are harmless and left in place, but the
+actual OR-into-B wiring was pulled back out per the user's request — not
+tested/tuned. `g_rightSwing`/`vr_swing_detector.hpp` are untouched,
+ready to pick back up.
+
+**Root cause of "nothing happened in game with controller presses" (the
+actual bulk of this session) — THREE separate, independent per-frame
+`PADClearVirtualStatus(PAD_CHAN0)` call paths, all needing to be found and
+fixed one at a time via direct evidence, not guessing**:
+
+OpenXR input itself was confirmed correct almost immediately (real
+trigger/button/stick values, `isActive=true`, `xrSyncActions` succeeding —
+see the diagnostic-logging trail in git history if ever needed) — the
+entire remaining investigation was about *why a correctly-built
+`PADStatus`, handed to `PADSetVirtualStatus` every frame, never once
+survived to be merged inside `PADRead()`*. The answer: `touch_controls.cpp`
+(the PC touch-screen control overlay) was written years before VR input
+existed, on the assumption that it was the *only* consumer of
+`PAD_CHAN0`'s virtual-pad slot — so several of its internal per-frame sync
+functions unconditionally call `PADClearVirtualStatus(PAD_CHAN0)` whenever
+touch controls are disabled (the default), with zero awareness that a
+second system might also be using that slot. Found and fixed in three
+rounds, confirmed via direct instrumentation of `PADSetVirtualStatus`/
+`PADClearVirtualStatus` themselves (logging every call to port 0 from
+anywhere in the codebase) once guessing at individual call sites twice in
+a row hadn't fully resolved it:
+1. `TouchControls::sync_virtual_input()` → `sync_touch_state()`, called
+   every frame from `mDoCPd_c::read()` (right before `JUTGamePad::read()`
+   actually consumes the merged status) — fixed by skipping the call
+   entirely when `g_duskVRSessionActive` (`m_Do_controller_pad.cpp`).
+2. `TouchControls::update()` → `sync_touch_state()` (the SAME function,
+   but reached via a second, completely independent call path: the
+   general per-frame UI document loop, `dusk::ui::update()`, unrelated to
+   `mDoCPd_c::read()`). Fixing round 1 alone did nothing because this path
+   was untouched. Rather than patch `sync_touch_state()` a second time
+   from a second angle, this round's fix went one level up: an early
+   `if (g_duskVRSessionActive) return;` at the very top of
+   `TouchControls::update()` itself, in `touch_controls.cpp`.
+3. Still not fixed after round 2 — direct evidence (logging inside
+   `PADSetVirtualStatus`/`PADClearVirtualStatus` themselves, not just
+   their callers) showed a `PADClearVirtualStatus(0)` call interleaved
+   before every single one of VR's `PADSetVirtualStatus(0)` calls, proving
+   a *third*, still-unguarded path existed. Found: `sync_visibility()` —
+   called FIRST inside `TouchControls::update()`, i.e. *before* the
+   `sync_touch_state()` call rounds 1-2 were focused on — has its own,
+   completely separate unconditional `clear_virtual_input()` call in its
+   `else` branch (reached whenever touch controls are disabled and the
+   panel is already hidden, the default steady state). This is what
+   round 2's `TouchControls::update()`-level gate (added for a different
+   reason, to cover the second `sync_touch_state()` path) ended up ALSO
+   fixing, once actually verified — round 2 and round 3's fix are the same
+   line of code, just two different reasons it turned out to be
+   necessary and sufficient together.
+
+**User-confirmed working in-headset**: "Yup the buttons work."
+
+**Reusable lesson**: when a shared, order-dependent mutable resource
+(here, one virtual-pad "slot" meant to represent one physical controller
+port) gets a NEW second writer added to it, don't assume the original
+single-writer code's own internal per-frame reset/clear logic is confined
+to one call site — grep isn't enough when a function has multiple
+callers reached via genuinely independent code paths (a direct function
+call vs. a general per-frame update loop, in this case). Instrumenting the
+actual shared resource's mutation points directly (`PADSetVirtualStatus`/
+`PADClearVirtualStatus` themselves, logging every call regardless of
+caller) — rather than instrumenting or reasoning about individual
+suspected call sites one at a time — is what actually found the second
+and third paths quickly once relied on, and should be reached for sooner
+next time a similar "my writes keep getting silently overwritten" bug
+shows up in this project.
+
+**Diagnostic scaffolding removed** (per this project's normal practice,
+now that the bug is confirmed fixed): the `[dusk::vr::input]` per-frame/
+periodic `OutputDebugStringA` logs added across `vr_xr_bootstrap.hpp`,
+`vr_main.cpp`, `m_Do_controller_pad.cpp`, and `extern/aurora/lib/dolphin/
+pad/pad.cpp` (including the direct `PADSetVirtualStatus`/
+`PADClearVirtualStatus` instrumentation described above) have all been
+removed. The three real fixes (the `g_duskVRSessionActive` gates in
+`m_Do_controller_pad.cpp` and `touch_controls.cpp`) are permanent and
+left in place.
+
+**UPDATE 2026-08-04 — right thumbstick click added as a second pause
+trigger, user-confirmed working in-headset.** Per explicit user request
+("make the right stick click the pause menu"): added a new
+`stickClickAction` (`vr_xr_bootstrap.hpp`'s `HandActions`, bound to
+`/user/hand/right/input/thumbstick/click` on the `oculus/touch_controller`
+profile only, same scoping as the rest of this section's button bindings),
+read each frame in `vr_main.cpp`'s `tick()` and OR'd into `PAD_BUTTON_START`
+alongside the pre-existing left menu button — both now trigger pause; the
+left menu button binding was not removed, this is an additional way in,
+not a replacement.
+
+**UPDATE 2026-08-04 — left thumbstick click bound to D-pad right (SUPERSEDED
+same day, see the full-remap update below — left stick click no longer
+does this).** Per explicit user request ("bind dpad right to left stick
+click"): reused the same `stickClickAction` above (one action, both hands'
+thumbstick-click physical inputs bound to it —
+`/user/hand/left/input/thumbstick/click` added alongside the existing
+right-hand binding), read separately per hand via subaction path in
+`vr_main.cpp`'s `tick()`, left hand's OR'd into `PAD_BUTTON_RIGHT`
+(D-pad right). Built successfully at the time, but never confirmed
+in-headset before being reassigned — see below.
+
+**UPDATE 2026-08-04 — full control remap, user-confirmed working
+in-headset.** Per explicit user request ("bind X to right squeeze, Y to
+right trigger, DPAD up to Y, DPAD left to X, and Z to left stick click"):
+reassigned five of this section's existing bindings. **This is now the
+authoritative mapping** — the original "Mapping" list earlier in this
+section (the one starting "left thumbstick -> main stick") is stale;
+current state is the table below.
+
+| Controller input | Game action |
+|---|---|
+| Left thumbstick | Move (main stick) — unchanged |
+| Right thumbstick | Camera (C-stick) — unchanged |
+| Left trigger | Analog L — unchanged |
+| Right trigger | **Y** (was analog R/raise shield) |
+| Right squeeze/grip | **X** (was Z) |
+| Left squeeze/grip | unbound — unchanged |
+| Right A button | A (context action) — unchanged |
+| Right B button | B (attack) — unchanged |
+| Left X button | **D-pad left** (was X) |
+| Left Y button | **D-pad up** (was Y) |
+| Left menu button | Start (pause) — unchanged |
+| Right stick click | Start (pause) — unchanged |
+| Left stick click | **Z** (was D-pad right, from the update directly above — that assignment lasted less than a day) |
+| — | **D-pad right — unbound** (nothing currently maps to it, now that left stick click moved to Z) |
+| — | **Analog R / raise shield — unbound** (nothing currently maps to it, now that right trigger moved to Y) |
+
+Implementation: `vr_main.cpp`'s `tick()` — `leftXHeld`/`leftYHeld` now OR
+into `PAD_BUTTON_LEFT`/`PAD_BUTTON_UP` instead of `PAD_BUTTON_X`/
+`PAD_BUTTON_Y`; `rightSqueeze > kSqueezeThreshold` now ORs `PAD_BUTTON_X`
+instead of `PAD_TRIGGER_Z`; `rightTrigger > kTriggerDeadzone` now ORs
+`PAD_BUTTON_Y` only (digital — no longer also writes `PAD_TRIGGER_R` or
+`padStatus.triggerRight`, since Y has no analog counterpart in
+`PADStatus`); `leftStickClickHeld` now ORs `PAD_TRIGGER_Z` instead of
+`PAD_BUTTON_RIGHT`. No `vr_xr_bootstrap.hpp` changes needed for this
+revision — same underlying OpenXR actions as before, only which
+`PADStatus` bit each one feeds into changed. Built successfully
+(RelWithDebInfo, clean) and **user-confirmed working in-headset**.
+
+**Desired follow-up, not yet started**: user wants the R button (now
+unbound as of the remap above — previously analog R/raise shield)
+replaced with an actual physical movement (e.g. some real controller
+gesture) instead of a button press. Not designed or implemented yet — no
+gesture chosen, no code written. If picked up, note `g_rightSwing`/
+`vr_swing_detector.hpp` already exists as deferred, untested
+swing-gesture infrastructure from this same section's
+"swing-gesture-to-attack" work (drafted 2026-08-03, explicitly pulled back
+out per user request) — worth checking whether that detector (or the same
+general approach) is reusable for a shield-raise gesture too, rather than
+building physical-motion detection from scratch.
+
+### 14. Stereo eyes misalign at large head yaw ("left/right eyes look swapped" near 90°) — CONFIRMED FIXED IN-HEADSET 2026-08-05 (first fix attempt regressed and was reverted first — read in full before touching this again)
+
+**Symptom** (user-reported, not yet reproduced/investigated in-headset by a
+session): turning the head left/right causes the two eyes to progressively
+misalign; at roughly 90° yaw, looking at Link's own body, it looks "almost
+as if the left and right eyes are swapped." Fine (or close to it) facing
+forward: gets worse the further the head turns away from forward.
+
+**Investigation so far (code-reading only, no build/test/instrumentation
+yet)**: read `vr_stereo_render.hpp`'s `eyePoseToViewMtx()` (builds each
+eye's view matrix from its `XrView` pose). Found a plausible root cause,
+NOT yet confirmed:
+- The eye's **position** offset (`dx,dy,dz` = eye pose minus head-center
+  pose) gets Z-flipped before being added to the shared world anchor
+  (`wz_ = linkEyeGame.z - dz*scale`) — converting OpenXR's right-handed,
+  Z-back tracking convention into the game's left-handed, Z-forward world
+  convention.
+- The eye's **orientation** (the `r00..r22` rotation matrix) is built from
+  the **raw, unflipped** quaternion — deliberately left that way per an
+  existing comment in the same function ("flipping qz here...inverted
+  pitch and roll"), i.e. a previous session already found flipping it
+  breaks something else.
+- These two pieces of the same view matrix are therefore expressed in two
+  different coordinate handedness conventions. Near forward-facing (where
+  X dominates and X is untouched by the flip) this would be invisible;
+  as yaw approaches 90° (where the eye-separation direction rotates onto
+  the axis that WAS flipped for position but NOT for orientation) the
+  mismatch would surface exactly as the reported symptom. This is a
+  hypothesis from reading the code, not something verified by testing,
+  logging, or an isolated capture.
+- **Ruled out** (by reasoning, not testing): the flatscreen-camera/`linkEyeGame`
+  anchor (section 11) is computed once per frame and fed identically to
+  BOTH eyes, so it cannot by itself cause a differential left-vs-right
+  symptom — a wrong anchor would shift both eyes together, not swap them
+  relative to each other. User asked specifically whether this could be the
+  cause; answered no for this reason.
+
+**Why this is flagged as potentially hard, not a quick fix**: this is the
+same *category* of bug as section 12's hand-tracking rotation saga
+(quaternion/coordinate-handedness math that looks correct near one
+reference orientation and drifts wrong away from it) — which took three
+full sessions in this project to actually resolve, including a genuinely
+subtle inverse-rotation bug that survived two sessions of "verified
+correct" fixes before being found. Given that history, this should NOT be
+approached as a guess-and-rebuild loop; if picked up, reuse the lessons
+already written up in section 12 (script-verify any derived
+rotation/coordinate math before touching the headset, isolated single-axis
+motion tests rather than reasoning abstractly, don't assume a fix is
+sufficient just because it looks right at one reference pose).
+
+**Status (2026-08-04)**: explicitly deferred per user request ("note this
+for the future") rather than investigated further that session — user was
+undecided on fixing now vs. later and chose to defer once given this
+difficulty estimate. Not blocking (doesn't crash; only degrades
+accuracy/comfort at extreme head yaw), so safe to leave deferred. Next
+step for whoever picks this up: reproduce and confirm the symptom exists
+as described, then verify (rather than assume) whether the
+position/orientation handedness mismatch above is the actual cause before
+attempting a fix.
+
+**2026-08-05 — fix derived, verified by script, applied and built. NOT yet
+confirmed in-headset — this is a candidate fix, not a closed bug.** Acted
+on the hypothesis above, but per section 12's lesson didn't go straight to
+a guess-and-rebuild: wrote a standalone Python simulation
+(`verify_depth_fix.py`, scratch — not checked into the repo) BEFORE
+touching any code, to check whether the handedness-mismatch theory
+actually predicts the reported symptom.
+
+**What the script found**: simulate a point fixed at the camera's physical
+right (roughly where the other eye sits) and ask where the CURRENT view
+matrix's rotation block says it should appear in view space, across a
+range of head yaw angles (0°/30°/60°/90°/120°). Result:
+```
+yaw=  0   current=[ 1,0, 0]      <- right, correct
+yaw= 30   current=[ 0.5,0,0.87]  <- drifting
+yaw= 60   current=[-0.5,0,0.87]  <- already flipped past center
+yaw= 90   current=[-1,0, 0]      <- reads as fully LEFT
+yaw=120   current=[-0.5,0,-0.87]
+```
+At 90° a point physically to the camera's right reads as fully to view-space
+LEFT with the current matrix — i.e. the current code reproduces "eyes
+swapped at 90°" exactly, on paper, before any in-headset test. This is
+strong (not certain) evidence the handedness-mismatch theory from
+2026-08-04 was right.
+
+**The fix, and why it's not the same as the previously-rejected "flip qz"
+attempt**: the position offset is already converted from OpenXR's tracking
+convention to the game's world convention via a Z flip
+(`F = diag(1,1,-1)`) before this function combines it into the view
+matrix — see `wz_ = linkEyeGame.z - dz*scale` — but the orientation
+(`r00..r22`, built straight from the raw quaternion) never got the same
+conversion. The mathematically correct way to carry a rotation matrix
+through a coordinate reflection `F` is the similarity transform `F·R·F`
+(NOT flipping a quaternion component before the quat→matrix formula —
+verified algebraically these are only the same when certain cross terms
+happen to be zero, e.g. conveniently near forward-facing, which is
+probably why the old "flip qz" attempt looked locally sane before being
+rejected on pitch/roll grounds). Since `F` is diagonal, `F·R·F` reduces to
+negating exactly the four matrix entries that mix the Z axis with X/Y
+(`r02`, `r12`, `r20`, `r21`); the other five entries (including `r22`
+itself) are untouched — which is also why this fix is a no-op at
+forward-facing (those four terms are ~0 there), matching "fine facing
+forward, worse toward 90°" from the original report. Confirmed via the
+same script that this stays a proper rotation (det=+1, not a mirror)
+across 2000 random test orientations, and that with the fix applied, the
+same "point at camera's physical right" simulation reads as
+view-space-right at EVERY yaw angle tested (0° through 120°), not just at
+0°.
+
+**Applied in `vr_stereo_render.hpp`'s `eyePoseToViewMtx()`**: after
+computing `r00..r22` as before (unchanged), four corrected values
+`r02c/r12c/r20c/r21c` (the same values, negated) are used in place of
+`r02/r12/r20/r21` both in the matrix write AND in the translation
+dot-products right below it (the translation must use whatever actually
+ends up in the matrix, not the pre-correction values — this tripped up
+nothing this time, but is exactly the kind of easy-to-miss consistency
+requirement this bug class tends to punish). Full reasoning is inline in
+the code comment there.
+
+**Built successfully** (RelWithDebInfo, `windows-msvc-relwithdebinfo`
+preset) — only `vr_main.cpp` needed recompiling (it includes this header),
+clean link, no new warnings.
+
+**Built successfully, tested in-headset by the user immediately after —
+REGRESSION FOUND AND REVERTED same session, root cause understood, a
+second (different, better-supported) fix applied and built. NOT yet
+retested in-headset.**
+
+**The regression**: user report was immediate and unambiguous — "the
+headsets movement is reversed, so turning it left turns right and looking
+up looks down." This is section 12's own warning playing out exactly as
+written ("don't assume a fix is sufficient just because it looks right at
+one reference pose/derivation") — the script only checked the *stereo
+offset direction*, never checked whether the orientation fix preserved
+ordinary look-around SENSE, which turned out to be the thing it broke.
+
+Re-derived by hand once the report came in: for a pure-pitch quaternion
+(rotation about local X only), the applied `F*R*F` correction turns the
+resulting 2D rotation block from `[[cosθ,-sinθ],[sinθ,cosθ]]` into
+`[[cosθ,sinθ],[-sinθ,cosθ]]` — i.e. a rotation by `-θ` instead of `θ`. Any
+rotation touching the Z axis (pitch, yaw) gets its direction reversed by
+this correction. Confirmed numerically too (see the script from the
+original attempt, extended to print a concrete before/after test vector).
+This is a strictly worse regression than the narrow 90-degree stereo
+symptom it was meant to fix — reverted the orientation change immediately.
+
+**Reconsidering with the new evidence in hand**: since the user's report
+proves the ORIGINAL (unflipped) orientation must be correct — it was fine
+before touching it, and only my change broke look-around sense — the bug
+has to be somewhere else. Went back to `eyePoseToViewMtx`'s own comment
+("flip Z...matches buildHandMtx's convention") and checked what
+`buildHandMtx` actually does now (`vr_link_visibility.hpp:463`): its
+position formula uses `linkEyeGame.z + dz*scale` — no flip — because
+section 12 found and fixed an identical Z-flip there for a "front/back
+mirrored" hand-tracking bug, confirmed working since. `eyePoseToViewMtx`
+was never updated to match; it kept the stale, already-proven-wrong `- dz
+* scale`. Both bugs plausibly share one root cause: a Z-flip that was
+correct for nothing more than "seemed to match the sibling function" at
+the time it was written, before that sibling's own version of the same
+flip was independently found wrong and removed.
+
+**Re-verified in script before reapplying**: with the position offset's Z
+flip removed (matching `buildHandMtx`) and the orientation matrix left
+completely alone (proven necessary by the regression above), the
+self-consistency check from the original derivation
+(`Rᵀ(q) · R(q) · local_offset == local_offset`) holds **exactly** at every
+yaw angle tested, not approximately — this is a mathematical identity
+(a rotation matrix transposed times itself is identity), not something
+tuned to fit. This is also a materially different, better-supported claim
+than the reverted fix: it's not "this looks right in isolation," it's "the
+sibling function had the identical bug, already fixed and confirmed
+working, and this makes the two consistent instead of diverging by
+construction."
+
+**Applied**: `eyePoseToViewMtx()`'s `wz_` now uses `+ dz * scale` (removed
+the flip) instead of `- dz * scale`; orientation math is back to exactly
+what it was before this whole investigation (unflipped, unmodified). Full
+reasoning inline in the code comment.
+
+**Built successfully** a second time (RelWithDebInfo, clean, only
+`vr_main.cpp` recompiled).
+
+**CONFIRMED FIXED IN-HEADSET, same session**: user tested immediately —
+"The eye swap is gone and the headset movement is correct." Both the
+original 90°-yaw stereo-swap symptom and ordinary look-around sense
+(regression-free) confirmed in one pass. Forward/backward head-motion feel
+(leaning, walking) was not separately called out by the user as broken, so
+treated as fine, though not as explicitly interrogated as the other two —
+if a subtle forward/back feel issue ever surfaces later, start here, since
+this is the one part of the fix whose correctness for the CAMERA
+specifically (as opposed to hands, where the identical flip-removal was
+directly validated) was inferred by analogy rather than independently
+confirmed.
+
+**Why the second attempt landed in one try where the first didn't**: the
+first fix was a derivation that satisfied one property (stereo-offset
+consistency) without proof it was the *only* correct transform, and broke
+a different one (rotation sense) that was never checked. The second fix
+was closer to "apply a cure this codebase already found for the identical
+bug next door" (section 12's `buildHandMtx` fix) than a fresh derivation —
+and because the orientation side was independently proven correct by the
+regression report, the remaining fix (remove the position-side flip)
+reduces to the exact identity `Rᵀ(q)·R(q) = I`, not an approximate
+patch. Closes out section 14.
 
 ## Key lesson learned this session
 

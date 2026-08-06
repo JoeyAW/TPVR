@@ -10,6 +10,8 @@
 #include "dusk/game_clock.h"  // dusk::game_clock::MainLoopPacer
 #include "helpers/gx_helper.h"  // TGXTexObj
 
+class J3DModel;
+
 namespace dusk::vr {
 
 // Call once, after an aurora::gfx device exists (see startup()'s existing
@@ -72,6 +74,23 @@ void getEyeSymmetricFov(float* fovyDeg, float* aspect);
 // include the heavier OpenXR/aurora headers vr_stereo_render.hpp pulls in,
 // same reasoning as isRenderingToHeadset()/getEyeSymmetricFov() above.
 void drawHudBillboard(TGXTexObj* hudTex);
+
+// Overwrites mpLinkHandModel's two hand joints (indices 1/2 -- al_handsL/
+// al_handsR) with this frame's tracked controller poses. Call site:
+// d_a_alink.cpp's setDrawHand()-adjacent draw-prep code, IMMEDIATELY AFTER
+// its own existing `mpLinkHandModel->setAnmMtx(1/2, mpLinkModel->
+// getAnmMtx(9/0xE))` body-joint re-sync -- that re-sync runs every eye,
+// right before the model actually draws, and unconditionally overwrites
+// whatever anyone wrote earlier in the frame (discovered when tracked
+// hands were first wired up: writing the tracked pose from
+// vr_link::updateFrame(), which runs once before the per-eye loop, had
+// zero visible effect because of exactly this). Guard the call site on
+// isRenderingToHeadset() -- flatscreen must keep the base game's own
+// body-joint sync untouched. Thin forward to
+// vr_link::applyTrackedHandMtx() (vr_link_visibility.hpp), kept out of
+// this header for the same "heavier OpenXR/aurora dependency" reason
+// drawHudBillboard() above is.
+void applyTrackedHandMtx(J3DModel* handModel);
 
 // Runs the first half of one VR frame: xrWaitFrame/xrBeginFrame, per-eye
 // render (including the fpcM_DrawIterater/cAPIGph_Painter draw call), and

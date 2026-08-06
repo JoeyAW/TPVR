@@ -16,6 +16,11 @@
 #include "dusk/menu_pointer.h"
 #include "dusk/settings.h"
 #include "dusk/ui/touch_controls.hpp"
+
+// vr_main.cpp -- true for the whole VR session lifetime. Used below to skip
+// dusk::ui::sync_virtual_input() (touch-screen controls) while VR is active
+// -- see mDoCPd_c::read()'s comment for why.
+extern "C" bool g_duskVRSessionActive;
 #endif
 
 DUSK_GAME_DATA JUTGamePad* mDoCPd_c::m_gamePad[4];
@@ -81,7 +86,17 @@ void mDoCPd_c::create() {
 void mDoCPd_c::read() {
     ZoneScoped;
 #if TARGET_PC
-    dusk::ui::sync_virtual_input();
+    // Skip touch-screen virtual-pad sync entirely during VR -- touch
+    // controls and VR both target the same PAD_CHAN0 virtual-pad slot
+    // (what mDoCPd_c::getTrigA/getStickX/etc. -- all of gameplay -- reads
+    // as PAD_1), and are mutually exclusive in practice anyway (can't touch
+    // a screen overlay while wearing a headset). See CLAUDE.md section 13
+    // and touch_controls.cpp's TouchControls::update() comment for the
+    // full root-cause writeup (2026-08-03) -- this was one of three
+    // separate per-frame clear paths that all had to be found and fixed.
+    if (!g_duskVRSessionActive) {
+        dusk::ui::sync_virtual_input();
+    }
 #endif
     JUTGamePad::read();
 

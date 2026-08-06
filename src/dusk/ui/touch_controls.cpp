@@ -26,6 +26,11 @@
 #include "m_Do/m_Do_graphic.h"
 #include "ui.hpp"
 
+// vr_main.cpp -- true for the whole VR session lifetime. A
+// linkage-specification (extern "C") is only legal at namespace scope, so
+// this lives here rather than inside sync_touch_state() itself.
+extern "C" bool g_duskVRSessionActive;
+
 namespace dusk::ui {
 namespace {
 
@@ -719,6 +724,26 @@ void TouchControls::clear_virtual_input() noexcept {
 }
 
 void TouchControls::sync_touch_state() noexcept {
+    // ROOT-CAUSED 2026-08-03 ("VR controller presses did nothing" --
+    // extensive diagnostic-logging investigation, see git history/CLAUDE.md
+    // section 13): this function is reached from TWO separate call paths --
+    // TouchControls::sync_virtual_input() (called every frame from
+    // mDoCPd_c::read(), already gated on VR not being active there) AND
+    // TouchControls::update() (called every frame from the general
+    // dusk::ui::update() document loop, completely independent of that
+    // gate). Both paths reach the `clear_virtual_input()` call below
+    // whenever touch controls are disabled (the default) -- which
+    // unconditionally calls PADClearVirtualStatus(PAD_CHAN0), the SAME port
+    // dusk::vr's controller-input code (vr_main.cpp's tick()) targets.
+    // Gating only the mDoCPd_c::read() call site left this second path
+    // clearing VR's virtual pad status every single frame regardless,
+    // which is why that first fix alone didn't resolve the symptom. Fixed
+    // at the source here instead of patching each caller separately, so no
+    // third call site can reintroduce the same bug later.
+    if (g_duskVRSessionActive) {
+        return;
+    }
+
     const bool controlsEnabled = getSettings().game.enableTouchControls;
     const bool pointerMenuActive = menu_pointer::active();
     if (mWasSuppressed || (!controlsEnabled && !pointerMenuActive)) {
@@ -1133,6 +1158,27 @@ void TouchControls::sync_control_displays() noexcept {
 }
 
 void TouchControls::update() {
+    // ROOT-CAUSED 2026-08-03 ("VR controller presses did nothing" --
+    // continued): sync_touch_state()'s own VR gate (see its comment) turned
+    // out not to be sufficient -- sync_visibility() below has its OWN,
+    // separate unconditional clear_virtual_input() call (its `else` branch,
+    // reached whenever touch controls are disabled and the panel is
+    // already hidden -- the default steady state) that isn't part of
+    // sync_touch_state() at all, and fires every frame this function runs.
+    // Confirmed via direct evidence: PADSetVirtualStatus(0)/
+    // PADClearVirtualStatus(0) diagnostic logging (extern/aurora/lib/
+    // dolphin/pad/pad.cpp) showed one PADClearVirtualStatus(0) call
+    // interleaved before every single one of dusk::vr's PADSetVirtualStatus(0)
+    // calls, despite the previous fix -- i.e. a second, still-unguarded
+    // path to the exact same clear. Rather than keep patching individual
+    // internal functions one at a time as new call paths surface, gate the
+    // entire function here instead -- touch controls have nothing to do
+    // during a VR session regardless of which internal path would
+    // otherwise run.
+    if (g_duskVRSessionActive) {
+        return;
+    }
+
     sync_visibility();
     sync_control_long_presses();
     sync_safe_area();

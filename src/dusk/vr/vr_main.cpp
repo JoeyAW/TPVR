@@ -13,11 +13,14 @@
 // VR_MOD_HANDOFF_2.md. Neither call site exists yet.
 
 #include <openxr/openxr.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <memory>
 #include <vector>
+
+#include <dolphin/pad.h>  // PADStatus, PADSetVirtualStatus/PADClearVirtualStatus -- gameplay controller input
 
 #include "SSystem/SComponent/c_API_graphic.h"  // cAPIGph_Painter
 #include "m_Do/m_Do_graphic.h"                  // mDoGph_gInf_c::captureHudBillboard
@@ -147,15 +150,42 @@ struct PendingFrameSubmit {
 };
 PendingFrameSubmit g_pendingSubmit;
 
-// TODO: the grip spaces still need real xrCreateActionSpace calls (needs
-// action set setup -- NOT YET WRITTEN ANYWHERE). Until fixed, hands render
-// at tracking-space origin (rightPose/leftPose in tick() below). g_viewSpace
-// no longer has this problem -- startup() now assigns it a real
-// xrCreateReferenceSpace(VIEW) handle (see vr_xr_bootstrap.hpp), so hmdPose
-// in tick() reflects genuine head tracking.
+// FIXED this session: these now come from real xrCreateActionSpace calls
+// (vr_xr_bootstrap.hpp's createHandActionSet()/attachAndCreateHandSpaces(),
+// called from startup() below) instead of staying XR_NULL_HANDLE forever --
+// same fix pattern already applied to g_viewSpace. g_handActionSet must be
+// synced via xrSyncActions() once per frame (tick(), right before these
+// spaces are located) for their poses to update at all.
 XrSpace g_rightGripSpace = XR_NULL_HANDLE;
 XrSpace g_leftGripSpace = XR_NULL_HANDLE;
+// NEW (rotation-calibration follow-up): aim-pose action spaces, alongside
+// the grip spaces above -- see vr_xr_bootstrap.hpp's HandActions::
+// aimPoseAction comment for why. Located every frame the same way the grip
+// spaces are, purely for calibration logging right now (not fed into
+// buildHandMtx()/the actual draw pose).
+XrSpace g_rightAimSpace = XR_NULL_HANDLE;
+XrSpace g_leftAimSpace = XR_NULL_HANDLE;
 XrSpace g_viewSpace = XR_NULL_HANDLE;
+XrActionSet g_handActionSet = XR_NULL_HANDLE;
+
+// NEW (gameplay controller input, 2026-08-03): the button/axis actions
+// created alongside the pose actions above (see vr_xr_bootstrap.hpp's
+// HandActions), plus the left/right subaction paths needed to query each
+// hand's state out of them. Synced by the same xrSyncActions() call as the
+// pose actions (same action set) -- see tick()'s per-frame sync below.
+XrAction g_triggerValueAction = XR_NULL_HANDLE;
+XrAction g_squeezeValueAction = XR_NULL_HANDLE;
+XrAction g_thumbstickAction = XR_NULL_HANDLE;
+XrAction g_primaryClickAction = XR_NULL_HANDLE;
+XrAction g_secondaryClickAction = XR_NULL_HANDLE;
+XrAction g_menuClickAction = XR_NULL_HANDLE;
+// NEW (2026-08-04, per explicit user request "make the right stick click
+// the pause menu"): right thumbstick click, additionally OR'd into
+// PAD_BUTTON_START in tick() below -- see vr_xr_bootstrap.hpp's
+// HandActions::stickClickAction.
+XrAction g_stickClickAction = XR_NULL_HANDLE;
+XrPath g_leftHandPath = XR_NULL_PATH;
+XrPath g_rightHandPath = XR_NULL_PATH;
 
 vr_render::HandDrawState g_handDrawState;
 
@@ -250,6 +280,10 @@ void drawHudBillboard(TGXTexObj* hudTex) {
     vr_render::drawHudBillboard(hudTex);
 }
 
+void applyTrackedHandMtx(J3DModel* handModel) {
+    vr_link::applyTrackedHandMtx(handModel);
+}
+
 // Call once at startup, after an aurora::gfx device exists (per the
 // existing TODO in initSession() -- same timing requirement applies here).
 // Returns false on any XR/D3D12 setup failure; caller should proceed
@@ -273,6 +307,30 @@ bool startup() {
         // updated comment. Real head tracking now flows into hmdPose in
         // tick() below.
         g_viewSpace = viewSpace;
+
+        // FIXED this session: g_rightGripSpace/g_leftGripSpace had the exact
+        // same problem as g_viewSpace did before it (see above) -- nothing
+        // ever created an action set, let alone attached it or created
+        // action spaces from it, so both stayed XR_NULL_HANDLE and
+        // vr_link::buildHandMtx() rendered hands at tracking-space origin
+        // (see the TODO that used to sit above their declaration).
+        vr_xr::HandActions handActions = vr_xr::createHandActionSet(boot.instance);
+        vr_xr::attachAndCreateHandSpaces(session, handActions, &g_leftGripSpace, &g_rightGripSpace,
+                                          &g_leftAimSpace, &g_rightAimSpace);
+        g_handActionSet = handActions.actionSet;
+
+        // NEW (gameplay controller input): the new button/axis actions live
+        // in the same action set attached above, so no separate attach call
+        // is needed -- just carry the handles forward for tick() to query.
+        g_triggerValueAction = handActions.triggerValueAction;
+        g_squeezeValueAction = handActions.squeezeValueAction;
+        g_thumbstickAction = handActions.thumbstickAction;
+        g_primaryClickAction = handActions.primaryClickAction;
+        g_secondaryClickAction = handActions.secondaryClickAction;
+        g_menuClickAction = handActions.menuClickAction;
+        g_stickClickAction = handActions.stickClickAction;
+        g_leftHandPath = handActions.leftHandPath;
+        g_rightHandPath = handActions.rightHandPath;
 
         g_ownedSession = std::make_unique<Session>(boot.instance, boot.systemId, session, localSpace, gfx.device, gfx.commandQueue);
         // Registers the encoder task type backing encodeEyeCopy()'s Dawn-side
@@ -379,12 +437,15 @@ bool startup() {
     }
 }
 
-static XrPosef locateSpace(XrSpace space, XrSpace base, XrTime time) {
+static XrPosef locateSpace(XrSpace space, XrSpace base, XrTime time,
+                            XrSpaceLocationFlags* outFlags = nullptr) {
     XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
     if (space == XR_NULL_HANDLE) {
+        if (outFlags) *outFlags = 0;
         return XrPosef{{0, 0, 0, 1}, {0, 0, 0}};  // identity fallback
     }
     xrLocateSpace(space, base, time, &loc);
+    if (outFlags) *outFlags = loc.locationFlags;
     return loc.pose;
 }
 
@@ -526,26 +587,189 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     const XrTime time = g_session->predictedDisplayTime();
     const XrSpace base = g_session->localSpace();
 
+    // Must run once per frame before locating the grip spaces below -- an
+    // action's/action space's pose is only as fresh as the last
+    // xrSyncActions call. Failure (e.g. XR_SESSION_NOT_FOCUSED, briefly
+    // possible right after startup) isn't fatal here: locateSpace() already
+    // has no special handling for a stale/untracked pose, same as it's
+    // always had for g_viewSpace.
+    if (g_handActionSet != XR_NULL_HANDLE) {
+        XrActiveActionSet activeSet{g_handActionSet, XR_NULL_PATH};
+        XrActionsSyncInfo syncInfo{XR_TYPE_ACTIONS_SYNC_INFO};
+        syncInfo.countActiveActionSets = 1;
+        syncInfo.activeActionSets = &activeSet;
+        xrSyncActions(g_session->session(), &syncInfo);
+    }
+
     const XrPosef hmdPose = locateSpace(g_viewSpace, base, time);
     const XrPosef rightPose = locateSpace(g_rightGripSpace, base, time);
     const XrPosef leftPose = locateSpace(g_leftGripSpace, base, time);
+    const XrPosef rightAimPose = locateSpace(g_rightAimSpace, base, time);
+    const XrPosef leftAimPose = locateSpace(g_leftAimSpace, base, time);
 
-    // --- swing gesture -> attack trigger (design decision: no new combat logic) ---
-    if (!pacing.is_interpolating) {
-        vr_combat::Pose swingPose{
-            {rightPose.position.x, rightPose.position.y, rightPose.position.z},
-            static_cast<double>(time) / 1e9};  // XrTime is nanoseconds
-        vr_combat::SwingEvent event = g_rightSwing.update(swingPose);
-        if (event.triggered) {
-            // Per handoff doc:
-            // mDoCPd_c::getCpadInfo(PAD_1).mPressedButtonFlags |= PAD_BUTTON_A (0x0100)
-            // TODO: confirm the exact call site/include for mDoCPd_c and wire this in.
-        }
+    // --- gameplay controller input (buttons/axes -> PADStatus) ---
+    // NEW (2026-08-03, per explicit user request "set up the quest 3
+    // controllers as an actual controller"): reads the button/axis actions
+    // synced above and merges them into the game's normal pad pipeline via
+    // PADSetVirtualStatus() -- the same mechanism the existing touch-screen
+    // overlay already uses (see touch_controls.cpp's TouchControls::
+    // sync_virtual_input()). PADRead() (extern/aurora/lib/dolphin/pad/
+    // pad.cpp) merges whatever's set here into the real controller-port
+    // status every frame, so mDoCPd_c::getTrigA/getHoldX/getStickX(...) --
+    // what d_a_alink.cpp and the rest of gameplay actually read -- see it
+    // with zero actor-code changes.
+    //
+    // KNOWN LATENCY: mDoCPd_c::read() runs earlier in the frame, inside the
+    // sim-tick loop in m_Do_main.cpp, BEFORE dusk::vr::tick() (this
+    // function). Whatever's set here isn't consumed until next frame's sim
+    // tick(s) -- one frame (~11-16ms at typical VR refresh rates) of extra
+    // input latency, not perceptible for buttons/movement. Not addressed
+    // here; would need restructuring where OpenXR input is read relative to
+    // the main loop's phases, bigger than this pass's scope.
+    //
+    // KNOWN OVERLAP: touch_controls.cpp's virtual pad also targets
+    // PAD_CHAN0 (same port PAD_1/gameplay reads) -- if the touch overlay AND
+    // VR were both actively injecting input the same frame, whichever runs
+    // later in the frame wins rather than merging. Not a real-world
+    // scenario (can't touch a screen overlay while wearing a headset) so
+    // not guarded against here.
+    //
+    // Mapping -- REVISED 2026-08-04 per explicit user request ("bind X to
+    // right squeeze, Y to right trigger, DPAD up to Y, DPAD left to X, and
+    // Z to left stick click"), superseding this comment block's previous
+    // version (still visible in git history). No longer mirrors the
+    // default Xbox-controller layout 1:1 -- see the individual entries
+    // below for what moved where and why:
+    //   left thumbstick  -> main stick (movement) -- unchanged
+    //   right thumbstick -> C-stick (camera) -- unchanged
+    //   left trigger     -> analog L -- unchanged
+    //   right A click    -> A (context action) -- unchanged
+    //   right B click    -> B (attack) -- unchanged -- ALSO triggered by
+    //                        the swing-gesture detector below, so swinging
+    //                        the controller like a sword is an additional
+    //                        way to attack, not instead of the button
+    //   left menu click  -> Start (pause) -- unchanged
+    //   right stick click -> Start (pause) -- unchanged (added 2026-08-04,
+    //                        earlier same day as this revision)
+    //   right squeeze    -> X (was Z)
+    //   right trigger    -> Y, digital only -- no analog value written
+    //                        anymore, unlike the old analog-R mapping this
+    //                        replaced (was analog R/raise shield; R is now
+    //                        UNBOUND -- user's stated plan is to eventually
+    //                        replace it with a physical movement gesture
+    //                        instead of a button, not yet implemented)
+    //   left X click     -> D-pad right (was D-pad left as of the revision
+    //                        above, was X before that -- changed again
+    //                        same day per explicit user request "change x
+    //                        dpad left to dpad right")
+    //   left Y click     -> D-pad up (was Y)
+    //   left stick click -> Z (was D-pad right, added earlier the same day
+    //                        as this revision -- D-pad right is no longer
+    //                        UNBOUND as of the change above, it's now fed
+    //                        by left X click instead)
+    auto getFloatAction = [&](XrAction action, XrPath subactionPath) -> float {
+        XrActionStateGetInfo info{XR_TYPE_ACTION_STATE_GET_INFO};
+        info.action = action;
+        info.subactionPath = subactionPath;
+        XrActionStateFloat state{XR_TYPE_ACTION_STATE_FLOAT};
+        xrGetActionStateFloat(g_session->session(), &info, &state);
+        return state.isActive ? state.currentState : 0.f;
+    };
+    auto getBoolAction = [&](XrAction action, XrPath subactionPath) -> bool {
+        XrActionStateGetInfo info{XR_TYPE_ACTION_STATE_GET_INFO};
+        info.action = action;
+        info.subactionPath = subactionPath;
+        XrActionStateBoolean state{XR_TYPE_ACTION_STATE_BOOLEAN};
+        xrGetActionStateBoolean(g_session->session(), &info, &state);
+        return state.isActive && state.currentState;
+    };
+    auto getVec2Action = [&](XrAction action, XrPath subactionPath) -> XrVector2f {
+        XrActionStateGetInfo info{XR_TYPE_ACTION_STATE_GET_INFO};
+        info.action = action;
+        info.subactionPath = subactionPath;
+        XrActionStateVector2f state{XR_TYPE_ACTION_STATE_VECTOR2F};
+        xrGetActionStateVector2f(g_session->session(), &info, &state);
+        return state.isActive ? state.currentState : XrVector2f{0.f, 0.f};
+    };
+
+    const float leftTrigger = getFloatAction(g_triggerValueAction, g_leftHandPath);
+    const float rightTrigger = getFloatAction(g_triggerValueAction, g_rightHandPath);
+    const float rightSqueeze = getFloatAction(g_squeezeValueAction, g_rightHandPath);
+    const XrVector2f leftStick = getVec2Action(g_thumbstickAction, g_leftHandPath);
+    const XrVector2f rightStick = getVec2Action(g_thumbstickAction, g_rightHandPath);
+    const bool rightAHeld = getBoolAction(g_primaryClickAction, g_rightHandPath);
+    const bool leftXHeld = getBoolAction(g_primaryClickAction, g_leftHandPath);
+    const bool rightBHeld = getBoolAction(g_secondaryClickAction, g_rightHandPath);
+    const bool leftYHeld = getBoolAction(g_secondaryClickAction, g_leftHandPath);
+    const bool leftMenuHeld = getBoolAction(g_menuClickAction, g_leftHandPath);
+    const bool rightStickClickHeld = getBoolAction(g_stickClickAction, g_rightHandPath);
+    const bool leftStickClickHeld = getBoolAction(g_stickClickAction, g_leftHandPath);
+
+    // Swing-gesture -> attack: DEFERRED per explicit user request 2026-08-03
+    // ("remove the swing controls for now, that's something for another
+    // session") -- was wired here (see git history: fixed a dead
+    // `!pacing.is_interpolating` gate that meant g_rightSwing.update() had
+    // never actually run, then OR'd swingEvent.triggered into PAD_BUTTON_B
+    // alongside the real B button), but pulled back out without having been
+    // tested/tuned yet. g_rightSwing (vr_combat::SwingDetector, declared
+    // above) and vr_swing_detector.hpp are left in place, just not called
+    // from here -- real infrastructure to pick back up later, not dead code
+    // to re-derive from scratch.
+
+    PADStatus padStatus{};
+    padStatus.err = PAD_ERR_NONE;
+    if (rightAHeld) padStatus.button |= PAD_BUTTON_A;
+    if (rightBHeld) padStatus.button |= PAD_BUTTON_B;
+    if (leftXHeld) padStatus.button |= PAD_BUTTON_RIGHT;  // D-pad right (was D-pad left, was X)
+    if (leftYHeld) padStatus.button |= PAD_BUTTON_UP;     // D-pad up (was Y)
+    if (leftMenuHeld || rightStickClickHeld) padStatus.button |= PAD_BUTTON_START;
+    if (leftStickClickHeld) padStatus.button |= PAD_TRIGGER_Z;  // was D-pad right (superseded above, now Z)
+
+    // Deadzones/thresholds matched to typical thumbstick/trigger/squeeze
+    // noise floors -- avoids a resting controller reporting a tiny nonzero
+    // value that would make wantsVirtualPad below think input is present
+    // every frame.
+    constexpr float kTriggerDeadzone = 0.1f;
+    constexpr float kSqueezeThreshold = 0.5f;
+    constexpr float kStickDeadzone = 0.15f;
+    if (rightSqueeze > kSqueezeThreshold) padStatus.button |= PAD_BUTTON_X;  // was Z
+    if (rightTrigger > kTriggerDeadzone) padStatus.button |= PAD_BUTTON_Y;   // was analog R; R is now unbound
+    if (leftTrigger > kTriggerDeadzone) {
+        padStatus.button |= PAD_TRIGGER_L;
+        padStatus.triggerLeft = static_cast<u8>(std::clamp(leftTrigger, 0.f, 1.f) * 255.f);
+    }
+    if (std::abs(leftStick.x) > kStickDeadzone || std::abs(leftStick.y) > kStickDeadzone) {
+        padStatus.stickX = static_cast<s8>(std::clamp(leftStick.x, -1.f, 1.f) * 127.f);
+        padStatus.stickY = static_cast<s8>(std::clamp(leftStick.y, -1.f, 1.f) * 127.f);
+    }
+    if (std::abs(rightStick.x) > kStickDeadzone || std::abs(rightStick.y) > kStickDeadzone) {
+        padStatus.substickX = static_cast<s8>(std::clamp(rightStick.x, -1.f, 1.f) * 127.f);
+        padStatus.substickY = static_cast<s8>(std::clamp(rightStick.y, -1.f, 1.f) * 127.f);
+    }
+
+    constexpr u32 kVrPadPort = PAD_CHAN0;
+    const bool wantsVirtualPad = padStatus.button != 0 || padStatus.stickX != 0 ||
+                                  padStatus.stickY != 0 || padStatus.substickX != 0 ||
+                                  padStatus.substickY != 0 || padStatus.triggerLeft != 0 ||
+                                  padStatus.triggerRight != 0;
+    if (wantsVirtualPad) {
+        PADSetVirtualStatus(kVrPadPort, &padStatus);
+    } else {
+        PADClearVirtualStatus(kVrPadPort);
     }
 
     // --- Link head hide + hand matrix mapping ---
-    vr_link::FrameInput frameInput{hmdPose, rightPose, leftPose};
+    vr_link::FrameInput frameInput{hmdPose, rightPose, leftPose, rightAimPose, leftAimPose};
     vr_link::updateFrame(frameInput);
+
+    // World-space point both eyes anchor their view matrix to this frame --
+    // see vr_link::getVrCameraEyeAnchor()'s comment. Computed once (not per
+    // eye) since it doesn't depend on which eye is rendering, only on
+    // Link's/the camera's state this frame. dComIfGd_getView() is guaranteed
+    // non-null here: isViewReady() already returned before reaching this
+    // point (see the check above).
+    view_class* currentView = dComIfGd_getView();
+    const cXyz vrCameraEyeAnchor = vr_link::getVrCameraEyeAnchor(currentView->lookat.eye);
 
     // --- locate both eyes for this frame ---
     XrViewLocateInfo locateInfo{XR_TYPE_VIEW_LOCATE_INFO};
@@ -687,6 +911,7 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
             configViews[eye].recommendedImageRectWidth,
             configViews[eye].recommendedImageRectHeight,
             hmdPose.position,
+            vrCameraEyeAnchor,
         };
 
         // Safe to call unconditionally here: the isViewReady() check earlier

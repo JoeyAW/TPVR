@@ -14,6 +14,8 @@ Dusklight VR is an (unfortunately) vibecoded VR port of Twilight Princess.
 
 It aims to be as accurate as possible to the original game while allowing you to experience the gameplay from a VR perspective.
 
+More on why it has AI generated code below.
+
 # Setup
 
 > [!IMPORTANT]
@@ -39,6 +41,14 @@ If you'd like to build Dusklight from source, please read the [build instruction
 # Credits
 
 Special thanks to the [Dusklight](https://twilitrealm.dev/) team, [TP decompilation](https://github.com/zeldaret/tp) team, the GC/Wii decompilation community, the [Aurora](https://github.com/encounter/aurora) developers, the [TP speedrunning community](https://zsrtp.link), and all [contributors](https://github.com/TwilitRealm/dusklight/graphs/contributors).
+
+# Statement on AI-generated code
+
+I do not know how to code. The furthest my knowledge goes is a little bit of HTML and CSS. I simply wanted a way to play Twilight Princess in VR and scoured the internet for anyone who mentioned a Dusklight mod/port in the works, but came up with nothing, so I decided to take matters into my own hands with Claude Code. 
+I do not condone the usage of AI for writing, "art", deepfakes, and music (especially music, screw Suno and its garbage that is polluting streaming services). It should not be people's go-to for asking questions or replacing a search engine; it has repeatedly been shown to hallucinate and take certain statements out of context, spreading misinformation. Heck, I'm not even proud that I used it in this project.
+With that being said, for a task like this, I believe it is acceptable to create a project that has does not currently exist by writing the code using AI as long as you actually take the time to refine the experience and do not harm other people's repos or code in the process. In this case, I simply forked Dusklight and modified it in a separate instance over the course of multiple weeks, without pestering the devs with possible spaghetti-code pull requests. I wrote this statement and edited the README in my own words, and I made the logo using Paint.NET despite having very little graphic design experience. I do not plan to ever use or create AI-generated assets, only code.
+I have seen many recent projects spring up in the same vein: vibecoded VR ports of existing games. Everybody is entitled to their own opinion, and different backgrounds will lead people to take different stances. However, I believe that you can either take this VR port of the original game and enjoy it for what it is, regardless of AI or not, or you can simply ignore it and play the game in flatscreen—it's still a fantastic experience.
+And yes—I used an em-dash there. You can type it with on your keyboard with Alt+0151. Thanks ChatGPT for ruining informal writing.
 
 <br/>
 <div align="center">

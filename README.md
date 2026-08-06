@@ -38,10 +38,6 @@ Visit the [official installation guide](https://twilitrealm.dev/install/) for fu
 
 If you'd like to build Dusklight from source, please read the [build instructions](docs/building.md).
 
-# Credits
-
-Special thanks to the [Dusklight](https://twilitrealm.dev/) team, [TP decompilation](https://github.com/zeldaret/tp) team, the GC/Wii decompilation community, the [Aurora](https://github.com/encounter/aurora) developers, the [TP speedrunning community](https://zsrtp.link), and all [contributors](https://github.com/TwilitRealm/dusklight/graphs/contributors).
-
 # Statement on AI-generated code
 
 I do not know how to code. The furthest my knowledge goes is a little bit of HTML and CSS. I simply wanted a way to play Twilight Princess in VR and scoured the internet for anyone who mentioned a Dusklight mod/port in the works, but came up with nothing, so I decided to take matters into my own hands with Claude Code. 
@@ -53,6 +49,12 @@ With that being said, for a task like this, I believe it is acceptable to create
 I have seen many recent projects spring up in the same vein: vibecoded VR ports of existing games. Everybody is entitled to their own opinion, and different backgrounds will lead people to take different stances. However, I believe that you can either take this VR port of the original game and enjoy it for what it is, regardless of AI or not, or you can simply ignore it and play the game in flatscreen—it's still a fantastic experience.
 
 And yes—I used an em-dash there. You can type it with on your keyboard with Alt+0151. Thanks ChatGPT for ruining informal writing.
+
+# Credits
+
+Special thanks to the [Dusklight](https://twilitrealm.dev/) team, [TP decompilation](https://github.com/zeldaret/tp) team, the GC/Wii decompilation community, the [Aurora](https://github.com/encounter/aurora) developers, the [TP speedrunning community](https://zsrtp.link), and all [contributors](https://github.com/TwilitRealm/dusklight/graphs/contributors).
+
+
 
 <br/>
 <div align="center">

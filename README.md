@@ -37,9 +37,10 @@ Visit the [official installation guide](https://twilitrealm.dev/install/) for fu
 # Building
 
 If you'd like to build Dusklight from source, please read the [build instructions](docs/building.md).
-<details>
-<summary># Statement on AI-generated code</summary>
 
+# Statement on AI-generated code
+<details>
+<summary>Expand</summary>
 I do not know how to code. The furthest my knowledge goes is a little bit of HTML and CSS. I simply wanted a way to play Twilight Princess in VR and scoured the internet for anyone who mentioned a Dusklight mod/port in the works, but came up with nothing, so I decided to take matters into my own hands with Claude Code. 
 
 I do not condone the usage of AI for writing, "art", deepfakes, and music (especially music, screw Suno and its garbage that is polluting streaming services). It should not be people's go-to for asking questions or replacing a search engine; it has repeatedly been shown to hallucinate and take certain statements out of context, spreading misinformation. Heck, I'm not even proud that I used it in this project.
@@ -50,6 +51,7 @@ I have seen many recent projects spring up in the same vein: vibecoded VR ports 
 
 And yes—I used an em-dash there. You can type it with on your keyboard with Alt+0151. Thanks ChatGPT for ruining informal writing.
 </details>
+
 # Credits
 
 Special thanks to the [Dusklight](https://twilitrealm.dev/) team, [TP decompilation](https://github.com/zeldaret/tp) team, the GC/Wii decompilation community, the [Aurora](https://github.com/encounter/aurora) developers, the [TP speedrunning community](https://zsrtp.link), and all [contributors](https://github.com/TwilitRealm/dusklight/graphs/contributors).

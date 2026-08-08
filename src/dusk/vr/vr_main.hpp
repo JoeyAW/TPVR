@@ -7,6 +7,7 @@
 // right after its own aurora_end_frame() -- see tick()/submitFrame()'s
 // own comments below for why the split exists.
 
+#include <dolphin/types.h>     // s16 -- getHeadMoveAngleS()
 #include "dusk/game_clock.h"  // dusk::game_clock::MainLoopPacer
 #include "helpers/gx_helper.h"  // TGXTexObj
 
@@ -138,6 +139,16 @@ void applyTrackedItemMtx(J3DModel* swordModel, J3DModel* shieldModel,
 // while actually rendering to the headset -- this always returns whatever
 // is currently accumulated, VR-active or not.
 float getSmoothTurnYawRad();
+
+// The real, undamped in-game yaw (same s16 binary-angle unit as
+// daAlink_c::mMoveAngle/shape_angle.y) the player's HMD is currently facing,
+// including the VR smooth-turn offset above. Computed once per frame in
+// tick() (0 before the first frame / outside VR). See its backing global
+// g_headMoveAngleS's declaration comment in vr_main.cpp for the bug this
+// exists to fix: movement direction used to be based on the flatscreen
+// third-person camera's own angle (dCam_getControledAngleY()), which has no
+// relationship to where the player's head is actually turned in VR.
+s16 getHeadMoveAngleS();
 
 // Runs the first half of one VR frame: xrWaitFrame/xrBeginFrame, per-eye
 // render (including the fpcM_DrawIterater/cAPIGph_Painter draw call), and

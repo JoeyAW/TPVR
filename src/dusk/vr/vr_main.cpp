@@ -23,6 +23,7 @@
 #include <dolphin/pad.h>  // PADStatus, PADSetVirtualStatus/PADClearVirtualStatus -- gameplay controller input
 
 #include "SSystem/SComponent/c_API_graphic.h"  // cAPIGph_Painter
+#include "SSystem/SComponent/c_math.h"          // cM_atan2s -- getHeadMoveAngleS()
 #include "m_Do/m_Do_graphic.h"                  // mDoGph_gInf_c::captureHudBillboard
 #include "f_pc/f_pc_manager.h"                  // fpcM_DrawIterater, fpcM_Draw
 #include "dusk/game_clock.h"                    // dusk::game_clock::MainLoopPacer
@@ -122,6 +123,26 @@ vr_combat::SwingDetector g_leftSwing = [] {
 // xrPollEvent without needing Session to expose its private instance_.
 // Set once in startup() alongside g_ownedSession.
 XrInstance g_xrInstance = XR_NULL_HANDLE;
+
+// FIXED this session ("Link's movement isn't relative to the headset, like
+// a flatscreen camera is still steering it" -- user report, confirmed
+// accurate): daAlink_c's mMoveAngle (d_a_alink.cpp) used to be built from
+// dCam_getControledAngleY() -- the flatscreen third-person camera's own
+// angle, driven by the base game's normal auto-follow camera logic, with
+// zero relationship to which way the player's actual head is turned --
+// plus only the VR smooth-turn stick's yaw contribution added on top
+// (section 15 of vr-mod-notes). Physically turning your head without
+// touching the stick therefore never changed which way "forward" on the
+// movement stick walked Link. This is the real, undamped game-world yaw
+// the player's head is currently facing (including the smooth-turn
+// offset -- see computeHeadWorldForward()'s own comment), computed once
+// per frame in tick() below and read by d_a_alink.cpp via
+// getHeadMoveAngleS(), replacing dCam_getControledAngleY() entirely as
+// the VR movement-direction basis rather than only patching stick-turn on
+// top of it. Deliberately undamped (unlike the HUD's own
+// g_hudSmoothedWorldForward) -- movement direction should track head
+// rotation immediately, not lag.
+s16 g_headMoveAngleS = 0;
 
 // ROOT-CAUSED this session ("VR stops updating after creating a save file"):
 // true once xrBeginSession() has actually succeeded and false once the
@@ -333,6 +354,10 @@ void applyTrackedItemMtx(J3DModel* swordModel, J3DModel* shieldModel,
 
 float getSmoothTurnYawRad() {
     return dusk::vr::g_smoothTurnYawRad;
+}
+
+s16 getHeadMoveAngleS() {
+    return g_headMoveAngleS;
 }
 
 // Call once at startup, after an aurora::gfx device exists (per the
@@ -879,6 +904,19 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     // padStatus.substickX/Y anymore. Drives VR smooth-turn instead; see
     // updateSmoothTurn() below.
     dusk::vr::updateSmoothTurn(rightStick.x, pacing.presentation_dt_seconds);
+
+    // See g_headMoveAngleS's declaration comment for the bug this fixes.
+    // Computed here (once per frame, not per eye) rather than lazily in
+    // getHeadMoveAngleS() itself, matching this file's existing pattern for
+    // per-frame-cached values (g_smoothTurnYawRad above) -- hmdPose is
+    // already available (located earlier in tick()) and the smooth-turn
+    // yaw offset was just updated on the line above, so both inputs this
+    // needs are fresh for this frame.
+    {
+        const cXyz headForward =
+            vr_render::computeHeadWorldForward(hmdPose, dusk::vr::getSmoothTurnYawRad());
+        g_headMoveAngleS = cM_atan2s(headForward.x, headForward.z);
+    }
 
     constexpr u32 kVrPadPort = PAD_CHAN0;
     const bool wantsVirtualPad = padStatus.button != 0 || padStatus.stickX != 0 ||

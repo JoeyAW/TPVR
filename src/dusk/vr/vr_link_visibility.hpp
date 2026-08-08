@@ -611,6 +611,30 @@ inline void hideArmsAndEars(daAlink_c* link) {
     }
 }
 
+// Mirror of hideArmsAndEars() above, for the third-person fallback case
+// (see updateFrame()'s firstPerson branch below) -- same per-frame
+// re-application reasoning (the base game's own outfit-branch logic can
+// re-hide/re-show an overlapping subset of these same shapes on any given
+// frame for unrelated reasons, so a one-shot show() would get silently
+// reversed) and the same checkWolf() guard: mpLinkModel's material table
+// is swapped to Wolf Link's own set in wolf form, so these indices don't
+// mean "arm/ear" there at all -- touching them would show()/hide() random
+// wolf materials by coincidence of index. Safe to call unconditionally
+// from the non-first-person branch since it already no-ops correctly
+// during wolf form on its own.
+inline void showArmsAndEars(daAlink_c* link) {
+    if (!link || !link->mpLinkModel || link->checkWolf()) return;
+    J3DModelData* modelData = link->mpLinkModel->getModelData();
+    if (!modelData) return;
+
+    const u16 matNum = modelData->getMaterialNum();
+    for (int idx : kArmEarMaterialIndices) {
+        if (static_cast<u16>(idx) >= matNum) continue;
+        J3DShape* shape = modelData->getMaterialNodePointer(idx)->getShape();
+        if (shape) shape->show();
+    }
+}
+
 // ROOT-CAUSED this session ("hands still just follow normal animations,
 // controllers do nothing" -- confirmed real, changing grip-pose data via
 // logHandPosesPeriodically() above, so the XR action wiring itself was
@@ -642,6 +666,65 @@ inline Mtx s_leftHandMtx;
 inline bool s_handMtxValid = false;
 }  // namespace detail
 
+// True when the player should currently be viewing (and the VR camera
+// should render from) Link's own first-person head position; false
+// whenever a third-person fallback is appropriate instead. Shared by
+// updateFrame() (face/hat/arms/ears visibility, below) and
+// getVrCameraEyeAnchor() (the actual camera anchor point, further down
+// this file) -- both need to agree, or the camera could render
+// first-person while the limbs that view is supposed to hide are still
+// showing, or vice versa. (Originally duplicated inline at each call site
+// since getVrCameraEyeAnchor() used to be a strictly simpler condition;
+// factored out once the TALK-mode carve-out below made keeping two copies
+// in sync too easy to get wrong -- see CLAUDE.md section 14/vr-mod-notes'
+// standing lesson about duplicated "matches-the-other-call-site"
+// formulas silently drifting apart.)
+//
+// Wolf Link is always third-person (see the block comment on
+// getVrCameraEyeAnchor() itself for why -- unchanged by this function).
+//
+// FIXED 2026-08-07/08 (user request: "I want the game to stay in first
+// person while talking to npcs"): third-person fallback used to trigger
+// on `checkEventRun()` alone, which cannot distinguish an actual
+// cutscene/transition from ordinary NPC dialogue -- it's ONE shared flag
+// (dEvt_control_c::mEventStatus, `d_event.cpp`) that every event type
+// flips identically: cutscenes (dEvt_type_OTHER_e/COMPULSORY_e), door/
+// transition events (dEvt_type_DOOR_e/TREASURE_e -- confirmed via
+// doorCheck() in d_event.cpp, which sets `mMode = dEvt_mode_DEMO_e`, the
+// SAME mode a scripted cutscene uses), AND plain conversations
+// (dEvt_type_TALK_e) all set it. The one thing that DOES distinguish
+// plain dialogue is dEvt_control_c's own mode: talkCheck()/talkXyCheck()
+// set it to dEvt_mode_TALK_e specifically, while every cutscene/door/
+// treasure/compulsory path sets dEvt_mode_DEMO_e or
+// dEvt_mode_COMPULSORY_e instead -- so checking getMode() ==
+// dEvt_mode_TALK_e is what actually separates "just talking" (stay
+// first-person) from "an authored camera/scripted demo has taken over
+// Link's body" (still needs the third-person fallback, same reasoning as
+// cutscenes below).
+//
+// The first version of this ALSO required !checkPlayerDemoMode(), on the
+// theory that story-important conversations are sometimes staged as full
+// demos with dialogue baked in rather than a plain TALK event, so that
+// flag should distinguish "just talking" from "a demo with dialogue."
+// User-reported regression ("dialogue is still third person") plus a real
+// [dusk::vr::fpdiag] capture proved that theory wrong: checkPlayerDemoMode()
+// reads TRUE for the ENTIRE DURATION of an ordinary, plain conversation
+// (mode=1/TALK the whole time, playerDemoMode=1 the whole time) -- Link
+// apparently runs through some local demo-driven "stop and face the NPC"
+// state just to hold a normal conversation at all, not only for scripted
+// cutscenes-with-dialogue. That guard was therefore excluding essentially
+// ALL dialogue, not just the cutscene case it was meant to carve out.
+// Removed -- dEvt_control_c's own mode is the only signal actually needed;
+// the logged mode=2/DEMO blocks for real cutscenes/other events in the
+// same capture confirm nothing gets confused by dropping it.
+inline bool isFirstPerson(daAlink_c* link) {
+    if (!link || link->checkWolf()) return false;
+    if (!link->checkEventRun()) return true;  // no event at all -- ordinary gameplay
+
+    dEvt_control_c* event = dComIfGp_getEvent();
+    return dComIfGp_event_runCheck() && event && event->getMode() == dEvt_mode_TALK_e;
+}
+
 // Forward-declared here, defined further down (see its own comment) --
 // needed by updateFrame() below so hands anchor to the SAME point the VR
 // camera actually renders from.
@@ -651,11 +734,36 @@ inline void updateFrame(const FrameInput& input) {
     auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
     if (!link) return;
 
-    // Hide face and hat — these are separate J3DModel objects so hiding
-    // their shape tables has no effect on the body or hand models.
-    hideModel(link->mpLinkFaceModel);
-    hideModel(link->mpLinkHatModel);
-    hideArmsAndEars(link);
+    // Only hide face/hat/arms/ears while actually viewing through Link's
+    // own eyes -- otherwise you'd be looking at his third-person body with
+    // holes where his face/hat/limbs should be. See isFirstPerson()'s own
+    // comment for exactly what counts (ordinary gameplay AND plain NPC
+    // dialogue both count as first-person; cutscenes, door/transition
+    // events, and Wolf form don't).
+    //
+    // FIXED 2026-08-07 (user request: "if not in gameplay [i.e. not first
+    // person], show all of Link's limbs"): previously hideModel()'d face
+    // and hat completely unconditionally, and hideArmsAndEars() only
+    // skipped itself for Wolf form, not cutscenes -- so a cutscene's
+    // third-person fallback camera, and (for face/hat specifically) even
+    // Wolf form's, still showed Link with his face/hat missing. Run every
+    // frame either way (not just on the first-person/third-person
+    // transition), matching hideArmsAndEars()'s own existing reasoning: the
+    // base game's per-frame outfit-branch logic can re-hide/re-show an
+    // overlapping subset of these shapes on any given frame for unrelated
+    // reasons, so a one-shot toggle would get silently reversed.
+    const bool firstPerson = isFirstPerson(link);
+    if (firstPerson) {
+        // Hide face and hat — these are separate J3DModel objects so hiding
+        // their shape tables has no effect on the body or hand models.
+        hideModel(link->mpLinkFaceModel);
+        hideModel(link->mpLinkHatModel);
+        hideArmsAndEars(link);
+    } else {
+        showModel(link->mpLinkFaceModel);
+        showModel(link->mpLinkHatModel);
+        showArmsAndEars(link);
+    }
 
     // Compute (but do not yet apply -- see applyTrackedHandMtx() below)
     // both hands' tracked matrices.
@@ -947,6 +1055,69 @@ inline cXyz lerpXyz(const cXyz& a, const cXyz& b, float t) {
     out.z = a.z + (b.z - a.z) * t;
     return out;
 }
+
+// TUNED 2026-08-08 (user report: "when I am moving fast [hands] lag
+// behind" -- root-caused to THIS anchor, since buildHandMtx()'s own
+// controller-offset math has zero smoothing; hands = this anchor + that
+// offset, so any lag here is inherited by both hands and, less
+// noticeably (same lag, but you don't have proprioception for where the
+// CAMERA "should" be the way you do for your own hand), the view itself).
+//
+// dusk::game_clock's sim tick runs at a fixed sim_pace() = 1/30s (~33ms,
+// game_clock.cpp), and advance_main_loop() deliberately targets
+// `render_time = now - kSimPeriodDuration` -- i.e. this whole engine's
+// interpolation scheme (both the shared dusk::frame_interp used by the
+// flatscreen camera, and this VR-local copy of the same technique) is
+// designed to always render exactly one full sim tick BEHIND real time,
+// on purpose, so it only ever blends between two already-known past
+// samples and never has to guess. That's a real, constant ~33ms of
+// latency, not just jitter -- worked through with pen and paper: at
+// step=0 (right after prev/curr were captured) render shows `prev`,
+// which is exactly one tick older than `curr`; at step→1 (just before
+// the next tick) render shows ≈`curr`, which is itself already ~33ms
+// old by then. The delay is constant across the whole cycle, not
+// "averages out" -- which is why it read as a flat, constant-feeling lag
+// rather than jitter once jitter itself was already fixed.
+//
+// Fix: EXTRAPOLATE instead of interpolate, i.e. estimate today's
+// position by continuing the (curr - prev) velocity forward from `curr`
+// by `step` more, instead of only ever blending between two samples that
+// are both already in the past. Implemented by reusing lerpXyz() itself
+// with `t = step + kEyeAnchorExtrapolationGain` instead of plain `step`
+// -- lerpXyz(a, b, t) for t>1 is already exactly
+// `b + (b-a)*(t-1)`, i.e. "keep going past b at the same rate," so no
+// separate function is needed. At gain=1.0 (full compensation), the
+// render target becomes `curr + (curr-prev)*step`, which at step=0 shows
+// `curr` itself (freshly computed THIS tick, zero added lag) and at
+// step→1 shows the predicted position for the tick boundary that's
+// about to happen -- i.e. close to true real-time throughout, not
+// constantly ~33ms behind.
+//
+// Known, accepted tradeoff: unlike pure interpolation (which can never
+// overshoot, since it only ever blends between two confirmed real
+// samples), extrapolation predicts based on the ASSUMPTION that velocity
+// stays roughly constant for one more tick -- if Link suddenly stops
+// (hits a wall, releases the stick) mid-cycle, this can overshoot past
+// the real position for up to one tick (~33ms) before the next real
+// sample corrects it, producing a brief, smoothly-self-correcting
+// (not a hard pop/teleport) settle rather than a hard stop. Judged
+// preferable to a CONSTANT, ever-present lag during all normal fast
+// movement, which is what was actually reported as bothersome. If
+// overshoot on sudden stops/direction changes turns out to be its own
+// problem once tested in-headset, dial `kEyeAnchorExtrapolationGain` down
+// from 1.0 toward 0.0 (0.0 = back to the original pure-interpolation,
+// always-~33ms-behind behavior) rather than reverting this wholesale --
+// same "ship a named, empirically-tunable constant" pattern already used
+// elsewhere in this file (e.g. the swing detector's thresholds,
+// vr_stereo_render.hpp's kHudDampingAlpha).
+//
+// Deliberately scoped to ONLY this VR-local eye-anchor lerp, not the
+// shared dusk::frame_interp module the flatscreen camera and other
+// interpolated matrices use -- this needed to be provably isolated to
+// the one thing the user actually reported (VR hands/view lag), not a
+// blanket engine-wide behavior change with much wider (and untested)
+// blast radius.
+inline constexpr float kEyeAnchorExtrapolationGain = 1.0f;
 }  // namespace detail
 
 // World-space position the VR camera should be anchored to for this frame.
@@ -957,26 +1128,28 @@ inline cXyz lerpXyz(const cXyz& a, const cXyz& b, float t) {
 // get their own offset) for free, since it's built on the same
 // getSubjectEyePos() the flatscreen camera already relies on.
 //
-// During cutscenes/events (daAlink_c::checkEventRun()) OR while transformed
-// into Wolf Link (daAlink_c::checkWolf(), a base-class player-state flag --
-// see d_a_player.h), returns `fallbackEye` (the caller's view->lookat.eye,
-// the normal third-person follow camera) instead, and marks the
-// interpolation state invalid so gameplay doesn't lerp FROM a stale
-// pre-cutscene/pre-transformation position the next time first-person
-// resumes. Wolf form is explicitly kept third-person per user request --
-// Wolf Link's model/animations (four-legged gait, different head joint
-// entirely -- see setBodyPartPos()'s separate wlLocalEye branch) were never
-// designed to be viewed from inside the wolf's own head. An authored
-// cutscene camera isn't guaranteed to be looking at Link at all either --
-// snapping to his head there would put the viewer inside his skull for
-// shots never designed to be seen from there. This mirrors
-// eyePoseToViewMtx's existing comment about view->lookat.eye already being
-// "correct whether that's normal follow-cam or an authored cutscene
-// camera" -- we're narrowing that guarantee to human-form gameplay only,
-// not removing it.
+// During an actual cutscene/door-transition event OR while transformed
+// into Wolf Link -- see isFirstPerson()'s own comment above for exactly
+// what counts as which (ordinary NPC dialogue does NOT trigger this
+// fallback, per 2026-08-07 user request) -- returns `fallbackEye` (the
+// caller's view->lookat.eye, the normal third-person follow camera)
+// instead, and marks the interpolation state invalid so gameplay doesn't
+// lerp FROM a stale pre-cutscene/pre-transformation position the next
+// time first-person resumes. Wolf form is explicitly kept third-person
+// per user request -- Wolf Link's model/animations (four-legged gait,
+// different head joint entirely -- see setBodyPartPos()'s separate
+// wlLocalEye branch) were never designed to be viewed from inside the
+// wolf's own head. An authored cutscene camera isn't guaranteed to be
+// looking at Link at all either -- snapping to his head there would put
+// the viewer inside his skull for shots never designed to be seen from
+// there. This mirrors eyePoseToViewMtx's existing comment about
+// view->lookat.eye already being "correct whether that's normal
+// follow-cam or an authored cutscene camera" -- we're narrowing that
+// guarantee to human-form, non-cutscene gameplay (which now includes
+// plain dialogue), not removing it.
 inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye) {
     auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
-    if (!link || link->checkEventRun() || link->checkWolf()) {
+    if (!isFirstPerson(link)) {
         detail::s_eyeAnchorValid = false;
         return fallbackEye;
     }
@@ -996,7 +1169,48 @@ inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye) {
     }
 
     const float step = dusk::frame_interp::get_interpolation_step();
-    return detail::lerpXyz(detail::s_eyeAnchorPrev, detail::s_eyeAnchorCurr, step);
+    // See detail::kEyeAnchorExtrapolationGain's own comment (above,
+    // next to lerpXyz()) for why this adds the gain to `step` instead of
+    // passing `step` straight through -- extrapolates ahead to roughly
+    // cancel this engine's usual constant ~1-sim-tick render lag, instead
+    // of just smoothing between two already-stale samples.
+    const cXyz extrapolated = detail::lerpXyz(detail::s_eyeAnchorPrev, detail::s_eyeAnchorCurr,
+                                               step + detail::kEyeAnchorExtrapolationGain);
+
+    // TEMP DIAGNOSTIC (2026-08-08 -- user report: "hands still lag behind"
+    // even with the extrapolation fix above applied, specifically while
+    // walking/running in-game). Confirmed via a direct follow-up question
+    // this is genuinely about in-game locomotion speed, not just swinging
+    // the controller while standing still -- so this anchor IS the right
+    // place to keep looking, not a wrong-target theory. Logs the plain
+    // interpolated value (what this function used to always return)
+    // alongside the new extrapolated one and the distance between them,
+    // every 20 frames, so we can see directly: (a) whether extrapolation
+    // is actually moving the anchor by a meaningful amount during real
+    // running (rules an outright no-op/bug in the fix above in or out),
+    // and (b) the raw magnitude of that correction, to judge whether
+    // residual lag from something else entirely (getSubjectEyePos()'s own
+    // upstream animation-driven value, OpenXR frame timing, etc.) is the
+    // actually-dominant remaining factor. Remove once the real cause is
+    // confirmed and fixed.
+    static int s_diagFrame = 0;
+    if ((s_diagFrame++ % 20) == 0) {
+        const cXyz plainInterp =
+            detail::lerpXyz(detail::s_eyeAnchorPrev, detail::s_eyeAnchorCurr, step);
+        const float ddx = extrapolated.x - plainInterp.x;
+        const float ddy = extrapolated.y - plainInterp.y;
+        const float ddz = extrapolated.z - plainInterp.z;
+        const float correctionDist = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+        char msg[256];
+        _snprintf_s(msg, _TRUNCATE,
+            "[dusk::vr::anchordiag] step=%.3f plainInterp=(%.1f,%.1f,%.1f) "
+            "extrapolated=(%.1f,%.1f,%.1f) correction=%.2f\n",
+            step, plainInterp.x, plainInterp.y, plainInterp.z,
+            extrapolated.x, extrapolated.y, extrapolated.z, correctionDist);
+        OutputDebugStringA(msg);
+    }
+
+    return extrapolated;
 }
 
 inline void restoreVisibility() {

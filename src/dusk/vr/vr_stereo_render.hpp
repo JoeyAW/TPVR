@@ -666,14 +666,17 @@ inline void normalizeInPlace(cXyz& v) {
     }
 }
 
-// Called once per frame (not per eye) to advance the damped reference
-// direction toward the current real head pose. `yawRad` is the VR
-// smooth-turn offset (vr_smooth_turn.hpp) -- passed through so the HUD's
-// world-forward reference rotates along with the rest of the scene
-// instead of staying pinned to the un-rotated raw head direction, which
-// would otherwise make the HUD appear to drift out of sync with the
-// smooth-turned view.
-inline void updateHudSmoothing(const XrPosef& headPose, float yawRad) {
+// Real-time (undamped) game-world-space direction the player's head is
+// currently facing, given a raw OpenXR head pose and the current VR
+// smooth-turn yaw offset (vr_smooth_turn.hpp) -- already baked in here
+// (passed straight through to eyePoseToViewMtx) rather than something a
+// caller needs to add on separately. Factored out of updateHudSmoothing()
+// below so it has exactly one implementation: updateHudSmoothing() low-pass
+// filters this for the HUD billboard (steadier, deliberately laggy), while
+// dusk::vr::getHeadMoveAngleS() (vr_main.cpp, VR movement-direction basis)
+// uses it directly, undamped, since movement should track head rotation
+// immediately rather than lag the way the HUD intentionally does.
+inline cXyz computeHeadWorldForward(const XrPosef& headPose, float yawRad) {
     // Reuses eyePoseToViewMtx (already validated -- it drives the entire
     // working 3D VR scene) purely for its rotation math: passing the same
     // position as both the pose and the reference gives a zero position
@@ -690,10 +693,22 @@ inline void updateHudSmoothing(const XrPosef& headPose, float yawRad) {
     // validated for computeHudPose()'s un-damped distance below) = R's
     // third column negated = R^T's third ROW negated = -(row 2 of
     // headViewMtx). This is a derivation, not a guess -- if it's ever wrong
-    // it will self-evidently invert (panel points away instead of toward
-    // you) rather than subtly misbehave.
-    cXyz rawForward(-headViewMtx[2][0], -headViewMtx[2][1], -headViewMtx[2][2]);
-    normalizeInPlace(rawForward);
+    // it will self-evidently invert (panel/movement points away instead of
+    // toward you) rather than subtly misbehave.
+    cXyz forward(-headViewMtx[2][0], -headViewMtx[2][1], -headViewMtx[2][2]);
+    normalizeInPlace(forward);
+    return forward;
+}
+
+// Called once per frame (not per eye) to advance the damped reference
+// direction toward the current real head pose. `yawRad` is the VR
+// smooth-turn offset (vr_smooth_turn.hpp) -- passed through so the HUD's
+// world-forward reference rotates along with the rest of the scene
+// instead of staying pinned to the un-rotated raw head direction, which
+// would otherwise make the HUD appear to drift out of sync with the
+// smooth-turned view.
+inline void updateHudSmoothing(const XrPosef& headPose, float yawRad) {
+    const cXyz rawForward = computeHeadWorldForward(headPose, yawRad);
 
     if (!g_hudSmoothingInitialized) {
         // Snap on the very first frame -- avoids a pop-in lerp from the

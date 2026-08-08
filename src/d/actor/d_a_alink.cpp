@@ -9457,21 +9457,29 @@ void daAlink_c::setStickData() {
         }
 
         mMoveValue = mStickValue;
-        mMoveAngle = mStickAngle + dCam_getControledAngleY(dComIfGp_getCamera(field_0x317c));
 
-        // VR smooth-turn (2026-08-05, see vr_smooth_turn.hpp): the right
-        // thumbstick no longer drives the flatscreen C-stick/camera at all
-        // in VR (unbound per explicit user request), so its yaw offset
-        // never reaches dCam_getControledAngleY() above the normal way.
-        // Add it in here directly instead, so "forward" on the movement
-        // stick keeps meaning forward-relative-to-the-smooth-turned-view
-        // instead of forward-relative-to-a-camera-angle-that-never-moved
-        // -- the standard expectation for VR smooth-turn locomotion (look
-        // around AND walk in the direction you're now facing). cM_rad2s
-        // converts the stored radians into the same s16 binary-angle unit
-        // mStickAngle/mMoveAngle already use.
+        // VR (fixed 2026-08-07 -- user report: "movement is not relative to
+        // the headset... as if a flatscreen camera is still affecting the
+        // direction he moves"): dCam_getControledAngleY() is the flatscreen
+        // third-person camera's own angle, driven by the base game's normal
+        // auto-follow camera logic -- it has no relationship to which way
+        // the player's actual head is turned in VR (the render camera is
+        // anchored to Link's head per vr-mod-notes section 11, but this
+        // GAMEPLAY angle is a completely separate value). The previous VR
+        // fix (2026-08-05, smooth-turn) only ever added the STICK-driven
+        // turn offset on top of this camera angle, so turning your physical
+        // head without touching the right stick never changed which way
+        // "forward" on the movement stick walked Link -- exactly the
+        // reported symptom. Fixed by replacing the whole basis with
+        // dusk::vr::getHeadMoveAngleS(): the real, undamped angle the HMD
+        // is currently facing, which already includes the smooth-turn yaw
+        // offset (see computeHeadWorldForward()'s comment in
+        // vr_stereo_render.hpp) -- so this is a straight substitution, not
+        // an addition on top of it.
         if (dusk::vr::isRenderingToHeadset()) {
-            mMoveAngle += cM_rad2s(dusk::vr::getSmoothTurnYawRad());
+            mMoveAngle = mStickAngle + dusk::vr::getHeadMoveAngleS();
+        } else {
+            mMoveAngle = mStickAngle + dCam_getControledAngleY(dComIfGp_getCamera(field_0x317c));
         }
 
         if (checkMagneBootsOn()) {

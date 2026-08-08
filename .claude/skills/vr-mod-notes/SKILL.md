@@ -149,8 +149,18 @@ C-stick, unbinding the latter per explicit user request — see section 15;
 user-confirmed working in-headset same session. The sword and shield now
 track the real controllers (via the same tracked-hand matrices as
 mpLinkHandModel) instead of floating at Link's flatscreen third-person
-hand position — see section 16; built successfully, **not yet confirmed
-in-headset**. Other known issues below.
+hand position — see section 16; user-confirmed fixed in-headset as of
+2026-08-05 (took three rounds — sheathe/stow gating, then a genuinely
+separate item-joint-vs-hand-joint offset — see section 16 for both).
+Movement direction now actually follows the player's real head tracking
+instead of the flatscreen third-person camera's own angle (which had no
+relationship to where the HMD was looking) — see section 17; user-
+confirmed fixed in-headset 2026-08-07. Link's face/hat/arms/ears — hidden
+during first-person gameplay so the player doesn't see them from the
+inside — now correctly show again during the two third-person fallback
+cases (cutscenes, Wolf Link) instead of staying hidden there too — see
+section 18; user-confirmed fixed in-headset same day. Other known issues
+below.
 
 ## Currently uncommitted working-tree changes
 
@@ -3130,6 +3140,119 @@ CORE technique (round 3's relative-offset preservation) is proven and
 reusable here -- the extra effort is entirely in the branch/gating
 complexity and the accessor-function ripple effect above, not in deriving
 a new approach. **Not started** -- pick this up here when resumed.
+
+### 17. Movement direction not relative to the headset — CONFIRMED FIXED IN-HEADSET 2026-08-07
+
+**Symptom** (user-reported): "Link's movement is not relative to the
+headset. It almost seems as if there is a flatscreen camera still
+affecting the direction he moves in." Precisely accurate, per root cause
+below.
+
+**Root cause**: `daAlink_c`'s movement-direction calc (`d_a_alink.cpp`,
+human-form normal-gameplay branch) has always built
+`mMoveAngle = mStickAngle + dCam_getControledAngleY(...)` —
+`dCam_getControledAngleY()` reads the flatscreen third-person chase
+camera's own angle, driven by the base game's normal auto-follow camera
+logic. That angle has zero relationship to which way the player's head is
+actually turned in VR — the *render* camera is anchored to Link's head
+(section 11), but this GAMEPLAY angle is a completely separate value that
+was never touched. Section 15's smooth-turn work (2026-08-05) only ever
+added the right-STICK's own turn offset on top of this camera angle
+(`mMoveAngle += cM_rad2s(dusk::vr::getSmoothTurnYawRad())`) — so turning
+your physical head without touching the stick never changed which way
+"forward" on the movement stick walked Link. Section 15's fix made
+*look* direction and *stick-driven turn* stay in sync; it never made
+movement direction follow actual head tracking.
+
+**Fix**: replaced the whole basis rather than patching another term onto
+it.
+- `vr_stereo_render.hpp`: factored the raw (undamped) head-forward-
+  direction math already used internally by `updateHudSmoothing()` out
+  into its own reusable `computeHeadWorldForward(headPose, yawRad)` —
+  same "one source of truth" reasoning as `vr_smooth_turn.hpp`'s own
+  header comment (section 14's lesson about duplicated formulas silently
+  drifting out of sync). `updateHudSmoothing()` now just calls it and
+  low-pass-filters the result for the HUD; a second consumer (below) uses
+  it directly, undamped.
+- `vr_main.hpp`/`.cpp`: new `dusk::vr::getHeadMoveAngleS()` — the real,
+  undamped in-game yaw (same s16 binary-angle unit as `mMoveAngle`/
+  `shape_angle.y`) the player's HMD is currently facing, ALREADY
+  including the VR smooth-turn offset (passed straight into
+  `computeHeadWorldForward` as `yawRad`, matching how `eyePoseToViewMtx`
+  itself bakes it in). Computed once per frame in `tick()`, right after
+  `updateSmoothTurn()` (needs that frame's yaw fresh) and using the
+  already-located `hmdPose`, via `cM_atan2s(headForward.x, headForward.z)`
+  — the same `atan2s(x, z)` convention this engine uses everywhere else
+  for a direction vector to world-yaw conversion (`d_a_b_ob.cpp`,
+  `d_bg_w.cpp`, etc.), not a new one invented for this fix. Deliberately
+  undamped, unlike the HUD's `g_hudSmoothedWorldForward` — movement
+  direction should track head rotation immediately, not lag.
+- `d_a_alink.cpp`: `mMoveAngle = mStickAngle + dusk::vr::getHeadMoveAngleS()`
+  when `isRenderingToHeadset()`, replacing
+  `mStickAngle + dCam_getControledAngleY(...)` entirely for that branch
+  (flatscreen keeps the original camera-angle basis unchanged). The old
+  separate `+= cM_rad2s(getSmoothTurnYawRad())` line from section 15 was
+  removed — redundant now that the yaw is already folded into
+  `getHeadMoveAngleS()` itself.
+
+**Scope note, not yet addressed**: `d_a_alink_demo.inc` has an identical
+`mStickAngle + dCam_getControledAngleY(...)` line (a narrow
+demo/cutscene-transition case, `isDemoTypeStart` + `PROC_MOVE`/
+`PROC_WOLF_MOVE`) that was deliberately left untouched — out of scope for
+the reported symptom (normal gameplay), unconfirmed whether it's even
+reachable in a way a player would notice. If VR movement ever feels wrong
+specifically during a demo/cutscene transition, this is the other call
+site to check.
+
+**Confirmed fixed in-headset** — user tested and reported "Fixed."
+
+### 18. Face/hat/arms/ears stayed hidden outside first-person (cutscenes, Wolf Link) — CONFIRMED FIXED IN-HEADSET 2026-08-07
+
+**Symptom** (user request, not a bug report this time — "if not in
+gameplay (or first person, whatever you have the function as) then show
+all of link's limbs"): `vr_link::updateFrame()` (`vr_link_visibility.hpp`)
+hides Link's face, hat, arms, and ears every VR frame so the first-person
+view doesn't show his own head/limbs from the inside (necessary and
+correct while actually looking through his eyes) — but it was doing this
+**unconditionally** for face/hat (`hideModel()`, no gating at all) and
+almost-unconditionally for arms/ears (`hideArmsAndEars()` only skipped
+itself for Wolf form, never for cutscenes). So the two existing
+third-person fallback cases — cutscenes/events (`checkEventRun()`) and
+Wolf Link (`checkWolf()`), see section 11 — showed Link's third-person
+body with his face and hat missing (both cases) and, during cutscenes
+specifically, his arms and ears missing too.
+
+**Fix**: `updateFrame()` now computes
+`firstPerson = !link->checkEventRun() && !link->checkWolf()` — the exact
+same condition `getVrCameraEyeAnchor()` (a few hundred lines further down
+the same file) already uses to decide first-person-head-anchor vs.
+third-person-fallback. Mirrored inline rather than factored into a shared
+helper (two call sites doesn't justify a third piece of indirection).
+When `firstPerson` is true, hides face/hat/arms/ears exactly as before.
+When false, now calls `showModel()` on face/hat and a new
+`showArmsAndEars()` (a straight mirror of the existing
+`hideArmsAndEars()`, same material-index list, same `checkWolf()` guard —
+required because Wolf form reuses `mpLinkModel` with a swapped material
+table, so those indices don't mean "arm/ear" there; touching them in wolf
+form would show/hide random wolf materials by coincidence of index) to
+restore everything. Runs every frame in both directions, not just on the
+first-person/third-person transition — matches `hideArmsAndEars()`'s own
+pre-existing reasoning (the base game's per-frame outfit-branch logic can
+re-hide/re-show an overlapping subset of these same shapes on any given
+frame for unrelated reasons, so a one-shot toggle would get silently
+reversed by that unrelated logic later).
+
+**Known pre-existing dead code, unrelated to this fix, not touched**:
+`vr_link::restoreVisibility()` (same file) already existed to
+`showModel()` face/hat, but nothing anywhere in the codebase actually
+calls it — it's dead code, and even if it were wired up it doesn't restore
+arms/ears either. Not a regression from this session and out of scope for
+the user's request (which was about third-person fallback DURING an
+active VR session, not about what happens after the headset disconnects),
+but worth knowing about if Link's limbs are ever reported stuck hidden
+after a VR session ends.
+
+**Confirmed fixed in-headset** — user tested and reported "Fixed."
 
 ## Key lesson learned this session
 

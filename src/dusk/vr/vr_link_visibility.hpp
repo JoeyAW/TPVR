@@ -789,6 +789,28 @@ inline bool isFirstPerson(daAlink_c* link) {
     return !link->checkPlayerNoDraw();
 }
 
+// Crawling has no single MODE_FLG bit the way swimming has MODE_SWIMMING
+// -- it's a sequence of dedicated daAlink_PROC states instead
+// (PROC_CRAWL_START/_MOVE/_AUTO_MOVE/_END, d_a_alink.h) that mProcID walks
+// through while crawling through a tunnel/gap (confirmed via their use in
+// d_a_alink.cpp, e.g. the PROC_CRAWL_END exclusion at line ~11556). Grouped
+// into one shared helper (used by both the camera-anchor fallback and the
+// tracked-hand disable below) rather than duplicating the four-way
+// comparison at each call site -- same "one shared definition" reasoning
+// as isFirstPerson() itself.
+inline bool isCrawling(daAlink_c* link) {
+    if (!link) return false;
+    switch (link->mProcID) {
+        case daAlink_c::PROC_CRAWL_START:
+        case daAlink_c::PROC_CRAWL_MOVE:
+        case daAlink_c::PROC_CRAWL_AUTO_MOVE:
+        case daAlink_c::PROC_CRAWL_END:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // Forward-declared here, defined further down (see its own comment) --
 // needed by updateFrame() below so hands anchor to the SAME point the VR
 // camera actually renders from.
@@ -950,8 +972,26 @@ inline void applyTrackedHandMtx(J3DModel* handModel) {
 // once-per-tick-interpolated value for it. Called once per real frame from
 // vr_main.cpp's tick(), before the per-eye loop opens (both eyes share the
 // same matrix, no per-eye duplication needed).
+// SWIMMING (user request 2026-08-09): don't force the tracked controller
+// pose onto Link's hands while swimming -- skip entirely so the body's own
+// once-per-sim-tick swim-stroke hand animation (already synced into these
+// same two joints by d_a_alink.cpp's "Always set these" body-joint resync)
+// plays through frame_interp's normal once-per-tick interpolation instead,
+// exactly as it already does on flatscreen. Checked INSIDE this function
+// (rather than skipping the call at the vr_main.cpp call site) so the
+// override write and the mark_live_this_frame() call are skipped together
+// -- marking the joints live without also overriding their pose would just
+// make the swim animation render raw/un-interpolated instead of smoothly
+// blended, the opposite of what's wanted here.
+//
+// CRAWLING (user request 2026-08-09, same fix requested for crawling):
+// identical reasoning -- see isCrawling()'s own comment for why this is a
+// mProcID check rather than a MODE_FLG bit like swimming.
 inline void refreshTrackedHandDrawMtxLive(J3DModel* handModel) {
     if (!handModel || !detail::s_handMtxValid) return;
+
+    auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
+    if (link && (link->checkModeFlg(daAlink_c::MODE_SWIMMING) || isCrawling(link))) return;
 
     applyTrackedHandMtx(handModel);
 
@@ -1483,7 +1523,38 @@ inline cXyz computeRawCoreAnchoredEye(daAlink_c* link) {
 // one, same "one shared definition" reasoning as isFirstPerson() itself.
 // Caller must already know isFirstPerson(link) is true (same precondition
 // as computeRawCoreAnchoredEye() above).
+// SWIMMING (user request 2026-08-09, "fix the camera when swimming"):
+// computeRawCoreAnchoredEye()'s height offset is calibrated ONCE per
+// first-person activation (see s_coreAnchorCalibrated) and held fixed
+// until first-person is left entirely (cutscene/Wolf/etc.) -- entering or
+// leaving the water does NOT reset that calibration, so a player who
+// calibrated standing on land and then goes for a swim keeps a stale,
+// standing-height offset added on top of current.pos, which does not mean
+// the same thing while swimming. The base game's own setBodyPartPos()
+// explicitly special-cases swimming for its OWN eye-position math (see its
+// FLG0_SWIM_UP/MODE_SWIMMING-gated branch, d_a_alink.cpp) -- confirming
+// this really is a case the plain root+fixed-offset model was never
+// designed to cover, not just an untested gap. Rather than reverse-engineer
+// and duplicate that swim-specific math here, fall back to the same
+// original, animation-driven head-joint anchor (getSubjectEyePos()) already
+// used for cutscenes/dialogue below -- the base game's OWN swim-aware eye
+// position, correct by construction for every stance (surface, diving,
+// etc.) with no separate calibration needed. Effectively "use the
+// already-proven first-person head anchor instead of the newer, swim-
+// unverified comfort anchor" -- the same tradeoff this was requested as an
+// explicit either/or ("fix the camera when swimming, or set the camera to
+// first person").
+//
+// CRAWLING (user request 2026-08-09, "do the same fix with crawling"):
+// identical reasoning -- the core anchor's calibrated height offset is
+// captured once while standing and doesn't get invalidated by dropping
+// into a crawl, so it's just as stale here as it was for swimming. Same
+// fix: fall back to the raw head-joint anchor instead. See isCrawling()'s
+// own comment for why this is an mProcID check, not a MODE_FLG bit.
 inline cXyz computeRawEyeAnchor(daAlink_c* link) {
+    if (link->checkModeFlg(daAlink_c::MODE_SWIMMING) || isCrawling(link)) {
+        return *link->getSubjectEyePos();
+    }
     if (!link->checkEventRun()) {
         // Ordinary gameplay -- root/core-anchored, section 23.
         return computeRawCoreAnchoredEye(link);

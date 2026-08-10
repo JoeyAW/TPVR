@@ -221,7 +221,22 @@ root-relative eye math this doesn't yet account for). A further, still
 later 2026-08-09 session split the camera anchor itself: gameplay keeps
 the core anchor, but cutscenes/NPC dialogue now use the ORIGINAL animated
 head-joint anchor instead (section 23's "gameplay vs. cutscene anchor
-split" update), confirmed in-headset. Other known issues below.
+split" update), confirmed in-headset. Yet another, still later 2026-08-09
+session addressed the swimming gap flagged above: the camera now falls
+back to the same original animated head-joint anchor while
+`MODE_SWIMMING` is set (same reasoning as the cutscene/dialogue split —
+the core anchor's height calibration doesn't hold up in water), and
+tracked-hand controller override is skipped while swimming too, so the
+normal swim-stroke arm animation shows instead of the hands fighting with
+controller tracking (see section 23's "Swimming camera fix" update) —
+**camera half CONFIRMED WORKING in-headset; hand half did NOT work,
+not yet root-caused, user explicitly deferred further investigation.**
+The identical pair of fixes was then extended to crawling (a
+`daAlink_PROC`-state check via a new `isCrawling()` helper, since crawling
+has no single `MODE_FLG` bit the way swimming does) — **the hand half
+failed here too ("locked in an animation," user deferred further work on
+both swimming's and crawling's hand fix)**, camera half not separately
+confirmed (see section 23's "Crawling" update). Other known issues below.
 
 ## Currently uncommitted working-tree changes
 
@@ -4533,6 +4548,153 @@ good." Closes out this follow-up; the swimming/crawling gaps immediately
 above are still open and unrelated to this change (they're about the
 core-anchor branch specifically, which this fix left untouched in its
 own logic).
+
+### Swimming camera fix + tracked hands disabled while swimming — built 2026-08-09, NOT yet confirmed in-headset
+
+**Goal** (explicit user request): "fix the camera when swimming, or set
+the camera to first person, and disable the hand animation while
+swimming."
+
+**Camera fix** (`vr_link_visibility.hpp`'s `computeRawEyeAnchor()`):
+acted on the theory already recorded in section 23's swimming gap —
+`computeRawCoreAnchoredEye()`'s vertical offset is calibrated ONCE per
+first-person activation (`s_coreAnchorCalibrated`) and held fixed until
+first-person is left entirely (cutscene/Wolf/etc.); entering or leaving
+the water does NOT reset that calibration, so a player who calibrated
+standing on land and then goes for a swim keeps a stale, standing-height
+offset added on top of `current.pos` — which does not mean the same thing
+while swimming. `setBodyPartPos()` (`d_a_alink.cpp`) already special-cases
+swimming for its own eye math (its `FLG0_SWIM_UP`/`MODE_SWIMMING`-gated
+branch), confirming this really is a case the plain root+fixed-offset
+model was never designed to cover. Rather than reverse-engineer and
+duplicate that swim-specific math, `computeRawEyeAnchor()` now checks
+`link->checkModeFlg(daAlink_c::MODE_SWIMMING)` first and, when true,
+returns `*link->getSubjectEyePos()` directly — the same original,
+animation-driven head-joint anchor already used for cutscenes/dialogue
+(and the pre-section-23 anchor for all gameplay) — instead of the
+core-anchored branch. This is deliberately the "set the camera to first
+person" half of the user's either/or: falls back to the already-proven
+first-person head anchor instead of the newer, swim-unverified comfort
+anchor, rather than attempting to derive a swim-specific core-anchor
+calibration from scratch. `getVrBodyPositionOffset()` did not need a
+separate change — it already calls `computeRawEyeAnchor()` (not
+`computeRawCoreAnchoredEye()` directly, per the "one shared raw-anchor
+definition" reasoning above), so it automatically stays consistent with
+whatever `getVrCameraEyeAnchor()` used this frame.
+
+**Hands disabled while swimming** (`vr_link_visibility.hpp`'s
+`refreshTrackedHandDrawMtxLive()`): added an early return when
+`link->checkModeFlg(daAlink_c::MODE_SWIMMING)` is true, skipping BOTH the
+tracked-pose override (`applyTrackedHandMtx()`) and the
+`mark_live_this_frame()` calls together — marking the joints live without
+also overriding their pose would just make the swim-stroke animation
+render raw/un-interpolated instead of smoothly blended, the opposite of
+what's wanted. With the override skipped, `mpLinkHandModel`'s hand joints
+are left holding whatever the body's own once-per-sim-tick swim-stroke
+sync last wrote (the pre-existing "Always set these" resync in
+`d_a_alink.cpp`), and since nothing marks them live this frame,
+`frame_interp`'s normal once-per-tick interpolation applies to them —
+i.e. the swim-stroke animation plays through smoothly, exactly as it
+already does on flatscreen, instead of the player's tracked controller
+pose fighting with it.
+
+**Both changes are scoped to `MODE_SWIMMING` specifically** — checked via
+the same public `checkModeFlg()` accessor `d_a_alink.cpp` itself uses
+internally (confirmed public: `daAlink_c`'s `MODE_FLG` enum and
+`checkModeFlg()` both sit in one continuous `public:` block spanning
+lines 232–1414 of `d_a_alink.h`, which already covers other methods this
+file calls directly on `daAlink_c*`, e.g. `checkWolf()`/`checkEventRun()`).
+Sword/shield tracking (`refreshTrackedItemMtxLive()`) and crawling were
+NOT touched — out of scope for this request; crawling remains an open,
+untested gap per section 23.
+
+**Built successfully** (RelWithDebInfo) — only `vr_main.cpp` needed
+recompiling (transitively includes the header), clean link, no new
+warnings.
+
+**IN-HEADSET RESULT: camera fix CONFIRMED WORKING. Hand-disable fix did
+NOT work.** User: "The camera is fixed but not the hands," then
+explicitly deferred further investigation ("Honestly its ok ill do it
+another time" — paused, not abandoned). Not yet root-caused why
+`refreshTrackedHandDrawMtxLive()`'s `MODE_SWIMMING` early-return had no
+visible effect on the hands specifically — two untested hypotheses, ranked
+by how easy they are to rule in/out first: (a) `MODE_SWIMMING` may not
+actually be the flag set for however the user was swimming — the base
+game's own `setBodyPartPos()` gates its OWN swim-eye branch on
+`FLG0_SWIM_UP` + `checkModeFlg(0x40000)` together, not `MODE_SWIMMING`
+alone, so the two may not coincide the way this fix assumed (this would
+also cast a little doubt on why the CAMERA half worked, unless
+`MODE_SWIMMING` and the base game's own swim-eye gate happen to overlap
+for the common case but diverge at the edges — worth checking directly
+with a log rather than assuming); (b) something else may still be
+writing/marking the hand joints live this frame despite the early return
+(e.g. `applyTrackedItemMtx`'s still-present, nominally-dead
+`d_a_alink.cpp` call site, or an untraced second tracked-hand write path
+not audited this session). Needs a real in-headset log capture (confirm
+which mode/flag is actually true while the symptom is visible, and
+whether `refreshTrackedHandDrawMtxLive()`'s early return is actually being
+hit) before guessing again — same discipline section 20's saga eventually
+had to fall back on after enough blind attempts.
+
+### Crawling — same camera + hand-tracking fix applied 2026-08-09, NOT yet confirmed in-headset
+
+**Goal** (explicit user follow-up: "I need you to do the same fix with
+crawling"). Crawling has no single `MODE_FLG` bit the way swimming has
+`MODE_SWIMMING` — it's a sequence of dedicated `daAlink_PROC` states
+instead (`PROC_CRAWL_START`/`_MOVE`/`_AUTO_MOVE`/`_END`, `d_a_alink.h`)
+that `mProcID` walks through while crawling through a tunnel/gap
+(confirmed via their existing use in `d_a_alink.cpp`, e.g. the
+`PROC_CRAWL_END` exclusion around line 11556). Added a shared
+`vr_link::isCrawling(daAlink_c*)` helper (a `switch` over `mProcID`
+against all four crawl states) rather than duplicating a four-way OR at
+each call site — same "one shared definition" reasoning as
+`isFirstPerson()`. `mProcID` and the `PROC_CRAWL_*` enum values are public
+(confirmed: `daAlink_c`'s body has no top-level `private:`/`protected:`
+specifier between its opening `public:` and well past both declarations).
+
+Both of swimming's fixes were extended with `|| isCrawling(link)`:
+- `computeRawEyeAnchor()` (`vr_link_visibility.hpp`, `detail` namespace):
+  now falls back to the raw head-joint anchor (`getSubjectEyePos()`)
+  while crawling too, same reasoning as swimming — the core anchor's
+  height calibration is captured once while standing and doesn't get
+  invalidated by dropping into a crawl.
+- `refreshTrackedHandDrawMtxLive()`: now also skips the tracked-hand
+  override (and its `mark_live_this_frame()` calls) while crawling, same
+  reasoning as swimming — let the body's own once-per-sim-tick crawl-pose
+  hand animation play through normal interpolation instead of fighting
+  with controller tracking.
+
+**Built successfully** (RelWithDebInfo) — only `vr_main.cpp` needed
+recompiling, clean link, no new warnings.
+
+**IN-HEADSET RESULT: hand-disable fix did NOT work here either** — user:
+"Hands are still locked in an animation but its fine for now" (explicitly
+deferred, not asking for another attempt right now). Camera half not
+separately called out this time — not confirmed either way for crawling,
+unlike swimming's camera half which WAS separately confirmed working.
+
+**New data point, not yet acted on**: the phrasing this time — "locked in
+an animation" — is more specific than swimming's plain "still lag[ging]"
+report and may describe a different symptom: not "hands still track the
+controller" (the swimming report's apparent meaning) but hands frozen on
+a single animation frame/pose, not moving at all. Both fixes (swimming
+and crawling) share the exact same code shape (an early return in
+`refreshTrackedHandDrawMtxLive()` before the override write), so this is
+a genuine, useful data point in favor of hypothesis (b) from the swimming
+writeup above — something other than this early-return is determining
+what the hands actually show, since two independent state checks
+(`MODE_SWIMMING` vs. `isCrawling()`'s `mProcID` switch) are both failing
+to produce the intended "normal body animation plays instead" result, and
+now with a more specific "frozen" symptom rather than "still tracked."
+Possible next angle if revisited: check whether skipping the override
+actually leaves the joints at whatever the base game's OWN per-frame
+hand-joint resync last wrote (the assumption both fixes relied on), or
+whether something about NOT calling `mark_live_this_frame()` while the
+override is also skipped causes `frame_interp` to freeze on a stale
+once-per-tick snapshot instead of interpolating normally — this second
+possibility would directly explain "locked in an animation" (frozen) as
+opposed to "still tracking the controller." Not investigated — user
+explicitly deferred.
 
 ## Key lesson learned this session
 

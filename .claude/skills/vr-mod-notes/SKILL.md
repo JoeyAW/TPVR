@@ -159,8 +159,69 @@ confirmed fixed in-headset 2026-08-07. Link's face/hat/arms/ears — hidden
 during first-person gameplay so the player doesn't see them from the
 inside — now correctly show again during the two third-person fallback
 cases (cutscenes, Wolf Link) instead of staying hidden there too — see
-section 18; user-confirmed fixed in-headset same day. Other known issues
-below.
+section 18; user-confirmed fixed in-headset same day. VR now stays
+first-person during ordinary NPC dialogue instead of falling back to
+third-person the way it still correctly does for actual cutscenes and
+door/transition events — see section 19; user-confirmed fixed in-headset
+2026-08-08, after a first attempt that turned out to exclude basically
+all dialogue due to an untested assumption about `checkPlayerDemoMode()`,
+caught via a real log capture rather than a second guess. Separately,
+VR hands/body measurably lag behind during fast in-game locomotion — a
+long investigation (extrapolation, late-latching, a body-position-offset
+fix, a legacy-draw-pass corruption fix) each turned out real but
+insufficient, until two real debugger call stacks (2026-08-09) found the
+actual, final root cause: `mDoExt_modelEntryDL()` (`m_Do_ext.cpp`, called
+from `daAlink_c::modelDraw()` — the shared entry point for Link's body,
+hands, sword, shield, and held item) skips the real matrix/geometry
+resubmission entirely unless `dusk::frame_interp::is_sim_frame()` is
+true — which is only ~30 times/sec (physics-tick rate), not the ~60-90Hz
+VR actually renders at. Correct and intentional for flatscreen (a lower-
+level interpolation system substitutes smoothed matrices instead), but
+VR's tracked-hand/sword/body overrides don't go through that system at
+all — they were computing genuinely correct data every eye this whole
+investigation, it just almost never reached the actual rendered frame.
+Fixed by calling the always-fully-updates sibling function,
+`mDoExt_modelUpdateDL()`, instead, while a real VR eye pass is open. See
+section 20's update — **built, not yet tested in-headset**. Cutscenes
+now also stay first-person, but only when
+Link's own body is actually loaded/drawn for that shot (checked via
+`checkPlayerNoDraw()`, third-person fallback stays for shots where he's
+hidden/swapped for a stand-in) — see section 21; first in-headset test
+found mounted (Epona) cutscenes anchored the camera inside the horse's
+head, fixed with a carve-out (mounted cutscenes stay third-person,
+ordinary mounted gameplay unaffected) — user-confirmed fixed in-headset
+2026-08-08. Night-sky stars, which looked wrong in VR (same camera-locked-
+effect class as the sun/heat-wave kagerou bugs — billboards oriented off
+the stale flatscreen camera matrix), are now disabled in VR only — see
+section 22; user-confirmed fixed in-headset 2026-08-08. The VR camera is
+now anchored to Link's root/core position (physics-driven, not animated)
+plus a calibrated fixed height offset, instead of his animated head joint
+directly, as a deliberate motion-sickness-comfort tradeoff (no longer
+tilts/bobs with head/torso animation) — see section 23, user-confirmed
+fixed in-headset 2026-08-09, with a genuine bonus: **this also fixed
+section 20's body-lag symptom** ("body doesn't lag behind" — the leading
+theory now is that it was really an oscillating-extrapolation-vs-static-
+mesh mismatch, not the geometry-resubmission-frequency bug section 20 had
+pinned it on; see section 23 for the full reasoning). **Hands were
+still laggy as of the 2026-08-09 session above, but this is now FULLY
+RESOLVED (a separate, later 2026-08-09 session)** — see section 20's
+"ACTUALLY FINALLY RESOLVED" update for the real root cause
+(`daAlink_c::draw()`'s dead call site, plus a stale once-per-tick
+`frame_interp` interpolation silently overriding any per-eye VR write
+regardless of correctness) and fix. Sword/shield, reported laggy in that
+same later session, are fixed too (same root cause, same fix shape). A
+follow-up nudge (to clear Link's hunched-forward neck/back from view
+while running) was added and tuned the same session — settled at 3in up/
+6in forward, CONFIRMED FIXED IN-HEADSET ("Yup thats the right spot"). Two
+new gaps surfaced, not yet investigated: **swimming needs a fix** (user's
+words) and **crawling needs testing** — both because section 23's height
+calibration was only reasoned through for standing gameplay; see section
+23 for what's already known (the base game has its own swim-specific
+root-relative eye math this doesn't yet account for). A further, still
+later 2026-08-09 session split the camera anchor itself: gameplay keeps
+the core anchor, but cutscenes/NPC dialogue now use the ORIGINAL animated
+head-joint anchor instead (section 23's "gameplay vs. cutscene anchor
+split" update), confirmed in-headset. Other known issues below.
 
 ## Currently uncommitted working-tree changes
 
@@ -3253,6 +3314,1225 @@ but worth knowing about if Link's limbs are ever reported stuck hidden
 after a VR session ends.
 
 **Confirmed fixed in-headset** — user tested and reported "Fixed."
+
+### 19. VR stays first-person during NPC dialogue instead of falling back to third-person — CONFIRMED FIXED IN-HEADSET 2026-08-08
+
+**Goal** (explicit user request, and a genuine follow-up investigation
+first — see below): "I want the game to stay in first person while
+talking to npcs." Before this, `isFirstPerson()`/`checkEventRun()`
+(section 18) treated ANY running event — cutscene, door/transition, or
+plain dialogue — identically, falling back to third-person for all of
+them.
+
+**Investigation first** (user asked to "find out" whether cutscenes,
+dialogue, and transitions/doors are three separate functions before
+requesting a fix): they are NOT — confirmed by reading `d_event.h`/
+`d_event.cpp`. All three are dispatched as different `dEvt_type_e` values
+(`TALK_e`, `OTHER_e`/`COMPULSORY_e`, `DOOR_e`/`TREASURE_e`) through ONE
+shared `dEvt_control_c` object's `entry()`/`Step()` state machine, and
+every type flips the exact same `mEventStatus` bit that
+`dComIfGp_event_runCheck()` (and thus `daAlink_c::checkEventRun()`)
+reads — confirmed door events specifically also set `mMode =
+dEvt_mode_DEMO_e`, the SAME mode a scripted cutscene uses (`doorCheck()`
+in `d_event.cpp`), and even call `sceneChange()` →
+`dStage_changeScene4Event()` to actually load the new area once the door
+animation finishes. The ONE thing that DOES distinguish plain dialogue is
+`dEvt_control_c`'s own `mMode`: `talkCheck()`/`talkXyCheck()` set it to
+`dEvt_mode_TALK_e` specifically. Separately, message/text-box display has
+its own genuinely independent tracker, `dMsgObject_c`/
+`dMsgObject_isTalkNowCheck()`, NOT consulted by `checkEventRun()` at all —
+worth knowing about if a future request wants VR behavior keyed
+specifically on "a textbox is on screen" rather than "an event is
+running."
+
+**Fix, round 1** (`vr_link_visibility.hpp`): refactored the previously-
+duplicated first-person condition (section 18's inline `!checkEventRun()
+&& !checkWolf()`, copy-pasted at two call sites) into one shared
+`isFirstPerson(daAlink_c*)`, called by both `getVrCameraEyeAnchor()` and
+`updateFrame()` so they can't drift out of sync (same standing lesson as
+`vr_smooth_turn.hpp`'s own header comment). First version: stay
+first-person if no event is running, OR if an event IS running but its
+mode is `dEvt_mode_TALK_e` AND `!link->checkPlayerDemoMode()` (the latter
+guard reasoned from an untested theory: some story-important
+conversations are staged as full demos with dialogue baked in rather than
+a plain TALK event, so this should exclude those). Built clean.
+
+**User report: "Still third person"** (dialogue didn't stay first-person
+at all). Rather than guess a second time, added temporary
+`[dusk::vr::fpdiag]` logging (`isFirstPerson()`) printing
+`runCheck`/`mode`/`playerDemoMode`/`result` on every state change plus
+every 60 frames while an event is active. **Real capture proved the
+`checkPlayerDemoMode()` theory wrong**: during an entire real, ordinary
+conversation (`mode=1`/TALK for its whole duration), `playerDemoMode`
+read `true` for the ENTIRE conversation too — Link apparently runs
+through some local demo-driven "stop and face the NPC" state just to
+hold a normal conversation at all, not only for staged cutscenes-with-
+dialogue. That guard was therefore excluding essentially ALL dialogue,
+not just the narrow cutscene case it was meant to carve out. **Fix, round
+2**: removed the `!checkPlayerDemoMode()` condition entirely —
+`isFirstPerson()` now stays first-person for ANY event whose
+`dEvt_control_c` mode is `TALK`, full stop. The logged `mode=2`/DEMO
+blocks for real cutscenes/other events in the same capture confirmed
+nothing gets confused by dropping it. Diagnostic logging removed once
+this was root-caused (per this project's normal practice).
+
+**Confirmed fixed in-headset** — user tested the round-2 build.
+
+### 20. VR hands lag behind during fast in-game movement — INVESTIGATED, ONE FIX LANDED (measurable but not the cause), ROOT CAUSE STILL UNCONFIRMED, PAUSED 2026-08-08
+
+**Symptom** (user-reported): "When I am moving fast they [the hands] lag
+behind." Confirmed via follow-up questions to be specifically about
+in-game locomotion speed (walking/running via the movement stick), not
+swinging the physical controller while standing still, and specifically
+just the hands — the world/camera stays visually smooth (rules out a
+frame-rate/stutter explanation), and it's just as bad in a straight line
+as while turning (rules out a curved-motion-specific explanation).
+
+**Theory 1 (real, measurable, but proven NOT the cause of this
+symptom)**: `getVrCameraEyeAnchor()` (section 11) lerps Link's
+sim-tick-rate `getSubjectEyePos()` between the last two committed sim
+ticks — worked through the math against `dusk::game_clock`'s actual
+`sim_pace() = 1/30s` and its `render_time = now - kSimPeriodDuration`
+design (`game_clock.cpp`): this interpolation scheme renders a CONSTANT
+~33ms (one full sim tick) behind real time, always, not just occasional
+jitter. **Fix applied** (`vr_link_visibility.hpp`, `detail::
+kEyeAnchorExtrapolationGain`): switched the anchor from interpolating
+between the two past samples to extrapolating past the most recent one —
+reusing the existing `lerpXyz(a, b, t)` helper with `t = step + gain`
+(gain=1.0 default; `lerpXyz` for `t>1` already extrapolates past `b`, no
+separate function needed) — which the math shows should cancel almost
+all of that constant lag for smooth/near-constant-velocity motion.
+Deliberately scoped to only this VR-local anchor, not the shared
+`dusk::frame_interp` module the flatscreen camera uses.
+
+**Verified via a real capture that the fix is genuinely active**: added
+temporary `[dusk::vr::anchordiag]` logging comparing the old
+(plain-interpolated) vs new (extrapolated) anchor value every 20 frames.
+During real running, this showed substantial, real corrections (mostly
+20-95 game units per sample, i.e. roughly 0.2-1 metre at this engine's
+~100-units-per-metre scale), dropping to near-zero the instant the player
+stopped moving — proof the mechanism is doing real, non-trivial work, not
+a no-op.
+
+**User-tested anyway: "Hands still lag behind," "feels exactly the same
+as before," "just as bad in a straight line."** This combination is
+actually a mathematical proof the anchor's own timing was NEVER visible
+in the first place, not just that the fix didn't help enough: hands and
+the camera share the IDENTICAL `eyePos` anchor value every frame (same
+`getVrCameraEyeAnchor()` call, cached once per frame in
+`vr_link_visibility.hpp`'s `updateFrame()`), so `hand_world - camera_world`
+algebraically cancels `eyePos` out ENTIRELY regardless of how
+accurate/laggy it is — re-derived precisely: with `hmdRefPos` confirmed
+(by reading the actual `EyeParams` construction in `vr_main.cpp`) to be
+`hmdPose.position`, i.e. the SAME live per-frame HMD position used by
+both the camera's offset-from-head math (`eyePoseToViewMtx`) and the
+hand's offset-from-head math (`buildHandMtx`), `hand_world - camera_world
+= (controllerPose - eyePose) * scale` — completely independent of both
+`eyePos` AND `hmdPos`, both already fresh/live every frame. **The
+extrapolation fix is left in place** (real, harmless, measurably reduces
+a genuine — if apparently imperceptible in practice — timing error), but
+it is CONFIRMED not the answer to this symptom.
+
+**Re-read `buildHandMtx()` (`vr_link_visibility.hpp`) end to end to
+double-check for any other smoothing**: none found — `dx,dy,dz =
+controllerPose - hmdPos` (both this-frame, live, no filtering), rotated
+by the current smooth-turn yaw, added onto the anchor. The position math
+is clean.
+
+**Leading remaining theory, NOT YET CONFIRMED**: VR compositor
+reprojection. Most OpenXR runtimes correct the rendered frame for
+last-moment HEAD rotation right before actually displaying it (this is
+why the world/camera stays smooth even under real frame-timing variance)
+— but that correction is head-orientation-based and doesn't know about
+or adjust arbitrary rendered geometry like tracked-hand meshes. If there
+is ANY gap between when this app samples the controller pose
+(`g_session->predictedDisplayTime()`, already the OpenXR-recommended best
+practice) and when the frame is actually displayed, the world gets
+silently corrected for it by the runtime and the hands do not — which
+would produce exactly "world smooth, hands specifically lag," and would
+plausibly get worse under any timing variance correlated with movement
+(more to render/stream while running fast). This exactly matches every
+constraint gathered from the user's answers. **Not proven** — this is
+the best remaining hypothesis after ruling out the anchor, turning-
+specific error, and frame-rate stutter, not something confirmed via a
+capture the way the anchor theory was.
+
+**Proposed next step, NOT STARTED, paused per explicit user request
+("Pause here")**: late-latching — re-locate/re-sample the controller grip
+poses as close as possible to actual frame submission (near
+`xrEndFrame`) instead of once near the top of `tick()`, and re-apply just
+the hand transform update at that later point, narrowing the
+sample-to-display gap specifically for hands. This is a real
+restructuring of the frame loop (hand pose sampling currently happens
+once, early, alongside everything else in `tick()`), not a quick patch —
+scope it properly before attempting, and re-verify with a fresh
+diagnostic capture (raw controller pose vs. final applied matrix
+translation, frame-by-frame) rather than assuming this theory is correct
+without evidence, the same discipline that ruled out the previous three
+theories here.
+
+**RESUMED 2026-08-08 — late-latching implemented as scoped above, built,
+NOT yet tested in-headset.** Per user request to resume ("I need to fix
+link's hands lagging behind"), implemented exactly the late-latching
+approach this section already scoped, rather than a new theory.
+
+**What changed**:
+- `vr_link_visibility.hpp`: factored the two `buildHandMtx()` calls
+  `updateFrame()` used to inline directly into a new shared
+  `computeTrackedHandMatrices(hmdPos, rightControllerPose,
+  leftControllerPose, eyeAnchor, yawRad)` — one implementation, callable
+  from both `updateFrame()` (still runs once early, mainly so
+  face/hat/arm visibility and the hand matrices are never left
+  uninitialized before the per-eye loop starts) and the new late-latch
+  call site below. Also removed a stale `[dusk::vr::handoffset]` TEMP
+  DIAGNOSTIC log that had been sitting in this exact block since section
+  12's position-tracking investigation — labeled "remove once confirmed
+  fixed" and position was confirmed fixed back on 2026-08-02; left alone
+  until now only because nothing had needed to touch this block since.
+- `vr_main.cpp`'s `applyTrackedHandMtx()` — already the proven "last
+  write before the draw" call site (section 12), invoked once per eye
+  from `d_a_alink.cpp` right before `modelDraw(mpLinkHandModel, ...)` —
+  now re-locates the HMD + both controller grip `XrSpace`s AGAIN right
+  there (same `predictedDisplayTime`, but called later in real wall-clock
+  time than `tick()`'s single early sample) and calls
+  `computeTrackedHandMatrices()` fresh with that re-located data,
+  immediately before `vr_link::applyTrackedHandMtx()` writes the result
+  into the joints. This runs twice per frame (once per eye) — each
+  `xrLocateSpace` call is cheap (no GPU sync), so no measurable perf
+  concern expected (not separately measured this session).
+- Needed a `static XrPosef locateSpace(...)` forward declaration added
+  near the top of the file — the real definition sits later in
+  `vr_main.cpp`, after `applyTrackedHandMtx()`'s existing position in the
+  file. Hit (and fixed) a real C++ rule while doing this: a default
+  argument can only be specified ONCE across a declaration+definition
+  pair in the same scope — had it on both initially, which is a hard
+  compile error ("redefinition of default argument"); moved
+  `XrSpaceLocationFlags* outFlags = nullptr`'s default onto the new
+  forward declaration only, dropped from the later definition.
+
+**Why re-locating with the SAME `predictedDisplayTime` can still help**
+(the reasoning this rests on, written inline in the code too): there's no
+legal way to get a genuinely later predicted timestamp mid-frame (a
+second `xrWaitFrame` isn't valid between `xrBeginFrame`/`xrEndFrame`) —
+but `xrLocateSpace`'s prediction for a given target time is computed from
+whatever real IMU/tracking samples the runtime has AT CALL TIME,
+extrapolated forward to that timestamp. Calling it again later in real
+wall-clock time — after `tick()`'s HUD/minimap capture,
+`xrAcquireSwapchainImage` (can block on the GPU), `xrLocateViews`, and
+this eye's own full `fpcM_DrawIterater()`+`cAPIGph_Painter()` scene
+traversal have all already run — lets the runtime use fresher real data
+for that same extrapolation. This is the standard "late-latching"
+technique other VR engines use for exactly this kind of hand-tracked-
+geometry latency, without needing to restructure around a second
+frame-wait. **This is still the leading theory from this section, not a
+newly-proven one** — the fix targets the SAME hypothesized cause
+(sample-to-display gap) the pause left off on, not a re-derivation.
+
+**Diagnostic logging added, deliberately left in place for the first
+test** (per this project's "verify a fix is materially active before
+trusting a visual report" discipline — same one section 20's own
+extrapolation fix used, and the same one that caught that fix DOING real
+work while still not being the actual answer): `[dusk::vr::latelatch]`,
+throttled to ~9Hz, logs how far the late-latched sample moved the right
+hand's position relative to the frame's original early sample (still
+cached in `detail::s_rightHandMtx` at the moment this reads it, just
+before being overwritten) — a `correction` distance near zero at rest,
+growing during real movement, would confirm the mechanism is doing
+real, non-trivial work; nonzero-but-still-laggy in-headset would (like
+section 20's extrapolation fix) mean this genuinely isn't the answer
+either, not that it's broken.
+
+**Built successfully** (RelWithDebInfo) — only `vr_main.cpp` needed
+recompiling, clean link, no new warnings.
+
+**NOT yet tested in-headset.** Next step for whoever picks this up:
+launch in VR, move at normal/fast locomotion speed, and report (a)
+whether hand lag is actually reduced or gone, and (b) paste back a few
+`[dusk::vr::latelatch]` lines from during that movement so the
+`correction` magnitude is on record either way. If lag persists despite
+real, nonzero corrections being logged, that's strong evidence this
+late-latching theory — like eye-anchor extrapolation before it — isn't
+the actual cause, and the next candidate to investigate would be
+something downstream of pose sampling entirely (e.g. whether the
+runtime's reprojection is positional/depth-aware at all for this
+headset/runtime, which would explain why static world content stays
+smooth but moving hand geometry doesn't benefit the same way — not yet
+looked into). Remove the `[dusk::vr::latelatch]` log once a real
+in-headset verdict is in, per this project's normal practice.
+
+**FIRST IN-HEADSET TEST (same day): "It is fixed in the intro but they lag
+behind in gameplay."** Important nuance, likely NOT the clean win it
+sounds like at first read: this section's ORIGINAL symptom scoping (top
+of section 20) already established standing-still hand movement was
+NEVER broken — the reported lag was specifically about in-game locomotion
+(walking/running via the stick), confirmed via explicit follow-up at the
+time. An "intro" sequence is very likely stationary (cutscene or
+standing at a fixed spot before gaining movement control) — meaning
+"fixed in the intro" may just be re-confirming the SAME pre-existing
+working baseline (stationary hand movement was always fine), not
+evidence the late-latch fix changed anything. "Lag behind in gameplay"
+is the actual, still-unsolved original symptom, unchanged. **Do not treat
+this as "mostly fixed, one edge case left"** — treat it as "possibly a
+no-op for the real symptom" until proven otherwise by real data.
+
+**Next step, not yet done**: get the user to capture
+`[dusk::vr::latelatch]` lines specifically WHILE running/moving (not
+standing still) and report back. Two things that log settles either way:
+(a) whether `correction` is meaningfully nonzero during real locomotion
+at all (if it's tiny/near-zero even while moving, that's evidence
+`xrLocateSpace`'s prediction genuinely isn't changing between the early
+and late sample points for this runtime, meaning late-latching was never
+going to help the locomotion case regardless of theory) — if so, the
+underlying "compositor reprojection doesn't handle moving hand geometry
+right" theory may need revisiting entirely (e.g. is this runtime's
+reprojection actually motion-smoothing/ASW-style, using PER-FRAME motion
+vectors, which would only kick in under real GPU/frame-time pressure —
+i.e. present during heavier gameplay scenes but not a light intro/menu
+scene — a materially different mechanism than plain last-instant head
+reprojection, and one late-latching the CPU-side pose sample can't
+address at all, since it's a compositor-side temporal effect between
+rendered FRAMES, not a per-app-frame pose-staleness issue). Don't guess
+further without this capture in hand — same discipline that's held for
+every round of this investigation so far.
+
+**ROOT-CAUSED FOR REAL (same day), before that capture was needed — user's
+next report changed the picture entirely: "I noticed link's entire body
+lags behind, including the hands. If I move the headset [i.e. as Link
+moves] goes forward and link's body lags a bit behind, and thats for all
+direction[s]."** This wasn't a hands-specific bug at all — it's Link's
+WHOLE BODY visibly separating from the camera, direction-independent,
+only while actually moving. That framing pointed straight at something
+neither the reprojection theory nor late-latching ever touched, and a
+direct code read (not another guess) confirmed it:
+
+- `daAlink_c::setMatrix()` (`d_a_alink.cpp`) builds `mpLinkModel`'s own
+  base transform directly from raw `current.pos`/`shape_angle` — **zero
+  interpolation** — and is only ever called from `execute()`, i.e. once
+  per 30Hz sim tick, same as the rest of this fixed-timestep engine's game
+  logic. Confirmed by tracing every call site of `setMatrix()`
+  (`d_a_alink.cpp:5064/18225/18554`) back to `daAlink_c::execute()`.
+- Meanwhile the CAMERA (`eyePoseToViewMtx`'s `linkEyeGame` argument) and,
+  sharing the identical value, the tracked HANDS (`buildHandMtx`'s
+  `linkEyeGame`) both read `getVrCameraEyeAnchor()` — which SMOOTHS *and*
+  EXTRAPOLATES every render frame (72-90Hz in VR), per this same section's
+  earlier `kEyeAnchorExtrapolationGain` fix.
+- Net effect: whenever Link is actually moving, the camera/hands glide
+  smoothly AHEAD each render frame (literally extrapolated past the
+  latest confirmed sim-tick sample), while his own BODY MESH's world
+  position stays frozen at whatever `execute()` last set it to — visibly
+  stair-stepping 30 times a second BEHIND them. Direction-independent
+  (extrapolation applies the same regardless of which way Link moves) and
+  invisible at rest (zero velocity → zero extrapolation → nothing to
+  diverge) — matching literally every piece of evidence gathered so far,
+  including the "fixed in the intro" report from the previous round,
+  which in hindsight was never evidence late-latching helped — it was
+  just the pre-existing, always-fine, stationary case showing through
+  again. **This was very likely the TRUE original cause of "hands lag
+  behind" all along** (section 20's opening symptom), more so than the
+  compositor-reprojection theory ever was — late-latching probably wasn't
+  wrong to try, just solving a real but much smaller effect layered on
+  top of this larger one.
+
+**Fix** (`vr_link_visibility.hpp`): rather than building a SECOND,
+independent prev/curr+extrapolation tracker for `current.pos`/
+`shape_angle` (real risk of the two drifting out of sync under future
+retuning — this file's own standing lesson), reuse the eye anchor's
+smoothing directly:
+- `getVrBodyPositionOffset(daAlink_c*)` — returns
+  `getVrCameraEyeAnchor(freshEye) - freshEye`, i.e. exactly how far this
+  frame's smoothing/extrapolation already pushed the eye anchor away from
+  the raw, this-sim-tick `getSubjectEyePos()` value. Zero whenever
+  `isFirstPerson()` is false (cutscenes, Wolf form, mounted cutscenes) —
+  the camera doesn't get smoothing there either (falls back to the plain
+  flatscreen eye), so there's nothing to compensate for.
+- `applyVrBodyPositionOffset(J3DModel* bodyModel)` — adds that offset as a
+  pure world-space translation onto the model's `getBaseTRMtx()` (a
+  mutable `Mtx&`, no separate setter needed) and calls `calc()`.
+  Mathematically exact, not an approximation: translating a PARENT affine
+  frame by a fixed delta (rotation untouched) translates every descendant
+  joint's resolved world matrix by that exact same delta regardless of
+  hierarchy depth — confirmed algebraically before writing this (the
+  `worldMtx[i][3] = baseTRMtx[i][0..2]·localMtx[·][3] + baseTRMtx[i][3]`
+  composition rule), not assumed. So rigidly shifting just the root moves
+  the WHOLE animated body — every joint, everything that reads its
+  matrices — in lockstep, not only the root joint itself. Skips the
+  `calc()` call entirely when the offset is exactly zero (the common
+  case: standing still, or not in first-person), avoiding paying for a
+  full body-skeleton recalculation when there's nothing to correct.
+- Call site: `d_a_alink.cpp`, human-form draw branch only (not Wolf —
+  `getVrBodyPositionOffset()` is always zero there anyway), right after
+  `applyTrackedItemMtx()` and right before `modelDraw(mpLinkModel, ...)` —
+  same per-eye, last-write-before-draw window as every other VR draw-time
+  override in this file. Ordering relative to `applyTrackedItemMtx()`
+  doesn't matter for correctness: a pure whole-body translation cancels
+  out of that function's relative hand-to-item offset math (translating
+  the whole rigid body doesn't change the offset BETWEEN two of its own
+  joints).
+- `vr_main.hpp`/`.cpp`: new `dusk::vr::applyVrBodyPositionOffset()` thin
+  forward, same "keep heavier OpenXR/aurora headers out of core game
+  files" pattern as every other function in this file.
+
+**Built successfully** (RelWithDebInfo) — this one triggered a fuller
+rebuild than usual (`vr_main.hpp` changed, which more files transitively
+include), completed cleanly, no errors.
+
+**NOT yet tested in-headset.** Next step for whoever picks this up:
+launch in VR, move around at normal/fast speed, and confirm the body no
+longer visibly separates from the camera/hands in any direction. If this
+lands, it likely also fully explains (and fixes) the ORIGINAL "hands lag"
+report from the top of this section — worth explicitly re-testing hand
+lag specifically too, not just the whole-body symptom, before considering
+section 20 closed. The `[dusk::vr::latelatch]` diagnostic from the
+previous round is still in the tree (harmless, and may yet prove useful
+if this fix turns out to be necessary-but-not-sufficient) — remove once
+BOTH symptoms are confirmed fixed, not just the new one.
+
+**"Still not fixed" (user report) — real capture found the fix is a
+total no-op, root cause of THAT narrowed down further, one more capture
+pending.** `[dusk::vr::bodyoffset]`/`[dusk::vr::bodyoffsetdiag]` logging
+(added to `getVrBodyPositionOffset()`/`applyVrBodyPositionOffset()`)
+proved the call site IS reached every frame, but the computed offset is
+**exactly (0,0,0) on literally every sampled frame** across two separate
+real captures — not numerical noise (checked via exact float equality
+before logging "ZERO"). Traced to: `step` (`dusk::frame_interp::
+get_interpolation_step()`) reads exactly `0.0000` every single time,
+and since `t = step + kEyeAnchorExtrapolationGain(1.0) = 1.0` exactly,
+`lerpXyz(prev, curr, 1.0)` always returns `curr` exactly — and `curr`
+always equals `freshEye` by construction (both ultimately read
+`getSubjectEyePos()`'s tick-rate-only-updated value) — so the "smoothed"
+eye anchor and the raw one are ALWAYS numerically identical at this call
+site, making the whole body-offset fix (and, by the same reasoning,
+raises real doubt about whether the eye-anchor extrapolation was ever
+doing anything for the CAMERA either, at least in this environment).
+
+**First theory (severe framerate, ~15fps) — TESTED AND RULED OUT.**
+Miscounted from the sim-tick delta between throttled log samples,
+inferring `sim_ticks_to_run` was pinned at the hard cap (2) every single
+frame. Added a DIRECT measurement instead
+(`[dusk::vr::fpsdiag]`, `pacing.presentation_dt_seconds` +
+`pacing.sim_ticks_to_run`, both computed from a real `std::chrono`
+timestamp in `game_clock.cpp`, not inferred) — real capture confirmed a
+healthy ~55-70fps with `sim_ticks_to_run` normally alternating 0/1 per
+frame, matching the user's own runtime-reported 50-70fps. The indirect
+inference was simply wrong; this is not a framerate problem. **Lesson
+reinforced**: an indirect inference from unrelated counters (even a
+seemingly rock-solid, zero-variance one) is not a substitute for a direct
+measurement of the actual quantity in question — this project has hit
+this exact trap before (section 20's own earlier late-latching detour)
+and will again if this isn't internalized.
+
+**Next diagnostic added, not yet captured**: `get_interpolation_step()`'s
+return value logged directly alongside `[dusk::vr::fpsdiag]`, at the very
+top of `vr_main.cpp`'s `tick()` -- close to where `m_Do_main.cpp` just set
+it via `dusk::frame_interp::begin_frame(mode, false,
+dusk::game_clock::sample_interpolation_step())`, right before calling
+`tick()`. This isolates whether `step` is ALREADY zero at the top of the
+frame (pointing upstream, at `sample_interpolation_step()`'s own pacing
+math in `game_clock.cpp` -- worth rederiving by hand or script rather
+than trusting intuition, since a first attempt at hand-deriving expected
+behavior this session gave inconsistent/confusing results and was
+abandoned in favor of just measuring) or whether it starts nonzero and
+gets reset to exactly 0 somewhere between there and where
+`getVrBodyPositionOffset()` reads it deep inside the per-eye draw path
+(in which case the culprit is somewhere in VR code specifically --
+though a grep for every `begin_frame`/`commit_sim_tick` call site in the
+whole codebase found none inside `src/dusk/vr/`, so this would have to be
+something less direct, not yet identified).
+
+**Built successfully** (RelWithDebInfo) -- only `vr_main.cpp` needed
+recompiling.
+
+**Concrete next step**: one more move-around-and-capture round, this time
+searching for `[dusk::vr::fpsdiag]` specifically for the new
+`get_interpolation_step()=` field, comparing it against `sim_ticks_to_run`
+on the SAME logged frames -- if it's ALSO always 0.0000, the bug is
+upstream in `game_clock.cpp`'s pacing model itself (not VR-specific at
+all, and would affect the flatscreen camera's own smoothness the same
+way, unconfirmed whether anyone would have noticed there since flatscreen
+was never specifically retested for this); if it's sometimes nonzero
+there but still reads 0 by the time `getVrBodyPositionOffset()` sees it,
+the bug is somewhere in between, inside VR code, not yet found.
+
+**Result: `get_interpolation_step()` confirmed HEALTHY at the top of
+`tick()`** (varying 0.13-0.99 across real samples, never stuck) -- ruling
+out `game_clock.cpp`'s pacing model itself. So the corruption happens
+somewhere between the top of `tick()` and where `getVrBodyPositionOffset()`
+reads it. Bisected further with two more checkpoints (right before the
+per-eye scene draw starts, and right after `fpcM_DrawIterater()` but
+before `cAPIGph_Painter()`) -- BOTH still healthy. One more checkpoint at
+the very top of `daAlink_c::draw()` (called from inside `cAPIGph_Painter()`'s
+traversal) -- **already exactly 0 there**. So the corruption happens
+somewhere inside `cAPIGph_Painter()`, before reaching Link specifically.
+
+**ROOT-CAUSED**: rather than keep bisecting by position through a huge,
+unfamiliar scene-draw call tree, instrumented the actual mutation point
+directly -- `dusk::frame_interp::begin_frame()` itself (the ONLY function
+that writes `g_step`, confirmed via an exhaustive codebase-wide grep with
+no other call site anywhere, including `extern/aurora`). Logging every
+call, unconditionally, caught it directly in a real capture: `begin_frame`
+fires MULTIPLE TIMES IN RAPID SUCCESSION mid-frame (5 calls within a
+handful of log lines, interleaved with water's GXCopyTex/resolve_pass
+texture-bind processing for a single eye -- correlated tightly in every
+capture that showed the bug, though not independently proven to be the
+*trigger* specifically, just where it was observed happening) -- with a
+`step_in=0.0` argument landing right in the middle of an otherwise-healthy
+frame. Since there is only ONE real caller of `begin_frame()` in the whole
+codebase (`m_Do_main.cpp`'s three call sites, all part of one straight-line
+sequence immediately before `dusk::vr::tick()` is invoked), the only way
+to reproduce this pattern is if **`dusk::vr::tick()` is being called
+RE-ENTRANTLY** -- a nested call starting while an outer call is still
+mid-draw. Confirmed structurally: `tick()` unconditionally resets
+`g_duskVREyePassOpen = false` at its own very top on every call (part of
+its "reset up front" logic) -- a nested call would silently clobber the
+OUTER, still-in-progress call's `true` state, which is exactly consistent
+with every "eyePassOpen=0" reading logged even while clearly mid-scene-draw
+(per interleaved `[dusk::gxtex304]` eye=0 tags in the same window).
+
+**Fix applied** (`vr_main.cpp`): a `TickReentrancyGuard` RAII struct wraps
+`tick()`'s entire body -- a static `bool s_tickInProgress` flag, set true
+on entry and reset false on exit via the guard's destructor (RAII rather
+than a plain flag + manual reset at every return point, since `tick()` has
+many early-return paths -- no session, XR call failures,
+`shouldRender==false`, view not ready, etc. -- and a plain flag would be
+easy to leave "stuck" true if one of those paths were missed). If a call
+arrives while `s_tickInProgress` is already true, it logs
+`[dusk::vr::tick] RE-ENTRANT CALL #N DETECTED -- skipping` and returns
+immediately, touching nothing else -- protecting the outer call's
+in-progress state instead of corrupting it. **This fixes the SYMPTOM
+(shared frame-pacing state getting clobbered mid-draw) regardless of what
+triggers the nested call** -- the underlying nested-Windows-message-pump
+mechanism itself (if that's really what it is) is NOT identified or fixed
+here; if the reentrancy count logged turns out to be high enough to matter
+for other reasons (e.g. perf, or other shared state this project hasn't
+noticed being corrupted the same way), that's a separate follow-up.
+
+**Built successfully** (RelWithDebInfo) -- only `vr_main.cpp` needed
+recompiling.
+
+**NOT yet tested in-headset.** Next step for whoever picks this up: launch
+in VR, move around, and check (a) whether hand/body lag is actually gone
+now, and (b) grep the Output window for `[dusk::vr::tick] RE-ENTRANT CALL`
+to confirm the theory directly -- if it fires at all, that's confirmation
+re-entrancy is real and was happening; the FREQUENCY (rare vs. constant)
+would also help gauge how big a deal the underlying nested-call trigger
+is beyond just this one symptom. If lag is STILL present despite
+confirmed re-entrancy blocking, that's evidence this genuinely was (one
+of) the root cause(s) but something else also contributes -- don't assume
+it's fully explained without checking. All the diagnostic scaffolding from
+this investigation (`[dusk::vr::fpsdiag]`, `[dusk::vr::stepbisect]`/`2`/`3`,
+`[dusk::vr::bodyoffsetdiag]`, `[dusk::vr::bodyoffset]`,
+`[dusk::frameinterp::beginframe]`) is still in the tree -- remove once
+this is confirmed fixed, per this project's normal practice.
+
+**ACTUALLY ROOT-CAUSED 2026-08-09 — via a real debugger call stack, after
+log-based bisection hit a wall the reentrancy theory couldn't explain.**
+The reentrancy guard added the previous round showed ZERO violations in a
+real capture, yet the corruption still happened -- direct proof that
+theory was wrong, not just unconfirmed. Rather than propose a fourth
+theory from log inference alone, walked the user through Visual Studio:
+first a hit-count breakpoint in `begin_frame()` (came back with a
+completely ordinary, single-level call stack from `main01()` -- ruling
+out an "extra caller" of `begin_frame()` itself too), then a much more
+precisely targeted one -- a conditional breakpoint inside
+`daAlink_c::draw()` itself, breaking exactly when
+`get_interpolation_step() == 0.0f` is observed (needed a small code
+change first: VS's expression evaluator refuses to call functions with
+side effects in breakpoint conditions, so the value was hoisted into a
+plain local `drawTopStep` first so the condition could reference that
+instead).
+
+**The real call stack, captured on the actual moment of corruption**:
+```
+daAlink_c::draw()
+fopAc_Draw()
+fpcLf_Draw() / fpcDw_Execute() / dScnPly_Draw() / fpcNd_Draw() / ...
+fpcM_Management()
+fapGm_Execute()   <-- the sim-tick / game-logic update function
+main01()
+```
+
+**Root cause**: `daAlink_c::draw()` (and presumably every other actor's
+`draw()`) is called from TWO separate places, not one:
+1. The real, decoupled, render-rate-independent draw path this whole PC
+   port (and VR specifically) relies on --
+   `cAPIGph_Painter()`/`fpcM_DrawIterater()`, called explicitly from
+   `vr_main.cpp`'s `tick()`, once per eye, inside a real `beginEye()`/
+   `endEye()` bracket.
+2. `fapGm_Execute()` -- the SIM-TICK function, called once per committed
+   physics tick (30Hz) from `main01()`'s sim-tick loop. This is a
+   GameCube-era leftover: on original hardware, "execute" and "draw" were
+   never decoupled (30fps logic == 30fps rendering, no reason to
+   separate them), so the base game's own actor-process framework
+   (`fpcM_Management`/`fpcDw_*`) has ALWAYS combined an update pass and a
+   draw-method-dispatch pass into what's misleadingly just called
+   "Execute." This PC port's separate, VR-enabling draw path was added
+   ALONGSIDE this legacy behavior, not as a replacement for it -- both
+   still run, every frame.
+
+This second, legacy call happens BEFORE the frame's real interpolation
+`step` has even been computed for that iteration (mid-sim-tick, with
+`step` legitimately, correctly at 0 -- not a bug in `frame_interp` at all,
+fully vindicating `game_clock.cpp`'s pacing model, which was investigated
+and cleared multiple times this session). The actual bug was in THIS
+session's own new code: `applyVrBodyPositionOffset()`'s call site was
+guarded on `isRenderingToHeadset()` -- which, per section 8's own
+already-documented lesson about this EXACT flag ("reads like a
+we-are-currently-rendering-an-eye flag but is actually scoped to the
+whole VR frame"), is `true` during this legacy call too, since it's set
+once per `tick()` call and this legacy call happens to run while a VR
+session is active. Since the fix ADDS to `mpLinkModel`'s base transform
+translation (`+=`) rather than setting it outright, every legacy-pass
+call permanently, additively corrupted the shared model state before the
+REAL per-eye draws for that same logical frame ever ran -- compounding
+once per sim tick, forever, from the moment this fix was first added.
+**This is the exact same bug CLASS already root-caused once before in
+this project (section 8, the minimap black-screen bug)** -- broad
+`isRenderingToHeadset()` vs. narrow `isEyePassOpen()` -- just hitting a
+different call site. Worth remembering as a standing lesson: ANY new
+per-eye VR draw-time override added to this codebase should default to
+`isEyePassOpen()`, not `isRenderingToHeadset()`, unless there's a
+specific reason it also needs to fire outside a real eye pass.
+
+**Fix** (`d_a_alink.cpp`): split `applyVrBodyPositionOffset()`'s call out
+from `applyTrackedItemMtx()`'s existing `isRenderingToHeadset()`-guarded
+block into its own, separately guarded on `isEyePassOpen()` instead.
+`applyTrackedItemMtx()` (and, by extension, the hand-tracking/late-latch
+code sharing the same `isRenderingToHeadset()` pattern elsewhere) was
+deliberately left untouched -- it's idempotent (re-writes the same cached
+matrix values each call, so the legacy pass invoking it too is wasteful
+but harmless) and already confirmed working in-headset; touching it
+without a demonstrated bug isn't warranted, per this project's own
+standing "don't infer a nearby fix supersedes something without
+evidence" lesson.
+
+**Built successfully** (RelWithDebInfo) -- only `d_a_alink.cpp` needed
+recompiling, clean link, no new warnings.
+
+**NOT yet tested in-headset.** Next step for whoever picks this up:
+launch in VR (no debugger/breakpoints needed this time), move around
+normally, and confirm both the whole-body lag AND the original hand-lag
+report are actually gone. If confirmed, remove all the diagnostic
+scaffolding listed above (per this project's normal practice) --
+`[dusk::vr::latelatch]` from the earlier late-latching round too, since
+that turned out not to be the answer either. If NOT fully fixed, the
+`isEyePassOpen()` fix is still correct and worth keeping regardless (it's
+a real, demonstrated bug fix on its own merits), but there may be a
+SEPARATE remaining contributor -- don't assume this one fix explains
+100% of the original symptom without re-testing specifically.
+
+**"Nope they still alge behjind" -- previous fix confirmed to be doing
+NOTHING at all, traced to a real bug in ITSELF this time, which led
+straight to the actual, final root cause.** `[dusk::vr::bodyoffset]`
+(including its unconditional "reached" line) never appeared ONCE in a
+fresh capture after a confirmed clean rebuild+relaunch -- meaning
+`isEyePassOpen()` was FALSE at the exact call site the previous fix had
+just been moved to, contradicting the (until-now-untested) assumption
+that Link's real per-eye VR draw reaches that code region at all.
+
+**Verification, via two more targeted debugger captures (same
+conditional-breakpoint technique as before)**: broke once on
+`drawTopStep == 0.0f` (the corrupted case) and once on `drawTopStep !=
+0.0f` (the "healthy" case) -- **both captures showed the IDENTICAL call
+stack**, `daAlink_c::draw() <- fopAc_Draw <- ... <- dScnPly_Draw <- ...
+<- fapGm_Execute() <- main01()`. Neither ever showed a call originating
+from `cAPIGph_Painter()`/`beginEye()` (the real per-eye VR draw path).
+This was the moment the whole investigation actually turned: `isFirstPerson`,
+the interpolation math, the reentrancy theory, and even the earlier
+"body-position lag" theory had all been built on an UNVERIFIED assumption
+-- that `daAlink_c::draw()` gets called again from the real per-eye VR
+path at all. It doesn't, in the way anything downstream of it needs.
+
+**ACTUAL ROOT CAUSE**: `m_Do_ext.cpp`'s `mDoExt_modelEntryDL()` -- called
+from `daAlink_c::modelDraw()`, which is what actually submits
+`mpLinkModel`/`mpLinkHandModel`/`mSwordModel`/`mShieldModel`/
+`mHeldItemModel`/`mpWlChainModels`'s geometry -- has an early-return:
+```cpp
+if (!dusk::frame_interp::is_sim_frame()) {
+    i_model->diff();  // lightweight material-only update
+    return;            // SKIPS mDoExt_modelDiff() -- the real
+                        // matrix/geometry resubmission
+}
+```
+`is_sim_frame()` is only true on the rare render frame that happens to
+coincide with an actual committed physics tick (~30Hz) -- false on every
+other VR render frame (60-90Hz). **This is a deliberate, CORRECT
+optimization on flatscreen**: the frame-interpolation system substitutes
+already-interpolated matrices at a lower level
+(`dusk::frame_interp::resolve_replacement()`, inside the J3D draw
+pipeline itself) for non-sim-tick presentation frames, so skipping the
+heavier full resubmission there is intentional (the function's own
+comment: "fixes issue #355 where some lights would flicker"). **It is
+NOT correct for VR's tracked-hand/sword/body-position overrides**, which
+write fresh matrices directly into these models every eye via
+`setAnmMtx()`/`setBaseTRMtx()`+`calc()` -- none of which go through
+`dusk::frame_interp`'s replacement system at all. Those writes were
+computed correctly, every eye, this whole time -- they just almost never
+reached the actual rendered output, because the GPU-facing geometry
+resubmission that would have picked them up was being skipped on all but
+~30 of the ~60-90 VR render frames each second. **This is the real,
+complete explanation for every symptom observed across this entire
+investigation**: the world (drawn via the ordinary actor-list traversal,
+not this special player-draw path) stays smooth at full VR rate, while
+Link's own body and tracked hands specifically stair-step at physics-tick
+rate -- worse the faster he's actually moving, since that's exactly when
+a 33ms-stale pose is most visibly wrong. It also means every earlier fix
+in this investigation (extrapolation, late-latching, the body-position
+offset) was computing genuinely correct data that mostly never reached
+the screen -- not wasted, but not sufficient on its own either.
+
+**Fix** (`d_a_alink.cpp`'s `daAlink_c::modelDraw()`): while
+`isEyePassOpen()` is true (a real VR eye pass, not the legacy
+`fapGm_Execute()` pass -- same established distinction as every other
+fix in this section), call `mDoExt_modelUpdateDL()` instead of
+`mDoExt_modelEntryDL()`. `mDoExt_modelUpdateDL()` (same file,
+`m_Do_ext.cpp`, defined immediately above `mDoExt_modelEntryDL()`) has no
+`is_sim_frame()` gate at all -- unconditionally calls `i_model->calc()` +
+`mDoExt_modelDiff()` every time. Scoped to `modelDraw()`'s `param_1==0`
+(actually-visible) branch only -- the `isPlayerNoDraw` branch already
+skips real geometry submission entirely, nothing to fix there. Since
+`modelDraw()` is the single shared entry point for ALL of the models
+listed above, this fix covers hands/sword/shield/held-item too, for
+free -- not just the body.
+
+**Built successfully** (RelWithDebInfo) -- only `d_a_alink.cpp` needed
+recompiling, clean link, no new warnings.
+
+**NOT yet tested in-headset.** Next step for whoever picks this up:
+launch in VR (no debugger needed this time) and confirm the lag is
+actually gone during real movement -- for the body AND hands. If this is
+finally it, remove ALL the diagnostic scaffolding this investigation
+accumulated across every round (`[dusk::vr::fpsdiag]`,
+`[dusk::vr::stepbisect]`/`2`/`3`, `[dusk::vr::bodyoffsetdiag]`,
+`[dusk::vr::bodyoffset]`, `[dusk::frameinterp::beginframe]`,
+`[dusk::vr::latelatch]`, the `TickReentrancyGuard`'s own diagnostic log --
+NOT the guard itself, which is a real, independently-worth-keeping fix
+even though it wasn't the answer here) -- per this project's normal
+practice. If this ISN'T fully it either, the `mDoExt_modelUpdateDL()`
+fix is still correct and worth keeping (a real, demonstrated, and now
+directly call-stack-verified bug), but this section has now accumulated
+enough false starts that a SPECIFIC, precise description of what still
+looks wrong (not just "still laggy") is needed before guessing again --
+this project's own standing lesson, learned the hard way, repeatedly, in
+this exact section.
+
+**Reusable lesson for this whole saga, worth internalizing before
+touching this file's draw-time VR overrides again**: every earlier
+theory in this section (extrapolation, late-latching, reentrancy,
+body-position offset) was individually well-reasoned AND partially
+correct, but NONE of them were verified against a REAL debugger call
+stack until very late -- each was built on an assumption about WHERE
+in the frame a symptom was occurring, inferred from log timing/ordering
+alone. Log-based inference got this investigation 90% of the way there
+across many rounds, but the LAST, decisive 10% -- confirming which
+literal code path was actually executing -- only came from two
+conditional breakpoints and a Call Stack window. If a future VR bug in
+this codebase resists log-based bisection for more than 2-3 rounds, reach
+for a real debugger call stack sooner rather than continuing to infer.
+
+**ACTUALLY FINALLY RESOLVED 2026-08-09 (separate session from all of the
+above) — CONFIRMED FIXED IN-HEADSET, both hands AND sword/shield.** Section
+23 (below) reports hands still lagging even after the core-anchor comfort
+change and every fix in this section — that remained true until this
+session, which found the REAL final root cause via a fresh
+`[dusk::vr::eyepasscheck]` full-session log capture (zero "true" hits,
+confirming — again, independently — that `daAlink_c::draw()` never runs
+during a real VR eye pass) combined with direct code-reading of
+`J3DModel.cpp`/`J3DShapeMtx.cpp`/`frame_interpolation.cpp`:
+
+- **The real mechanism**: this PC port computes a model's pose ONCE per sim
+  tick (~30Hz, via the legacy `daAlink_c::draw()` path) and REPLAYS it every
+  real render frame. `J3DModel::setAnmMtx()`/`calc()` automatically record
+  each joint's matrix into `dusk::frame_interp`'s once-per-tick snapshot
+  system; the actual GX matrix load at real per-eye draw time
+  (`J3DShapeMtx.cpp`'s `J3DFrameInterpConcat` → `resolve_replacement()`)
+  always prefers a value LERP'd between the last two once-per-tick snapshots
+  over whatever's in the raw buffer. Every previous "fix" in this section
+  (extrapolation, late-latching, reentrancy guard, body-position offset,
+  `mDoExt_modelUpdateDL()`) computed genuinely correct data but through a
+  call site (`daAlink_c::draw()`/`modelDraw()`) that never runs during real
+  rendering — so none of it could ever reach the screen at real framerate.
+- **The fix**: `dusk::frame_interp::mark_live_this_frame(key)`
+  (`frame_interpolation.h`/`.cpp`) — a small opt-out registry checked at the
+  top of `resolve_replacement()`/`lookup_replacement()` — lets specific
+  matrix addresses skip the stale-interpolation substitution for the current
+  frame. `vr_link_visibility.hpp`'s `refreshTrackedHandDrawMtxLive()`,
+  called once per real frame from `vr_main.cpp`'s `tick()` (a genuinely
+  real per-eye-relevant call site, unlike the dead `draw()`-based ones),
+  writes the tracked hand pose via the existing `applyTrackedHandMtx()` and
+  marks `getAnmMtx(RIGHT_HAND_JOINT)`/`getAnmMtx(LEFT_HAND_JOINT)` live.
+- **Non-obvious wrinkle, cost a full round to find**: the FIRST version of
+  this fix marked `getDrawMtxPtr()` (and even called `viewCalc()` to try to
+  force-populate it) — completely wrong buffer. A `[dusk::vr::liverefresh]`
+  capture showed `getDrawMtxPtr()` returning the SAME static address
+  (`J3DMtxBuffer::sNoUseDrawMtx`, a shared placeholder) for every different
+  hand-model instance, frozen at `(0,0,0)`. Root cause: `mpLinkHandModel`'s
+  shapes use the "ConcatView" load type
+  (`J3DMdlDataFlag_ConcatView`/`J3DMtxBuffer::create()` routes this type to
+  `setNoUseDrawMtx()` instead of allocating a real per-model draw-matrix
+  array), and `J3DShapeMtxConcatView::load()` for this type reads the matrix
+  straight from `getUserAnmMtx()` (aliases `getAnmMtx()`/`mpAnmMtx`
+  directly) via an `sMtxPtrTbl[]`/`getDrawMtxFlag()`/`getDrawMtxIndex()`
+  redirection — `getDrawMtxPtr()`/`calcDrawMtx()` are never consulted for
+  this model's shapes at all. **Lesson for next time a similar fix is
+  attempted on a different model**: don't assume `getDrawMtxPtr()` is the
+  right buffer without checking the model's actual `J3DMdlDataFlag_*` load
+  type first — a quick sentinel-address check (log the pointer + content
+  across several different model instances; a frozen, identical address is
+  the tell) settles it directly.
+- **Sword/shield follow-up, same session, same underlying bug**:
+  `applyTrackedItemMtx()` (section 16) had the identical dead-call-site
+  problem. Fixed the same way (`refreshTrackedItemMtxLive()`,
+  `markModelJointsLive()` — extended to also mark `getWeightAnmMtx()`, since
+  sword/shield's shapes turned out to use the WEIGHT-ENVELOPE variant of the
+  same `sMtxPtrTbl` redirection, not the plain `getAnmMtx()` one hands use —
+  found via the identical sentinel-capture technique), but getting the
+  "is this actually drawn vs. sheathed" GATE right took several more wrong
+  turns worth recording since they're easy to re-attempt by accident:
+  1. **Comparing the model's own base transform against a freshly-re-read
+     item-joint matrix** (`mtxNearlyEqual`) — correct once per tick (its
+     original, still-in-tree-but-dead call site), but self-defeating once
+     called every real frame: after the first correct match-and-overwrite,
+     every subsequent real frame within that tick compared the function's
+     OWN prior tracked-matrix write against the item-joint matrix, which
+     essentially never matches → gate falsely reads false almost always.
+  2. **Caching the gate result once per real sim tick** (`sim_tick_seq()`)
+     fixed the self-corruption above, but a real `[dusk::vr::itemgate]`
+     capture — taken during a CONFIRMED `mEquipItem==0x103` window (verified
+     via direct instrumentation of `daAlink_c::setItemMatrix()` itself) —
+     showed the comparison still failing, with rotation components differing
+     by up to ~1.0 and changing rapidly tick to tick. Root cause: the
+     underlying item-joint VALUE genuinely moves between when
+     `setItemMatrix()` captures it (during game-logic execute) and when this
+     later, real-frame call site re-reads it — a fast swing animation
+     visibly progresses in that gap. No amount of caching fixes a
+     comparison against a value that's stale by construction.
+  3. **"Always track the live hand," dropping the gate entirely** — fixed
+     responsiveness but regressed the original section-16 bug: a sheathed
+     sword/shield snapped to the tracked hand too.
+  4. **Item-joint-to-hand-joint DISTANCE heuristic** — the item joint turned
+     out to be a FIXED rig joint sitting ~10 units from the hand joint
+     UNCONDITIONALLY, sheathed or not — not a signal of anything.
+  5. **What actually worked**: use the game's own REAL, authoritative
+     hand-attach flags directly instead of re-deriving them from position
+     data. `daAlink_c::checkItemSwordEquip()` (`mEquipItem==0x103`, already
+     public) for the sword; a new `daAlink_c::checkShieldHandAttached()`
+     (`d_a_alink.cpp`/`.h`) mirroring `setItemMatrix()`'s exact shield
+     OR-chain condition for the shield. Fed directly into
+     `applyTrackedItemMtxIfAttached()` — no matrix comparison, no caching,
+     no heuristic. When not attached, `refreshRestingPoseSmoothed()` (a
+     prev/curr-snapshot-and-lerp technique, same shape as
+     `getVrCameraEyeAnchor()`) keeps the sheathed/stowed pose smooth instead
+     of choppy raw 30Hz steps.
+- **Diagnostic scaffolding from this whole investigation — including
+  everything this section already listed as still-in-tree
+  (`[dusk::vr::fpsdiag]`, `[dusk::vr::stepbisect]`/`2`/`3`,
+  `[dusk::vr::bodyoffsetdiag]`, `[dusk::vr::bodyoffset]`,
+  `[dusk::frameinterp::beginframe]`, `[dusk::vr::latelatch]`,
+  `[dusk::vr::eyepasscheck]`) plus everything added this session
+  (`[dusk::vr::liverefresh]`, `[dusk::vr::itemsentinel]`,
+  `[dusk::vr::itemgate]`, `[dusk::vr::itemdist]`, `[dusk::vr::itemrefresh]`,
+  `[dusk::vr::setitemmtx]`, `[dusk::frameinterp::resolvediag]`) — has been
+  removed now that both symptoms are confirmed fixed**, per this project's
+  normal practice. The `TickReentrancyGuard` itself (not its diagnostic
+  log) and the late-latching re-locate logic in `applyTrackedHandMtx()`
+  were left in place — both harmless, and the guard remains a real
+  protective mechanism independent of whether it was ever the answer here.
+- **User confirmation**: hands — "the hands are no longer lagging. You
+  finally fixed it." Sword/shield — after several more rounds on the
+  gate specifically (documented above) — "It works now."
+
+This closes out section 20 for real. The reusable lesson from THIS
+session, on top of the one already written above: when a "fix" changes
+data that's computed correctly but never verified to actually reach the
+screen, verify the CONSUMING code path too (what actually reads this
+matrix at draw time, and is that read point even reachable from where the
+fix runs) — not just that the write itself is correct. Two separate
+"final root cause, confirmed" writeups in this same section (the
+`isEyePassOpen()` fix, then the reentrancy guard, then the body-position
+offset) all turned out to be real, correct, and INSUFFICIENT because
+none of them checked whether their own call site actually executes during
+real rendering — the same category of gap this final round closed.
+
+### 21. Cutscenes now first-person too, when Link's own body is actually loaded/drawn — built 2026-08-08, NOT yet confirmed in-headset
+
+**Goal** (explicit user request: "I want to make every cutscene that has
+link loaded in first person"). Before this, `isFirstPerson()` (section 19)
+stayed first-person for ordinary gameplay and plain NPC dialogue, but any
+other running event (cutscene, door/transition) still fell back to
+third-person unconditionally — reasoning that an authored cutscene camera
+isn't guaranteed to be looking at Link at all. Asked the user to clarify
+what "has Link loaded" should mean in code terms: either (a) flip to
+first-person for literally every event as long as the `daAlink_c` actor
+exists, or (b) add a real per-frame check of whether Link's own body is
+actually being drawn in that specific shot. **User chose (b)** — the
+concern that some cutscenes swap in a stand-in demo actor or park the real
+Link off-camera entirely is real, and forcing the VR camera to his head in
+those shots would be meaningless/wrong.
+
+**The check**: `daAlink_c::checkPlayerNoDraw()` (`d_a_alink_link.inc`) —
+already existed, already used to gate `mpLinkModel`'s own `modelDraw()`
+call in `daAlink_c::draw()` (`d_a_alink.cpp`, the `isPlayerNoDraw` local).
+Returns true when either a camera-attention "hide player" bit
+(`dComIfGp_checkCameraAttentionStatus(field_0x317c, 2)`) or
+`FLG0_PLAYER_NO_DRAW` is set — confirmed via grep that
+`FLG0_PLAYER_NO_DRAW` is only ever touched from `d_a_alink_demo.inc`
+(`onPlayerNoDraw()`/`offPlayerNoDraw()`), never from any ordinary-gameplay
+code path — i.e. this really is a demo/cutscene-specific "is the real
+Link actor currently the thing being rendered" signal, not something that
+could spuriously fire during normal play. This is exactly the "has Link
+loaded" check the user asked for, already built into the base game rather
+than something new to invent.
+
+**Fix** (`vr_link_visibility.hpp`'s `isFirstPerson()`): the previous
+unconditional `return dComIfGp_event_runCheck() && event &&
+event->getMode() == dEvt_mode_TALK_e;` for the event-running case is now
+staged: still first-person immediately for `TALK` mode (unchanged from
+section 19), but for every OTHER event mode (cutscenes, door/transition),
+now returns `!link->checkPlayerNoDraw()` instead of an unconditional
+`false` — first-person whenever Link's body is actually loaded/drawn for
+that shot, third-person fallback only when the base game has explicitly
+hidden him (stand-in actor, or a shot not about him). `getVrCameraEyeAnchor()`
+needed no changes — it already just calls `isFirstPerson()` and mirrors
+whatever it returns.
+
+**Built successfully** (RelWithDebInfo) — only `vr_main.cpp` needed
+recompiling (it transitively includes this header), clean link, no new
+warnings.
+
+**NOT yet tested in-headset** — next step for whoever picks this up:
+trigger a few different cutscenes (ideally at least one plain
+Link-performing-an-action cutscene, and one where the camera focuses on
+an NPC/boss/object instead) and confirm (a) the Link-centric ones are now
+genuinely first-person from his own head, and (b) the ones where he's
+hidden/off-camera still correctly fall back to third-person rather than
+anchoring the camera to a stale or meaningless position. Also worth
+re-confirming dialogue (section 19) and Wolf form (section 11) still
+behave as before, since this is the same shared `isFirstPerson()` function
+both of those already depend on.
+
+**UPDATE 2026-08-08 (same day) — first in-headset test found a real bug:
+Epona-riding cutscene camera anchored inside Epona's head, not Link's
+neck. Carve-out fix applied and built, NOT yet retested.** User report:
+"It kinda worked but ... the camera isnt on links neck but rather phasing
+thrugh epona's head."
+
+**Root cause (read from code, not yet confirmed via a real capture/log —
+see caveat below)**: `getVrCameraEyeAnchor()`'s anchor comes from
+`daAlink_c::getSubjectEyePos()` → `setBodyPartPos()`
+(`d_a_alink.cpp`). That function's mount-relative eye offsets
+(`horseLocalEyeFromRoot`/`canoeLocalEyeFromRoot`/`boardLocalEyeFromRoot`)
+only activate inside one big gated condition built from several
+`dComIfGp_checkPlayerStatus0/1(...)` bits — flags that read like
+"actively player-controlled riding gameplay is happening right now." A
+scripted cutscene demo almost certainly doesn't set those the same way
+interactive riding gameplay does (demos drive the actor directly, not
+through normal input/status state), so during a horseback CUTSCENE this
+condition is plausibly false and `setBodyPartPos()` falls through to its
+`else` branch: `field_0x3768 = eyePos` — Link's own bare head-joint
+position (`mpLinkModel->getAnmMtx(field_0x30b4=4)` + a small local
+offset), with NO mount-relative adjustment applied at all. Section 11
+already flagged this exact mount-eye-anchor code path as "expected to
+work with zero additional code" but explicitly **never confirmed in
+gameplay, let alone cutscenes** — this is that untested gap actually
+manifesting, exposed for the first time now that section 21 makes
+cutscenes reach `isFirstPerson()`'s true branch at all. Whether Link's
+own head joint genuinely resolves to a position inside Epona's head
+during this specific demo animation (e.g. if the demo's authored rider
+pose parents/positions him differently than gameplay's `current.pos`-based
+transform) or something else entirely is going on has NOT been verified
+by an actual in-game capture — this is a plausible read of the code, not
+a proven root cause, matching this project's own repeated lesson about
+not trusting a single code-reading pass without evidence for anything in
+this bug class.
+
+**Fix applied (a carve-out, not a fix to the underlying mount-eye-anchor
+math itself)**: `isFirstPerson()` now also returns third-person for
+cutscenes/door-events specifically when Link is mounted —
+`link->checkReinRide() || link->checkCanoeRide() ||
+link->checkBoardRide()` — checked right after the `TALK` early-return and
+before the `checkPlayerNoDraw()` check, mirroring the existing Wolf-form
+carve-out at the top of the same function (same reasoning: a mount's own
+rig/eye-anchor math was never confirmed correct, so don't force the
+camera into it for a shot that was never designed to be seen from there).
+**Deliberately scoped to cutscenes only** — the `!link->checkEventRun()`
+branch above this returns `true` (first-person) before this check is ever
+reached, so ordinary mounted GAMEPLAY (actually riding Epona around the
+world, unchanged since section 11) is completely unaffected; only mounted
+CUTSCENES fall back to third-person now.
+
+**Built successfully** (RelWithDebInfo) — only `vr_main.cpp` needed
+recompiling, clean link, no new warnings.
+
+**CONFIRMED FIXED IN-HEADSET** — user tested and reported "Looks good."
+Mounted (Epona) cutscenes correctly fall back to third-person now instead
+of anchoring inside her head; ordinary mounted gameplay and non-mounted
+cutscenes untouched. Closes out this round of section 21 — the underlying
+mount-eye-anchor gap (why the plain head-joint fallback lands inside the
+mount's own geometry during a demo) is still not root-caused with real
+evidence, just carved around, same as Wolf form. Worth fixing properly
+(so mounted cutscenes CAN be first-person too) as a separate future
+follow-up if it matters — start with `field_0x3768`,
+`dComIfGp_checkPlayerStatus0/1(...)`'s actual gate value, and
+`checkReinRide()` logged during a real mounted cutscene, not another
+code-reading guess.
+
+### 22. Night-sky stars — DISABLED IN VR — built 2026-08-08, NOT yet confirmed in-headset
+
+**Symptom** (user-reported, VR-only per follow-up confirmation): stars
+"look wrong" in the headset — asked to disable them.
+
+**Root cause (read from code, same class as sections 5/10's camera-locked
+kagerou effects, not yet confirmed via an in-headset capture)**:
+`dKyr_drawStar()` (`d_kankyo_rain.cpp`) draws the night-sky star-field
+billboards oriented via `MTXInverse(dComIfGd_getView()->viewMtxNoTrans,
+camMtx)` — the FLATSCREEN camera's view matrix, not either eye's real
+per-eye VR view — and positions the moon/star anchor off
+`camera->view.lookat.eye`, the old third-person eye. On flatscreen this is
+fine (that camera IS what's rendering). In VR, this is the same
+camera-anchored-effect mismatch already root-caused for the sun/heat-wave
+kagerou effects: a headset's free head rotation and per-eye stereo
+separation aren't represented in that stale flatscreen matrix at all,
+which would plausibly read as stars sitting wrong and/or ghosting/
+duplicating between eyes — matches "look wrong" reasonably well but
+wasn't independently isolated via a real capture the way sections 5/10
+were before their fixes landed.
+
+**Fix**: added an `isRenderingToHeadset()` early-return at the top of
+`dKyr_drawStar()`, right after the existing `hide_vrbox` guard already in
+that function — VR-only, matching this project's usual gate pattern
+(flatscreen keeps stars). `d_kankyo_rain.cpp` already includes
+`vr_main.hpp` and already uses this exact guard shape one function up
+(`dKyr_sun_move()`'s sun-kagerou skip, section 5), so no new plumbing was
+needed. The separate shooting-star system (`dKankyo_shstar_Packet`/
+`dKyr_shstar_init()`/`dKyr_shstar_move()`) was checked and confirmed to be
+dead/unimplemented in this game version (empty function bodies, no
+`draw()` override) — not touched, nothing to disable there.
+
+**Built successfully** (RelWithDebInfo) — only `d_kankyo_rain.cpp` needed
+recompiling, clean link, no new warnings.
+
+**CONFIRMED FIXED IN-HEADSET** — user tested and reported "Yup theyre
+gone." No regressions to the rest of the sky/moon draw reported. Closes
+out this section; the underlying camera-anchored-billboard mismatch was
+never independently root-caused with a real capture (see above), only
+inferred by analogy to sections 5/10 — worth keeping in mind if this ever
+needs revisiting to make stars VR-correct instead of just disabled (e.g.
+re-deriving the billboard orientation from each eye's real per-eye view
+matrix instead of skipping the draw).
+
+### 23. VR camera anchored to Link's root/core position (+ fixed height offset) instead of his animated head joint — COMFORT change, built 2026-08-09, NOT yet confirmed in-headset
+
+**Not a fix for section 20's lag bug** — a separate, deliberate comfort
+change, user-requested: "instead of anchoring it to link's head, [anchor]
+the camera to link's core or his position, then rais[e] the camera up to
+where his head is[,] eliminat[ing]... motion sickness caused by bobbing,
+rolling, getting knocked over, etc." Explicitly flagged to the user before
+implementing that this should NOT be expected to resolve section 20 (the
+hands/body lag): the hand-relative-to-camera math (`buildHandMtx()`) was
+proven earlier in that investigation to be independent of the eye anchor's
+own accuracy, and section 20's actual root cause (`mDoExt_modelEntryDL()`'s
+`is_sim_frame()` geometry-resubmission gate) is about mesh submission
+frequency, unrelated to what world-space point the camera anchors to.
+
+**Implementation** (`vr_link_visibility.hpp`): `getVrCameraEyeAnchor()`
+previously fed its prev/curr-snapshot-plus-extrapolation smoothing (see
+section 20's extrapolation writeup) from
+`*link->getSubjectEyePos()`/`field_0x3768` directly — the animated
+head-joint position, which bobs/rolls/lurches with idle sway, footstep
+impact, and knockback. Now feeds that same smoothing from a new
+`detail::computeRawCoreAnchoredEye(link)`: `current.pos.x`,
+`current.pos.z`, and `current.pos.y + s_coreAnchorHeightOffset` — i.e.
+Link's root/core position (the same physics-driven value `setMatrix()`
+uses to place `mpLinkModel` itself, confirmed public via `f_op_actor.h`'s
+`fopAc_ac_c`), raised by a fixed vertical offset. The offset is
+**calibrated, not hardcoded**: captured once per first-person activation
+as `realEye.y - current.pos.y` (using the real animated eye value only to
+derive a sensible height for whatever stance is active — standing,
+crouched, swimming — not as the anchor itself), then held fixed until the
+next activation, so it doesn't chase animation frame-to-frame. Falls back
+to `kCoreAnchorHeightOffsetDefault = 55.75f` (borrowed from
+`setBodyPartPos()`'s own `localEyeFromRoot.y`, an existing precedent for
+"root+fixed-offset" eye placement used for a different, unrelated
+condition in that function) for the handful of frames before the first
+real calibration ever runs.
+
+`getVrBodyPositionOffset()` (the section-20 body-lag-compensation function,
+itself still gated behind `isEyePassOpen()` and of unconfirmed effect —
+see below) was updated to match: it used to diff `getVrCameraEyeAnchor()`'s
+smoothed output against a *raw* `getSubjectEyePos()` call to get "how far
+the camera has been pushed this frame" — now uses the SAME
+`computeRawCoreAnchoredEye()` raw basis instead, factored out specifically
+so the two functions can't drift onto two different definitions of "raw
+anchor" the way a second hand-copied version would (this file's own
+standing lesson — see `vr_smooth_turn.hpp`'s header comment, cited
+in-code).
+
+**Deliberate tradeoff, not a bug**: the camera no longer tilts/leans with
+Link's own head/torso animation at all — comfort-motivated, exactly as
+requested. `isFirstPerson()`-gating, wolf-form/mount/cutscene fallback
+behavior, and the extrapolation-for-lag-hiding logic are all unchanged
+from section 20/11 — this only changes WHAT world-space point gets fed
+into that existing smoothing pipeline, not the pipeline itself.
+
+**Built successfully** (RelWithDebInfo) — only `vr_main.cpp` needed
+recompiling (pulls in the header), clean link, no new warnings.
+
+**CONFIRMED FIXED IN-HEADSET, and a genuine surprise: this also fixed
+section 20's body-lag symptom** — user tested and reported "that fixed the
+body anchoring problem. The body doesn't lag behind." **Section 20's
+`mDoExt_modelUpdateDL()` fix was very likely NOT the actual fix for the
+body** (still unconfirmed either way whether it's reachable at all — the
+`[dusk::vr::eyepasscheck]` question below is still open) — the far more
+likely explanation, given this ordering: the OLD eye anchor extrapolated
+`getSubjectEyePos()`, an ANIMATED head-joint value whose per-tick delta
+includes running-gait head bob/sway on top of root translation. Bob is
+oscillatory — extrapolating (curr−prev) THROUGH a direction reversal
+overshoots wildly, every single stride. The body mesh, meanwhile, is built
+from plain `current.pos` (root translation only, no bob) once per tick with
+zero extrapolation. Comparing an oscillating, over-shot PREDICTION against
+a smooth, un-predicted, one-tick-stale root position is a much bigger and
+weirder-looking mismatch than comparing two things both ultimately driven
+by root translation alone — which is exactly what section 23 changed the
+eye anchor to. The residual one-tick positional lag between the
+(extrapolated) camera and the (un-extrapolated) body mesh presumably still
+exists mathematically, but is apparently small/smooth enough now not to
+read as "lag" anymore. Worth remembering if this ever needs revisiting.
+
+**Hands still lag** ("hands still do [lag]" — user's exact words), even
+though tracked-hand position is computed fresh every render frame straight
+from OpenXR controller poses (`buildHandMtx()`, unaffected by any of the
+eye-anchor changes above) added ON TOP of this same eye anchor. Since the
+eye anchor itself is now confirmed visually rigid with the body, and
+`buildHandMtx()`'s own controller-delta math was proven earlier in this
+investigation to be independent of the eye anchor's accuracy, hand lag
+looks like a genuinely separate remaining bug — plausibly still
+`mDoExt_modelEntryDL()`'s `is_sim_frame()` geometry-resubmission gate
+(covers `mpLinkHandModel` too, per that fix's own scope), now isolated as
+the clearer next thing to verify. The `[dusk::vr::eyepasscheck]`
+diagnostic (top of `daAlink_c::draw()`, logs whether `isEyePassOpen()` is
+ever observed true in that call tree) still has not had its log captured —
+two prior debugger captures showed `draw()` only ever entered via the
+legacy `fapGm_Execute()` path, which would make the `modelDraw()`
+`mDoExt_modelUpdateDL()` fix unreachable and therefore a no-op for hands
+too. That log capture (or a fresh debugger call stack, this time
+specifically watching hand draw/matrix-write timing) is the next concrete
+step for the hands specifically, now that the body is cleanly ruled out.
+
+**Follow-up nudge, same session, still user-facing complaint after the
+core-anchor fix landed**: "Link hunches forward when hes running and you
+can see your neck and back in the way." Added a further fixed offset ON
+TOP of the calibrated core anchor — up `kCoreAnchorExtraUpUnits` and
+forward `kCoreAnchorExtraForwardUnits` (both 15.24 game units = 6 real
+inches, via the established 100-units-per-metre conversion). Forward
+direction uses `current.angle.y` (Link's actual BODY-facing yaw — same
+field/BAMS convention `d_a_alink.cpp` already uses elsewhere for
+forward-offset placement), not the HMD/smooth-turn yaw, since the geometry
+being cleared is fixed relative to his body, not to where the player is
+looking. Built successfully (`vr_main.cpp` + `d_a_alink.cpp` recompiled,
+clean link).
+
+**Tuned same day**: 6in up was too much ("6 was too much my bad") —
+brought down to 3in up (`kCoreAnchorExtraUpUnits` = 7.62 units). Forward
+left at 6in (`kCoreAnchorExtraForwardUnits` = 15.24 units), no contrary
+feedback on that one. **CONFIRMED FIXED IN-HEADSET at these tuned values**
+— user tested and reported "Yup thats the right spot." 3in up / 6in
+forward is the settled value for this offset; don't re-tune without new
+feedback.
+
+User also reconsidered the earlier "hands still lag" report from section
+23 above after seeing the forward offset in action: "I think the head
+moved forwards so it looked like lag" — i.e. floating a hypothesis that
+what read as hand lag may have actually been the head/eye position
+sitting forward of the hands' own tracked position, not genuine temporal
+lag. **Retested after the 3in/6in tuning above and RULED OUT**: "the hands
+still lag" — plain, unambiguous, independent of the forward-offset amount.
+Section 20 (hand lag) is NOT closed by any of the camera-anchor work in
+this section; it's a real, separate, still-open bug. Next concrete step
+whenever this is picked back up: the `[dusk::vr::eyepasscheck]` log
+capture (or a fresh debugger call stack targeting hand-matrix-write
+timing specifically) — see section 20's own writeup. **Explicitly deferred
+by the user to a later session** ("I'm gonna do the hands tomorrow"), not
+abandoned.
+
+**Two new, not-yet-investigated gaps surfaced by the same user message**,
+both stemming from section 23's core-anchor calibration only having been
+reasoned through for standing gameplay:
+- **Swimming needs a fix** (user's words: "I do need to fix swimming") —
+  likely the calibrated height offset (or the core anchor concept itself)
+  doesn't hold up in water. `setBodyPartPos()`'s own conditional branch
+  (the one `localEyeFromRoot`/`horseLocalEyeFromRoot`/etc. live in) is
+  explicitly gated in part on `!checkNoResetFlg0(FLG0_SWIM_UP)` and a
+  `0x08000000` status bit — i.e. the base game ALREADY special-cases
+  swimming for its own root-relative eye math, which section 23's
+  `computeRawCoreAnchoredEye()` does not currently account for at all (it
+  unconditionally uses one calibrated-on-activation offset regardless of
+  stance). Nothing implemented yet — needs an in-headset look first to see
+  exactly what's wrong (wrong height? wrong forward clearance? something
+  else entirely) before guessing a fix.
+- **Crawling not yet tested** (user's words: "test crawling") — no known
+  issue yet, just unverified. Worth checking whether the core-anchor
+  height/forward offsets look right prone/crawling, same open question as
+  mounted modes already flagged in section 23.
+
+### Gameplay vs. cutscene anchor split — CONFIRMED FIXED IN-HEADSET 2026-08-09 (further session)
+
+**Goal** (explicit user request): "in gameplay link's head is on his core
+and in cutscenes link's head is anchored to the original head anchor."
+The core/root-anchor comfort change above (this section) had been applied
+unconditionally to every `isFirstPerson()`-true case — ordinary gameplay
+AND cutscenes/NPC dialogue alike (section 21 already extended
+`isFirstPerson()` to cover most cutscenes where Link's body is drawn, and
+section 19 already covers plain dialogue). But the original
+motion-sickness complaint that motivated the core anchor was specifically
+about running/movement (head bob/roll/knockback during locomotion) — not
+cutscenes or conversations, where the ORIGINAL animated head-joint anchor
+(`getSubjectEyePos()`, section 11, pre-dating this section) is arguably
+more desirable: it actually follows the authored eyeline/animation (a
+nod, a look-down, a lean) that a cutscene or conversation is often built
+around, instead of a rigid comfort-anchored point that never moves with
+it.
+
+**Fix** (`vr_link_visibility.hpp`): added `detail::computeRawEyeAnchor(link)`,
+which dispatches on `link->checkEventRun()` — the exact same condition
+`isFirstPerson()`'s own first branch (`if (!link->checkEventRun()) return
+true;`) already uses to distinguish plain gameplay from everything else —
+rather than inventing a second condition:
+- No event running (ordinary gameplay): returns
+  `computeRawCoreAnchoredEye(link)` — unchanged from the section above.
+- An event IS running (cutscene or NPC dialogue, since `isFirstPerson()`
+  is already known true by the caller's precondition): returns
+  `*link->getSubjectEyePos()` directly — the original, pre-section-23
+  animated head-joint position. No core-anchor height calibration or
+  hunch-clearance nudge applied in this branch — both exist specifically
+  to compensate for the core anchor and for running/movement, neither of
+  which is relevant here.
+
+Both `getVrCameraEyeAnchor()` and `getVrBodyPositionOffset()` (which must
+agree on the same "raw anchor" definition to compute a correct lag-
+compensation delta — see that function's own comment) were updated to
+call `computeRawEyeAnchor()` instead of calling
+`computeRawCoreAnchoredEye()` directly, so the two can't silently diverge
+onto two different definitions of "raw anchor" the same way this file's
+other shared-formula lessons (`vr_smooth_turn.hpp`'s header comment,
+`isFirstPerson()`'s own factoring-out) already warn against. The existing
+prev/curr-snapshot smoothing and `kEyeAnchorExtrapolationGain`
+extrapolation pipeline (section 20) is completely unchanged — it's simply
+fed a different raw source per branch each frame; extrapolating the raw
+head-joint position for cutscenes is not new behavior invented this
+session, it's exactly what this same pipeline already did before section
+23 introduced the core anchor (section 20's extrapolation fix predates
+section 23), so no additional risk was introduced by restoring it for
+this branch specifically.
+
+**Built successfully** (RelWithDebInfo) — only `vr_main.cpp` needed
+recompiling (transitively includes the header), clean link, no new
+warnings.
+
+**CONFIRMED FIXED IN-HEADSET** — user tested and reported "Yup looks
+good." Closes out this follow-up; the swimming/crawling gaps immediately
+above are still open and unrelated to this change (they're about the
+core-anchor branch specifically, which this fix left untouched in its
+own logic).
 
 ## Key lesson learned this session
 

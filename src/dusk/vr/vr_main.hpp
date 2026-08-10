@@ -93,6 +93,21 @@ void drawHudBillboard(TGXTexObj* hudTex);
 // drawHudBillboard() above is.
 void applyTrackedHandMtx(J3DModel* handModel);
 
+// ACTUAL FIX for the persistent hand-lag bug (2026-08-09) -- applyTrackedHandMtx()
+// above was proven, via a full-session [dusk::vr::eyepasscheck] log capture,
+// to NEVER actually run during a real VR eye pass at all (its only call
+// site, inside daAlink_c::draw(), is only ever reached from the legacy
+// once-per-sim-tick fapGm_Execute() path). Call this once per real frame
+// instead, from tick() itself (BEFORE the per-eye loop opens -- both eyes
+// share the same non-double-buffered draw-matrix slot, confirmed via
+// J3DMtxBuffer's mCurrentViewNo, so one call per frame is sufficient), with
+// the real daAlink_c's hand model (dComIfGp_getLinkPlayer()-> getHandModel()).
+// Thin forward to vr_link::refreshTrackedHandDrawMtxLive() (vr_link_visibility.hpp)
+// -- see its own comment for the full root-cause writeup and why this needs
+// to also bypass frame_interp's cached interpolation, not just write a
+// fresh matrix. No-op outside VR / before the first updateFrame() call.
+void refreshTrackedHandDrawMtxLive(J3DModel* handModel);
+
 // Re-points mSwordModel/mShieldModel's base transform so they track the
 // real tracked hands, preserving the body rig's own relative offset
 // between the HAND joint (9/0xE, what drives mpLinkHandModel) and the
@@ -127,6 +142,36 @@ void applyTrackedHandMtx(J3DModel* handModel);
 void applyTrackedItemMtx(J3DModel* swordModel, J3DModel* shieldModel,
                           float (*leftItemJointMtx)[4], float (*leftHandJointMtx)[4],
                           float (*rightItemJointMtx)[4], float (*rightHandJointMtx)[4]);
+
+// ACTUAL FIX for sword/shield lag (2026-08-09) -- same root cause and fix
+// shape as refreshTrackedHandDrawMtxLive() above: applyTrackedItemMtx()'s
+// only call site (d_a_alink.cpp, inside daAlink_c::draw()) never runs
+// during a real VR eye pass. Call once per real frame from tick(), before
+// the per-eye loop opens. No arguments -- fetches the player and every
+// matrix it needs internally (vr_link::refreshTrackedItemMtxLive(),
+// vr_link_visibility.hpp), since this is a new VR-internal-only call site.
+void refreshTrackedItemMtxLive();
+
+// FIXED 2026-08-08 (section 20 continuation -- "link's entire body lags
+// behind... for all direction[s]" when moving): mpLinkModel's own base
+// transform is only ever set once per 30Hz sim tick (daAlink_c::
+// setMatrix(), called from execute()), with zero render-time smoothing --
+// unlike the camera/hands, which read the smoothed+extrapolated
+// getVrCameraEyeAnchor() every render frame. Nudges bodyModel's base
+// transform by the exact same world-space delta the eye anchor's
+// smoothing/extrapolation already applied this frame (zero outside
+// first-person, where the camera doesn't get that treatment either -- see
+// vr_link::getVrBodyPositionOffset()'s own comment) and recalculates, so
+// the whole body stays visually rigid with the camera and tracked hands
+// instead of stair-stepping behind them. Call site: d_a_alink.cpp, right
+// before modelDraw(mpLinkModel, ...) in the human-form draw branch (not
+// Wolf form -- getVrBodyPositionOffset() is always zero there anyway,
+// since isFirstPerson() excludes Wolf form). Guard the call site on
+// isRenderingToHeadset(). Thin forward to
+// vr_link::applyVrBodyPositionOffset() (vr_link_visibility.hpp), same
+// "keep the heavier OpenXR/aurora header out of core game files"
+// reasoning as the functions above.
+void applyVrBodyPositionOffset(J3DModel* bodyModel);
 
 // The current VR smooth-turn yaw offset (vr_smooth_turn.hpp), in radians --
 // 0 outside VR or before the right thumbstick has been used to turn.

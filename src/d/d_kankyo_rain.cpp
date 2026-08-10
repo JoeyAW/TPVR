@@ -4258,6 +4258,26 @@ void dKyr_drawStar(Mtx drawMtx, u8** tex) {
     IF_DUSK_BLOCK_END
 #endif
 
+    // User-reported 2026-08-08: stars look wrong/duplicated in VR. This
+    // function orients the star-field billboards via
+    // MTXInverse(dComIfGd_getView()->viewMtxNoTrans, camMtx) -- the
+    // FLATSCREEN camera's view matrix, not either eye's real per-eye VR
+    // view -- and anchors moon/star positions off camera->view.lookat.eye,
+    // the old third-person eye (see below). Same class of bug as the
+    // sun/heat-wave kagerou effects (vr-mod-notes sections 5/10): a
+    // camera-relative effect whose orientation/anchor is computed from the
+    // stale flatscreen camera instead of the actual VR per-eye view, which
+    // a headset's free head rotation and stereo eye separation exposes as
+    // visibly wrong/duplicated (fine on flatscreen, where the camera this
+    // math reads from IS the one actually rendering). Skip the whole draw
+    // in VR, same tradeoff already accepted for those other camera-
+    // anchored effects.
+#ifdef TARGET_PC
+    if (dusk::vr::isRenderingToHeadset()) {
+        return;
+    }
+#endif
+
     if (star_packet->mEffectNum != 0) {
         IF_DUSK(GXPushDebugGroup("dKyr_drawStar"));
 

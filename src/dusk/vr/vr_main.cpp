@@ -340,8 +340,44 @@ void drawHudBillboard(TGXTexObj* hudTex) {
     vr_render::drawHudBillboard(hudTex);
 }
 
+// Forward declaration -- real definition (and the null-space identity
+// fallback it provides) is further down in this file; needed here so
+// applyTrackedHandMtx() below can call it for late-latching.
+static XrPosef locateSpace(XrSpace space, XrSpace base, XrTime time,
+                            XrSpaceLocationFlags* outFlags = nullptr);
+
+// LATE-LATCHING: re-locates the HMD + both controller grip spaces again
+// right before writing the tracked-hand joints, on the theory that a
+// slightly later real-time sample lets the runtime's xrLocateSpace
+// extrapolation use fresher IMU data (standard technique other VR engines
+// use to shave sample-to-display latency for hand-tracked geometry).
+// Confirmed real but NOT the actual fix for hand lag -- this whole call
+// site (reached only via daAlink_c::draw()'s legacy once-per-sim-tick
+// path) turned out to never run during a real VR eye pass at all; the
+// actual fix is refreshTrackedHandDrawMtxLive() below, called once per real
+// frame directly from tick(). Left in place -- harmless (cheap XR calls),
+// and still correctly keeps mpLinkHandModel's AnmMtx in sync for whatever
+// legacy/flatscreen-adjacent code reads it via that dead path.
 void applyTrackedHandMtx(J3DModel* handModel) {
+    if (g_session) {
+        const XrTime time = g_session->predictedDisplayTime();
+        const XrSpace base = g_session->localSpace();
+        const XrPosef hmdPose = locateSpace(g_viewSpace, base, time);
+        const XrPosef rightPose = locateSpace(g_rightGripSpace, base, time);
+        const XrPosef leftPose = locateSpace(g_leftGripSpace, base, time);
+
+        view_class* view = dComIfGd_getView();
+        if (view) {
+            const cXyz eyeAnchor = vr_link::getVrCameraEyeAnchor(view->lookat.eye);
+            vr_link::computeTrackedHandMatrices(hmdPose.position, rightPose, leftPose,
+                                                 eyeAnchor, getSmoothTurnYawRad());
+        }
+    }
     vr_link::applyTrackedHandMtx(handModel);
+}
+
+void refreshTrackedHandDrawMtxLive(J3DModel* handModel) {
+    vr_link::refreshTrackedHandDrawMtxLive(handModel);
 }
 
 void applyTrackedItemMtx(J3DModel* swordModel, J3DModel* shieldModel,
@@ -350,6 +386,14 @@ void applyTrackedItemMtx(J3DModel* swordModel, J3DModel* shieldModel,
     vr_link::applyTrackedItemMtx(swordModel, shieldModel,
                                   leftItemJointMtx, leftHandJointMtx,
                                   rightItemJointMtx, rightHandJointMtx);
+}
+
+void refreshTrackedItemMtxLive() {
+    vr_link::refreshTrackedItemMtxLive();
+}
+
+void applyVrBodyPositionOffset(J3DModel* bodyModel) {
+    vr_link::applyVrBodyPositionOffset(bodyModel);
 }
 
 float getSmoothTurnYawRad() {
@@ -514,7 +558,7 @@ bool startup() {
 }
 
 static XrPosef locateSpace(XrSpace space, XrSpace base, XrTime time,
-                            XrSpaceLocationFlags* outFlags = nullptr) {
+                            XrSpaceLocationFlags* outFlags) {
     XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
     if (space == XR_NULL_HANDLE) {
         if (outFlags) *outFlags = 0;
@@ -525,7 +569,65 @@ static XrPosef locateSpace(XrSpace space, XrSpace base, XrTime time,
     return loc.pose;
 }
 
+namespace {
+// ROOT-CAUSED 2026-08-08 (section 20 continuation -- the "hands/body lag
+// behind" investigation): a real capture caught dusk::frame_interp::
+// begin_frame() firing multiple times in rapid succession mid-scene-draw
+// (see [dusk::frameinterp::beginframe] in the diagnostic added to that
+// function), with a step=0.0 argument landing right in the middle of an
+// otherwise-healthy frame -- and tick() unconditionally resets
+// g_duskVREyePassOpen = false at its own top on EVERY call. An exhaustive
+// codebase-wide search found dusk::frame_interp::begin_frame() has only
+// ONE real caller (m_Do_main.cpp's three call sites, all part of one
+// straight-line sequence immediately before dusk::vr::tick() is invoked)
+// -- there is no code path that legitimately calls it again mid-tick().
+// The only way to reproduce the observed pattern is if tick() itself is
+// being called RE-ENTRANTLY -- a nested call starting while an outer
+// tick() call is still mid-draw, most likely triggered by a nested
+// Windows message pump somewhere deep in the scene draw (the corruption
+// correlated tightly with water's GXCopyTex/resolve_pass substitution in
+// the captures that showed it, though that specific trigger is not
+// independently confirmed) -- clobbering the outer call's in-progress
+// state (g_duskVREyePassOpen, and indirectly g_step via the nested call's
+// own begin_frame-adjacent work) out from under it.
+//
+// Fix: guard tick() against re-entrancy directly, rather than continuing
+// to hunt for the exact nested-pump trigger -- this closes the symptom
+// regardless of what causes the nested call, and any real fix for the
+// nested-pump cause itself (if one is ever found) can layer on top
+// without conflicting with this guard. RAII rather than a plain flag +
+// manual reset at every return point: tick() has many early-return paths
+// (no session, XR call failures, shouldRender==false, view not ready,
+// etc.) and a plain flag would need updating at every single one --
+// easy to miss one and leave the guard permanently "stuck" true.
+struct TickReentrancyGuard {
+    bool& flag;
+    bool weAcquired;
+    explicit TickReentrancyGuard(bool& f) : flag(f), weAcquired(!f) {
+        if (weAcquired) flag = true;
+    }
+    ~TickReentrancyGuard() {
+        if (weAcquired) flag = false;
+    }
+    bool alreadyRunning() const { return !weAcquired; }
+};
+}  // namespace
+
 void tick(const dusk::game_clock::MainLoopPacer& pacing) {
+    static bool s_tickInProgress = false;
+    TickReentrancyGuard reentrancyGuard(s_tickInProgress);
+    if (reentrancyGuard.alreadyRunning()) {
+        // TEMP DIAGNOSTIC (remove once confirmed fixed): confirms this is
+        // really the mechanism, and how often it's actually happening.
+        static int s_reentrantCount = 0;
+        char msg[96];
+        _snprintf_s(msg, _TRUNCATE,
+            "[dusk::vr::tick] RE-ENTRANT CALL #%d DETECTED -- skipping\n",
+            ++s_reentrantCount);
+        OutputDebugStringA(msg);
+        return;
+    }
+
     // Reset up front: every early-return below (no session, session just
     // stopped, XR wait/begin failure, shouldRender==false, no ready
     // gameplay view) means no stereo draw happened this frame. Only the
@@ -932,6 +1034,24 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     vr_link::FrameInput frameInput{hmdPose, rightPose, leftPose, rightAimPose, leftAimPose,
                                     dusk::vr::getSmoothTurnYawRad()};
     vr_link::updateFrame(frameInput);
+
+    // ACTUAL FIX for section 20's persistent hand-lag bug (2026-08-09) --
+    // must run AFTER updateFrame() above (computes this frame's tracked
+    // matrices into vr_link::detail::s_rightHandMtx/s_leftHandMtx) and
+    // BEFORE the per-eye loop below opens either eye's real draw. See
+    // refreshTrackedHandDrawMtxLive()'s own comment (vr_link_visibility.hpp)
+    // for the full root-cause writeup: applyTrackedHandMtx()'s existing
+    // per-eye call site (d_a_alink.cpp, inside daAlink_c::draw()) was
+    // proven, via a full-session [dusk::vr::eyepasscheck] log capture, to
+    // never actually run during a real VR eye pass -- this call site does.
+    if (auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer())) {
+        dusk::vr::refreshTrackedHandDrawMtxLive(link->getHandModel());
+    }
+
+    // Same fix, same reason, extended to sword/shield (2026-08-09 follow-up
+    // -- user-confirmed hands fixed, sword/shield still laggy, same root
+    // cause). See refreshTrackedItemMtxLive()'s own comment.
+    dusk::vr::refreshTrackedItemMtxLive();
 
     // World-space point both eyes anchor their view matrix to this frame --
     // see vr_link::getVrCameraEyeAnchor()'s comment. Computed once (not per

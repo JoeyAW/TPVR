@@ -664,6 +664,22 @@ namespace detail {
 inline Mtx s_rightHandMtx;
 inline Mtx s_leftHandMtx;
 inline bool s_handMtxValid = false;
+
+// Sword/shield RESTING-POSE (not-hand-attached) smoothing state: the
+// belt/back-relative pose setItemMatrix() computes is only written once per
+// SIM TICK. Marking that matrix "live" (to bypass frame_interp's stale
+// once-per-tick interpolation) fixes lag but exposes choppiness if left
+// raw/un-smoothed. Same prev/curr-snapshot-and-lerp technique already
+// proven for Link's own head anchor (getVrCameraEyeAnchor()) is used
+// instead, via refreshRestingPoseSmoothed() below.
+inline Mtx s_swordRestingPrevMtx;
+inline Mtx s_swordRestingCurrMtx;
+inline uint64_t s_swordRestingTick = ~0ull;
+inline bool s_swordRestingValid = false;
+inline Mtx s_shieldRestingPrevMtx;
+inline Mtx s_shieldRestingCurrMtx;
+inline uint64_t s_shieldRestingTick = ~0ull;
+inline bool s_shieldRestingValid = false;
 }  // namespace detail
 
 // True when the player should currently be viewing (and the VR camera
@@ -717,18 +733,87 @@ inline bool s_handMtxValid = false;
 // Removed -- dEvt_control_c's own mode is the only signal actually needed;
 // the logged mode=2/DEMO blocks for real cutscenes/other events in the
 // same capture confirm nothing gets confused by dropping it.
+//
+// FIXED 2026-08-08 (user request: "make every cutscene that has link
+// loaded in first person"): the DEMO/COMPULSORY branch below used to be a
+// blanket third-person fallback for every cutscene/door-transition event,
+// on the theory that an authored cutscene camera isn't guaranteed to be
+// looking at Link at all. That's still true for shots that don't actually
+// feature Link's own body -- many cutscenes swap in a separate stand-in
+// demo actor and hide the real Link actor entirely rather than animating
+// him directly (or just point the camera elsewhere while he's parked
+// off-camera) -- so this doesn't blanket-flip to first-person; it checks
+// whether Link's OWN body is actually the thing being drawn this frame via
+// checkPlayerNoDraw() (d_a_alink_link.inc -- the same flag
+// draw() itself already gates mpLinkModel's draw call on, driven either by
+// a camera-attention "hide player" bit or FLG0_PLAYER_NO_DRAW, both of
+// which are only ever set from the demo/cutscene code in
+// d_a_alink_demo.inc, never during ordinary gameplay). When Link is
+// genuinely loaded/visible in the shot, stay first-person same as
+// dialogue; when he's been swapped out or explicitly hidden for a shot
+// that isn't about him, keep the third-person fallback -- there's no real
+// head position worth anchoring the camera to in that case anyway.
 inline bool isFirstPerson(daAlink_c* link) {
     if (!link || link->checkWolf()) return false;
     if (!link->checkEventRun()) return true;  // no event at all -- ordinary gameplay
 
     dEvt_control_c* event = dComIfGp_getEvent();
-    return dComIfGp_event_runCheck() && event && event->getMode() == dEvt_mode_TALK_e;
+    if (!dComIfGp_event_runCheck() || !event) return false;
+    if (event->getMode() == dEvt_mode_TALK_e) return true;  // plain dialogue
+
+    // FIXED 2026-08-08 (user report: forcing cutscenes first-person put the
+    // camera "phasing through Epona's head" during a horseback cutscene).
+    // getVrCameraEyeAnchor()'s mount-relative eye offset
+    // (horseLocalEyeFromRoot/canoeLocalEyeFromRoot/boardLocalEyeFromRoot,
+    // setBodyPartPos() in d_a_alink.cpp) only activates under a specific
+    // set of active-gameplay player-status flags
+    // (dComIfGp_checkPlayerStatus0/1(...)) -- a scripted cutscene demo
+    // doesn't appear to set those the same way normal interactive riding
+    // does, so during a mounted cutscene the anchor falls through to
+    // field_0x3768 = eyePos, i.e. Link's own bare head-joint position with
+    // no mount-relative offset applied at all -- and section 11 already
+    // flagged this exact mount-eye-anchor path as "expected to work but
+    // never actually confirmed in-headset." Until that's separately
+    // root-caused, treat mounted cutscenes as third-person, the same
+    // carve-out reasoning as the Wolf-form check at the top of this
+    // function (a mount's own rig was never designed to be viewed from
+    // inside Link's un-adjusted head position). Does NOT affect ordinary
+    // mounted GAMEPLAY (the `!link->checkEventRun()` branch above returns
+    // true before this is ever reached) -- only mounted cutscenes.
+    if (link->checkReinRide() || link->checkCanoeRide() || link->checkBoardRide()) {
+        return false;
+    }
+
+    // Cutscene / door-transition event: first-person too, but only while
+    // Link's real body is actually loaded/drawn in this shot.
+    return !link->checkPlayerNoDraw();
 }
 
 // Forward-declared here, defined further down (see its own comment) --
 // needed by updateFrame() below so hands anchor to the SAME point the VR
 // camera actually renders from.
 inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye);
+
+// Computes both hands' tracked matrices from a given (hmdPos, controller
+// poses, eye anchor, yaw) sample and caches them into detail::s_rightHandMtx/
+// s_leftHandMtx -- the actual write applyTrackedHandMtx() (below) later
+// reads from. Factored out of updateFrame() (2026-08-08, section 20
+// continuation: VR hands lag behind during fast movement) so a SECOND,
+// LATER call site -- vr_main.cpp's applyTrackedHandMtx() forward, invoked
+// once per eye right before the hand joints are actually drawn -- can
+// recompute this from a freshly re-located sample instead of the one
+// updateFrame() took near the top of the frame. One implementation, two
+// call sites, same "don't let a duplicated formula silently drift out of
+// sync" reasoning as vr_smooth_turn.hpp's own header comment.
+inline void computeTrackedHandMatrices(const XrVector3f& hmdPos,
+                                        const XrPosef& rightControllerPose,
+                                        const XrPosef& leftControllerPose,
+                                        const cXyz& eyeAnchor,
+                                        float yawRad) {
+    buildHandMtx(detail::s_rightHandMtx, hmdPos, rightControllerPose, eyeAnchor, VR_SCALE_FACTOR, false, yawRad);
+    buildHandMtx(detail::s_leftHandMtx, hmdPos, leftControllerPose, eyeAnchor, VR_SCALE_FACTOR, true, yawRad);
+    detail::s_handMtxValid = true;
+}
 
 inline void updateFrame(const FrameInput& input) {
     auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
@@ -782,35 +867,25 @@ inline void updateFrame(const FrameInput& input) {
     // two anchors -- looked exactly like "tracks my movement, but isn't
     // where my controller is". Using the same anchor as the camera fixes
     // both to agree.
+    // NOTE (2026-08-08, section 20 continuation; CORRECTED 2026-08-09): this
+    // early-in-tick() sample is what drives face/hat/arm visibility above
+    // and is what actually reaches the render. The old version of this
+    // comment claimed vr_main.cpp's per-eye applyTrackedHandMtx() call site
+    // (inside daAlink_c::draw(), via setDrawHand()) overwrites this again,
+    // freshly re-located, right before each eye's real draw -- that was
+    // never actually true: a full-session [dusk::vr::eyepasscheck] log
+    // capture proved daAlink_c::draw() never runs during a real VR eye pass
+    // at all (only from the legacy once-per-sim-tick fapGm_Execute() path),
+    // so that call site silently never fired during real rendering. The
+    // matrices computed HERE are instead applied via
+    // refreshTrackedHandDrawMtxLive() (below), called once per real frame
+    // from vr_main.cpp's tick() right after this function returns -- see
+    // its own comment for the full root-cause writeup and why a plain
+    // setAnmMtx() write alone isn't sufficient either. Position tracking
+    // itself has been confirmed working since 2026-08-02 (section 12).
     const cXyz eyePos = getVrCameraEyeAnchor(view->lookat.eye);
-    const XrVector3f& hmdPos = input.hmdPose.position;
-
-    buildHandMtx(detail::s_rightHandMtx, hmdPos, input.rightControllerPose, eyePos, VR_SCALE_FACTOR, false, input.smoothTurnYawRad);
-    buildHandMtx(detail::s_leftHandMtx, hmdPos, input.leftControllerPose, eyePos, VR_SCALE_FACTOR, true, input.smoothTurnYawRad);
-    detail::s_handMtxValid = true;
-
-    // TEMP DIAGNOSTIC (position-not-tracking investigation, remove once
-    // confirmed fixed): the previous round's [dusk::vr::handpose] log
-    // proved the raw controller poses are real/changing, and
-    // [dusk::vr::applyhand] proved this override reaches the draw
-    // (rotation visibly responds in-headset) -- but that log's world-space
-    // numbers are dominated by linkEyeGame's own tens-of-thousands-of-units
-    // magnitude, making a real but modest hand-tracking contribution
-    // impossible to eyeball. This isolates the actual head-relative offset
-    // (dx/dy/dz, metres) separately, fired every 15 frames (~6x/sec at
-    // 90Hz) so even a few seconds of "hold still, wave one hand" testing
-    // captures plenty of samples.
-    static int frameCounter = 0;
-    if ((frameCounter++ % 15) == 0) {
-        const float rdx = input.rightControllerPose.position.x - hmdPos.x;
-        const float rdy = input.rightControllerPose.position.y - hmdPos.y;
-        const float rdz = input.rightControllerPose.position.z - hmdPos.z;
-        char line[256];
-        _snprintf_s(line, _TRUNCATE,
-                    "[dusk::vr::handoffset] right dx,dy,dz=(%.4f,%.4f,%.4f) eyePos=(%.1f,%.1f,%.1f)\n",
-                    rdx, rdy, rdz, eyePos.x, eyePos.y, eyePos.z);
-        OutputDebugStringA(line);
-    }
+    computeTrackedHandMatrices(input.hmdPose.position, input.rightControllerPose,
+                                input.leftControllerPose, eyePos, input.smoothTurnYawRad);
 }
 
 // Called from d_a_alink.cpp, once per eye, immediately after the base
@@ -846,6 +921,42 @@ inline void applyTrackedHandMtx(J3DModel* handModel) {
     if (!handModel || !detail::s_handMtxValid) return;
     handModel->setAnmMtx(RIGHT_HAND_JOINT, detail::s_rightHandMtx);
     handModel->setAnmMtx(LEFT_HAND_JOINT, detail::s_leftHandMtx);
+}
+
+// ACTUAL FIX for section 20's persistent hand lag (2026-08-09). Same
+// underlying "compute once per sim tick, REPLAY every real render frame"
+// architecture writeup as before (see git history for the superseded
+// getDrawMtxPtr()/viewCalc() version of this function and why it had ZERO
+// observable effect) -- but the buffer this needs to intervene on was
+// wrong. A [dusk::vr::liverefresh] capture showed getDrawMtxPtr() returning
+// the SAME static address for every different hand-model instance, frozen
+// at (0,0,0) -- that's J3DMtxBuffer::sNoUseDrawMtx, a shared placeholder
+// (J3DMtxBuffer.cpp's setNoUseDrawMtx()), not a real per-model buffer at
+// all. Traced why directly in J3DShapeMtx.cpp: mpLinkHandModel's shapes use
+// the "ConcatView" load type (J3DMtxBuffer::create() explicitly routes
+// ConcatView models to setNoUseDrawMtx() instead of allocating a real
+// DrawMtx array), and J3DShapeMtxConcatView::load() for THIS load type
+// reads the matrix straight from J3DModel::getAnmMtx() (via
+// getUserAnmMtx(), which J3DMtxBuffer::createAnmMtx() aliases directly onto
+// mpAnmMtx -- the exact same buffer setAnmMtx() writes and getAnmMtx()
+// reads) through an sMtxPtrTbl[]/getDrawMtxFlag()/getDrawMtxIndex()
+// redirection -- getDrawMtxPtr()/calcDrawMtx() are never consulted for this
+// model's shapes at all. So the fix is simpler than the superseded version:
+// mark getAnmMtx() itself live -- no separate viewCalc() recompute needed,
+// since applyTrackedHandMtx()'s existing setAnmMtx() call already writes
+// AND records (via J3DModel::setAnmMtx()'s own record_final_mtx() call,
+// J3DModel.cpp) the exact matrix that matters. mark_live_this_frame() just
+// needs to tell resolve_replacement() not to substitute a stale
+// once-per-tick-interpolated value for it. Called once per real frame from
+// vr_main.cpp's tick(), before the per-eye loop opens (both eyes share the
+// same matrix, no per-eye duplication needed).
+inline void refreshTrackedHandDrawMtxLive(J3DModel* handModel) {
+    if (!handModel || !detail::s_handMtxValid) return;
+
+    applyTrackedHandMtx(handModel);
+
+    dusk::frame_interp::mark_live_this_frame(handModel->getAnmMtx(RIGHT_HAND_JOINT));
+    dusk::frame_interp::mark_live_this_frame(handModel->getAnmMtx(LEFT_HAND_JOINT));
 }
 
 // Sword/shield tracked attachment -- same underlying bug class as
@@ -970,12 +1081,14 @@ inline bool mtxNearlyEqual(MtxP a, MtxP b) {
 // matrix, but MTXInverse's own return value is trusted over assuming
 // success -- leaving the base game's existing transform in place is a
 // safe fallback either way).
+// Pure math -- no gating. Computes the tracked-hand-relative matrix for an
+// item, given the body rig's current item/hand joint matrices and the
+// tracked hand pose. Returns false only if MTXInverse fails (should not
+// happen for a well-formed rigid joint matrix, but its return value is
+// trusted over assuming success).
 inline bool computeTrackedItemMtx(
-    Mtx dest, MtxP currentBaseMtx, MtxP itemJointMtx, MtxP handJointMtx,
-    MtxP trackedHandMtx)
+    Mtx dest, MtxP itemJointMtx, MtxP handJointMtx, MtxP trackedHandMtx)
 {
-    if (!mtxNearlyEqual(currentBaseMtx, itemJointMtx)) return false;
-
     Mtx handInv;
     if (!MTXInverse(handJointMtx, handInv)) return false;
 
@@ -985,27 +1098,235 @@ inline bool computeTrackedItemMtx(
     return true;
 }
 
+// Returns whether `model` was actually updated (setItemMatrix() had chosen
+// the hand-attached branch this frame for it) -- exposed as a bool (rather
+// than folded straight into applyTrackedItemMtx() below) so
+// refreshTrackedItemMtxLive() knows which models actually need their
+// matrices marked live for frame_interp, without duplicating the gating
+// logic. Gate: compare the model's CURRENT base transform against
+// itemJointMtx (mtxNearlyEqual) -- only proceed if setItemMatrix() actually
+// chose the hand-attached branch this frame. Unchanged from before this
+// session's live-refresh work; still correct for this function's own
+// (dead, but harmless) once-per-tick call site -- see
+// applyTrackedItemMtxOneLive() below for why the LIVE per-real-frame call
+// site needs a different (cached) version of this same gate.
+inline bool applyTrackedItemMtxOne(
+    J3DModel* model, MtxP itemJointMtx, MtxP handJointMtx, MtxP trackedHandMtx)
+{
+    if (!model || !detail::s_handMtxValid) return false;
+    if (!mtxNearlyEqual(model->getBaseTRMtx(), itemJointMtx)) return false;
+
+    Mtx trackedMtx;
+    if (!computeTrackedItemMtx(trackedMtx, itemJointMtx, handJointMtx, trackedHandMtx))
+        return false;
+
+    model->setBaseTRMtx(trackedMtx);
+    model->calc();
+    return true;
+}
+
+// LIVE variant for refreshTrackedItemMtxLive() (2026-08-09, multiple rounds
+// of history -- see git log for the full trail). FINAL fix: `attached` is
+// now the REAL, AUTHORITATIVE game-state flag (daAlink_c::checkItemSwordEquip()/
+// checkShieldHandAttached(), computed by the caller and passed in), not a
+// position-comparison heuristic. Two different heuristics were tried and
+// both failed for real reasons, not implementation bugs: (1) comparing the
+// model's own base transform against a freshly-re-read item-joint matrix
+// was self-defeating once called every real frame instead of once per tick
+// (this function's own overwrite corrupted the next comparison); caching
+// the comparison per-tick (a first attempt at fixing that) still failed
+// because (2) the underlying item-joint VALUE ITSELF keeps changing between
+// when setItemMatrix() captures it (during game-logic execute) and when
+// this later, real-frame call site re-reads it (confirmed via a real
+// [dusk::vr::itemgate] capture during a confirmed mEquipItem==0x103 window:
+// base and item differed by up to ~1.0 in rotation components, changing
+// rapidly tick to tick -- a fast swing animation genuinely moves the joint
+// between those two read points, not a bug in the comparison). No amount of
+// caching fixes a comparison against a value that's legitimately stale by
+// construction -- the real flag sidesteps the whole problem.
+inline bool applyTrackedItemMtxIfAttached(
+    J3DModel* model, bool attached, MtxP itemJointMtx, MtxP handJointMtx, MtxP trackedHandMtx)
+{
+    if (!model || !attached || !detail::s_handMtxValid) return false;
+
+    Mtx trackedMtx;
+    if (!computeTrackedItemMtx(trackedMtx, itemJointMtx, handJointMtx, trackedHandMtx))
+        return false;
+
+    model->setBaseTRMtx(trackedMtx);
+    model->calc();
+    return true;
+}
+
+inline void lerpMtxElementwise(Mtx out, MtxP a, MtxP b, float t) {
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            out[r][c] = a[r][c] + (b[r][c] - a[r][c]) * t;
+        }
+    }
+}
+
+// Smooths sword/shield's RESTING-POSE (not-hand-attached) base transform
+// across real frames -- see detail::s_swordRestingPrevMtx's comment for the
+// full history of why this is needed (frame_interp's own once-per-tick
+// interpolation only sees data from the dead per-tick call path, and
+// marking the matrix "live" to bypass it -- correct for the tracked-hand
+// case -- makes a 30Hz-only-updated value render as raw, choppy steps at
+// real framerate instead). On each NEW sim tick (sim_tick_seq() changed),
+// shifts curr->prev and snapshots the model's CURRENT base transform
+// (whatever setItemMatrix() just set THIS tick, correct/fresh at this exact
+// point since nothing has overwritten it yet this tick -- same ordering
+// guarantee applyTrackedItemMtxOneLive()'s gate cache relies on) into curr.
+// Every real frame, blends prev/curr with the real interpolation fraction
+// for THIS frame (dusk::frame_interp::get_interpolation_step()) -- same
+// prev/curr-snapshot-and-lerp shape already proven for Link's own head
+// anchor (getVrCameraEyeAnchor()), just applied to a different value.
+// Per-element matrix lerp (not a proper slerp) matches frame_interp's own
+// internal lerp_matrix() -- an established, already-shipping approximation
+// in this codebase, reasonable given how little a joint matrix typically
+// rotates between two consecutive ~30Hz ticks.
+inline void refreshRestingPoseSmoothed(
+    J3DModel* model, uint64_t& cachedTick, bool& valid, Mtx prevMtx, Mtx currMtx)
+{
+    if (!model) return;
+
+    const uint64_t tick = dusk::frame_interp::sim_tick_seq();
+    if (cachedTick != tick) {
+        cachedTick = tick;
+        if (valid) {
+            MTXCopy(currMtx, prevMtx);
+        } else {
+            MTXCopy(model->getBaseTRMtx(), prevMtx);
+            valid = true;
+        }
+        MTXCopy(model->getBaseTRMtx(), currMtx);
+    }
+
+    Mtx blended;
+    lerpMtxElementwise(blended, prevMtx, currMtx, dusk::frame_interp::get_interpolation_step());
+    model->setBaseTRMtx(blended);
+    model->calc();
+}
+
 inline void applyTrackedItemMtx(
     J3DModel* swordModel, J3DModel* shieldModel,
     MtxP leftItemJointMtx, MtxP leftHandJointMtx,
     MtxP rightItemJointMtx, MtxP rightHandJointMtx)
 {
-    if (!detail::s_handMtxValid) return;
+    applyTrackedItemMtxOne(swordModel, leftItemJointMtx, leftHandJointMtx, detail::s_leftHandMtx);
+    applyTrackedItemMtxOne(shieldModel, rightItemJointMtx, rightHandJointMtx, detail::s_rightHandMtx);
+}
 
-    Mtx trackedMtx;
-    if (swordModel &&
-        computeTrackedItemMtx(trackedMtx, swordModel->getBaseTRMtx(),
-                               leftItemJointMtx, leftHandJointMtx, detail::s_leftHandMtx))
-    {
-        swordModel->setBaseTRMtx(trackedMtx);
-        swordModel->calc();
+// Marks every joint of `model` live for frame_interp. FOUND AND FIXED
+// 2026-08-09 (4th round on sword/shield lag): the first version of this
+// function only marked getAnmMtx() -- a [dusk::vr::itemsentinel] capture
+// confirmed sword/shield ARE the same ConcatView type as the hand model
+// (getDrawMtxPtr() reads the shared sNoUseDrawMtx sentinel, frozen at
+// (0,0,0)) and that getAnmMtx(0) WAS updating correctly frame to frame --
+// so the buffer being refreshed was right, but the user still reported
+// visible lag. Root cause: J3DShapeMtxConcatView::load() (J3DShapeMtx.cpp)
+// picks EITHER getUserAnmMtx() (== getAnmMtx(), what markModelJointsLive()
+// marked) OR getWeightAnmMtx() (a completely separate weight-envelope
+// buffer, for shapes bound via envelope/skin weights rather than a plain
+// rigid joint bind) via getDrawMtxFlag(mUseMtxIndex) -- which one a given
+// shape actually uses isn't something this code can assume either way
+// without checking per-model, and sword/shield's shapes evidently use the
+// weight-envelope one. J3DModel::calc() (J3DModel.cpp) already computes AND
+// records BOTH getAnmMtx() and getWeightAnmMtx() every call (calcAnmMtx()
+// then calcWeightEnvelopeMtx(), each followed by a record_final_mtx() loop)
+// -- so the refresh side was already correct, only the live-marking was
+// incomplete. Marking every joint/envelope-matrix (not just index 0) is
+// deliberately over-inclusive rather than assuming a specific index -- these
+// are small models (a handful of joints/weights at most), so the extra
+// iterations are negligible, and guessing a specific index wrong would
+// silently reintroduce this exact bug for that one index.
+inline void markModelJointsLive(J3DModel* model) {
+    if (!model) return;
+    const u16 jointNum = model->getModelData()->getJointNum();
+    for (u16 i = 0; i < jointNum; ++i) {
+        dusk::frame_interp::mark_live_this_frame(model->getAnmMtx(i));
     }
-    if (shieldModel &&
-        computeTrackedItemMtx(trackedMtx, shieldModel->getBaseTRMtx(),
-                               rightItemJointMtx, rightHandJointMtx, detail::s_rightHandMtx))
-    {
-        shieldModel->setBaseTRMtx(trackedMtx);
-        shieldModel->calc();
+    const u16 wEvlpNum = model->getModelData()->getWEvlpMtxNum();
+    for (u16 i = 0; i < wEvlpNum; ++i) {
+        dusk::frame_interp::mark_live_this_frame(model->getWeightAnmMtx(i));
+    }
+}
+
+// ACTUAL FIX for sword/shield lag (2026-08-09), same root cause and same
+// fix shape as refreshTrackedHandDrawMtxLive() above: applyTrackedItemMtx()
+// above is only ever called from d_a_alink.cpp, inside daAlink_c::draw() --
+// proven (via the same [dusk::vr::eyepasscheck] capture that root-caused
+// the hand-lag bug) to never run during a real VR eye pass. Called once per
+// real frame from vr_main.cpp's tick(), before the per-eye loop opens.
+// Takes no arguments (unlike applyTrackedItemMtx(), which is still called
+// from its old dead-but-harmless d_a_alink.cpp call site) -- fetches the
+// player and every matrix it needs itself, since this is a new,
+// VR-internal-only call site with no existing per-eye plumbing to thread
+// through. leftItemJointMtx/etc. are read directly off mpLinkModel's
+// CURRENT joint matrices -- unlike the tracked hand pose, Link's own body
+// animation genuinely only updates once per sim tick (real skeletal
+// animation, not free-moving controller input), so reading it fresh from
+// this later call site (instead of at the moment draw() used to run) is
+// still just "this tick's already-correct value", no separate staleness
+// problem to solve here.
+// 7th round tried an item-joint-to-hand-joint DISTANCE heuristic here
+// instead of the mEquipItem gate (removed) -- turned out useless: the item
+// joint is a fixed rig joint that sits ~10 units from the hand joint
+// UNCONDITIONALLY, sheathed or not (confirmed via direct capture), not a
+// signal of anything gameplay-state-related. See refreshTrackedItemMtxLive()
+// below for what actually settled this (direct instrumentation of
+// daAlink_c::setItemMatrix() itself).
+inline void refreshTrackedItemMtxLive() {
+    auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
+    if (!link) return;
+
+    J3DModel* bodyModel = link->getBodyModel();
+    if (!bodyModel) return;
+
+    MtxP leftItemJointMtx = bodyModel->getAnmMtx(link->getLeftItemJntNo());
+    MtxP leftHandJointMtx = bodyModel->getAnmMtx(link->getLeftHandJntNo());
+    MtxP rightItemJointMtx = bodyModel->getAnmMtx(link->getRightItemJntNo());
+    MtxP rightHandJointMtx = bodyModel->getAnmMtx(link->getRightHandJntNo());
+
+    J3DModel* swordModel = link->getSwordModel();
+    J3DModel* shieldModel = link->getShieldModel();
+
+    // When NOT hand-attached, setItemMatrix()'s belt/back-relative resting
+    // pose is still computed once per SIM TICK -- SHEATHED sword/shield are
+    // just as subject to frame_interp's once-per-tick-interpolated
+    // staleness as the tracked-hand case originally was, even though their
+    // position doesn't need a tracked-pose override, just a "refresh + mark
+    // live every real frame instead of raw un-smoothed steps" treatment
+    // (refreshRestingPoseSmoothed()).
+    //
+    // FINAL FIX (2026-08-09, multiple rounds -- see
+    // applyTrackedItemMtxIfAttached()'s own comment for the full history of
+    // why two different position-based heuristics both failed for real
+    // reasons): use the game's own REAL, authoritative hand-attach flags
+    // (checkItemSwordEquip()/checkShieldHandAttached(), mirroring
+    // setItemMatrix()'s exact conditions) instead of re-deriving "is this
+    // attached" from position data that's legitimately stale by
+    // construction during fast animation.
+    const bool swordAttached = link->checkItemSwordEquip();
+    const bool shieldAttached = link->checkShieldHandAttached();
+
+    const bool swordUpdated = applyTrackedItemMtxIfAttached(
+        swordModel, swordAttached, leftItemJointMtx, leftHandJointMtx, detail::s_leftHandMtx);
+    if (swordModel) {
+        if (!swordUpdated) {
+            refreshRestingPoseSmoothed(swordModel, detail::s_swordRestingTick, detail::s_swordRestingValid,
+                                        detail::s_swordRestingPrevMtx, detail::s_swordRestingCurrMtx);
+        }
+        markModelJointsLive(swordModel);
+    }
+    const bool shieldUpdated = applyTrackedItemMtxIfAttached(
+        shieldModel, shieldAttached, rightItemJointMtx, rightHandJointMtx, detail::s_rightHandMtx);
+    if (shieldModel) {
+        if (!shieldUpdated) {
+            refreshRestingPoseSmoothed(shieldModel, detail::s_shieldRestingTick, detail::s_shieldRestingValid,
+                                        detail::s_shieldRestingPrevMtx, detail::s_shieldRestingCurrMtx);
+        }
+        markModelJointsLive(shieldModel);
     }
 }
 
@@ -1054,6 +1375,124 @@ inline cXyz lerpXyz(const cXyz& a, const cXyz& b, float t) {
     out.y = a.y + (b.y - a.y) * t;
     out.z = a.z + (b.z - a.z) * t;
     return out;
+}
+
+// ADDED 2026-08-09 (user request: anchor the VR camera to Link's ROOT/CORE
+// position -- current.pos, the same physics-driven position setMatrix()
+// uses to place mpLinkModel itself -- plus a fixed vertical offset, instead
+// of his animated head-joint position (getSubjectEyePos()/field_0x3768)
+// directly. Motivation is comfort, not the still-open hands/body-lag bug
+// (section 20): current.pos doesn't bob, roll, or lurch with idle sway,
+// footstep impact, or getting knocked around the way the head joint does,
+// so a camera anchored to it should feel much calmer during exactly those
+// moments, at the deliberate cost of no longer tilting/bobbing with Link's
+// own head lean -- a tradeoff, not a bug.
+//
+// The vertical offset is CALIBRATED rather than hand-tuned: captured once
+// per first-person activation from the real, current getSubjectEyePos()
+// value (`realEye.y - current.pos.y`) so it automatically lands at
+// roughly the right height for whatever stance is active (standing,
+// crouched, swimming, etc.) without needing a whole family of
+// hand-authored per-mode constants the way setBodyPartPos()'s own
+// localEyeFromRoot/horseLocalEyeFromRoot/boardLocalEyeFromRoot/
+// canoeLocalEyeFromRoot/wlLocalEyeFromRoot already does for a different
+// purpose (see that function, d_a_alink.cpp) -- then held FIXED until the
+// next activation. Deliberately NOT re-sampled every frame/tick: doing so
+// would just reintroduce the exact bob/roll this exists to remove, since
+// getSubjectEyePos() is the animated value. kCoreAnchorHeightOffsetDefault
+// is only a placeholder used for the handful of frames before the first
+// real calibration ever runs (isFirstPerson() true before setBodyPartPos()
+// has executed even once) -- taken from localEyeFromRoot's own vertical
+// component above as a reasonable standing-height guess, immediately
+// overwritten by the real calibration on the very first activation.
+inline constexpr float kCoreAnchorHeightOffsetDefault = 55.75f;
+inline float s_coreAnchorHeightOffset = kCoreAnchorHeightOffsetDefault;
+inline bool s_coreAnchorCalibrated = false;
+
+// ADDED 2026-08-09 (user report, after testing the core-anchor change
+// in-headset: "Link hunches forward when hes running and you can see your
+// neck and back in the way"). A fixed nudge applied ON TOP of the
+// calibrated core anchor above -- up and forward -- to clear the camera of
+// his own hunched neck/shoulder/back geometry during fast movement. 100
+// game units = 1 real metre (VR_SCALE_FACTOR above / vr_stereo_render.hpp's
+// kEyePosScale, same established conversion used for hand tracking) -> 1in
+// = 2.54 units.
+//
+// TUNED same day: original 6in-up guess was too much ("6 was too much my
+// bad") -- brought down to 3in up (7.62 units). Forward left at 6in per no
+// contrary feedback.
+inline constexpr float kCoreAnchorExtraUpUnits = 7.62f;      // 3 real inches
+inline constexpr float kCoreAnchorExtraForwardUnits = 15.24f; // 6 real inches
+
+// Shared by getVrCameraEyeAnchor() and getVrBodyPositionOffset() so both
+// agree on exactly the same definition of "the raw, this-instant,
+// unsmoothed anchor point" -- factored out specifically to avoid the two
+// drifting apart the way a second independent copy would (see
+// getVrBodyPositionOffset()'s own header comment, the same standing lesson
+// cited there). Calibrates/updates detail::s_coreAnchorHeightOffset as a
+// side effect, same as before this was factored out. Caller must already
+// know isFirstPerson(link) is true.
+inline cXyz computeRawCoreAnchoredEye(daAlink_c* link) {
+    const cXyz realEye = *link->getSubjectEyePos();
+    if (!s_coreAnchorCalibrated) {
+        s_coreAnchorHeightOffset = realEye.y - link->current.pos.y;
+        s_coreAnchorCalibrated = true;
+    }
+
+    // Forward offset direction comes from Link's actual BODY-facing yaw
+    // (current.angle.y -- the same field/convention d_a_alink.cpp itself
+    // already uses for forward-offset placement, e.g. `current.pos.x +
+    // N*cM_ssin(current.angle.y)` / `current.pos.z + N*cM_scos(current.angle.y)`
+    // elsewhere in that file), NOT the HMD/smooth-turn yaw -- deliberately,
+    // since the geometry being cleared (his hunched neck/back) is fixed
+    // relative to his BODY, not to wherever the player happens to be
+    // looking. current.angle.y is a signed 16-bit BAMS angle (SSystem's
+    // csXyz/SVec convention, full circle = 65536) with 0 facing +Z and
+    // positive rotating toward +X, matching that same existing call site;
+    // converted to radians here (rather than pulling in this codebase's
+    // separate cM_ssin/cM_scos fixed-angle trig helpers, unused elsewhere
+    // in this file) since std::sin/std::cos are already this file's own
+    // established convention for yaw math (see rotateYawXr() above).
+    const float yawRad = static_cast<float>(link->current.angle.y) * (3.14159265f / 32768.0f);
+
+    cXyz eye{link->current.pos.x, link->current.pos.y + s_coreAnchorHeightOffset,
+             link->current.pos.z};
+    eye.y += kCoreAnchorExtraUpUnits;
+    eye.x += kCoreAnchorExtraForwardUnits * std::sin(yawRad);
+    eye.z += kCoreAnchorExtraForwardUnits * std::cos(yawRad);
+    return eye;
+}
+
+// FIXED 2026-08-09 (user request: "in gameplay link's head is on his core
+// and in cutscenes link's head is anchored to the original head anchor").
+// Section 23's core-anchor comfort tradeoff (no head bob/tilt/lean) was
+// applied unconditionally to every first-person case above, including
+// cutscenes/dialogue -- but those weren't the source of the original
+// motion-sickness complaint (that was specifically about running/movement,
+// per computeRawCoreAnchoredEye()'s own comment), and during a cutscene or
+// conversation the ORIGINAL head-joint anchor (section 11's
+// getSubjectEyePos(), pre-section-23) is more useful: it's what actually
+// follows the authored animation/eyeline (a nod, a look-down, a lean) that
+// a cutscene or conversation is often built around, rather than a rigid
+// comfort-anchored point that never moves with it.
+//
+// Dispatches on the exact same "is an event currently running" condition
+// isFirstPerson()'s own first branch already uses to distinguish ordinary
+// gameplay from everything else (dialogue, cutscenes, door/transition
+// events) -- reusing that condition here rather than inventing a second
+// one, same "one shared definition" reasoning as isFirstPerson() itself.
+// Caller must already know isFirstPerson(link) is true (same precondition
+// as computeRawCoreAnchoredEye() above).
+inline cXyz computeRawEyeAnchor(daAlink_c* link) {
+    if (!link->checkEventRun()) {
+        // Ordinary gameplay -- root/core-anchored, section 23.
+        return computeRawCoreAnchoredEye(link);
+    }
+    // Cutscene or dialogue -- the original, pre-section-23 head-joint
+    // anchor. No core-anchor height calibration or hunch-clearance nudge
+    // here: both exist specifically to compensate for the core anchor and
+    // for running/movement, neither of which applies to this branch.
+    return *link->getSubjectEyePos();
 }
 
 // TUNED 2026-08-08 (user report: "when I am moving fast [hands] lag
@@ -1122,11 +1561,16 @@ inline constexpr float kEyeAnchorExtrapolationGain = 1.0f;
 
 // World-space position the VR camera should be anchored to for this frame.
 //
-// During normal gameplay, smoothly interpolates Link's actual head/eye
-// position (see the block comment above) -- form-aware (wolf uses a
-// different joint + local offset) and mount-aware (canoe/board/horse each
-// get their own offset) for free, since it's built on the same
-// getSubjectEyePos() the flatscreen camera already relies on.
+// During normal gameplay, smoothly interpolates Link's root/core position
+// raised to head height (section 23's comfort anchor -- see
+// computeRawCoreAnchoredEye()'s comment). During a cutscene or NPC
+// dialogue, smoothly interpolates his actual animated head/eye position
+// instead (section 11's original anchor, restored 2026-08-09 per user
+// request -- see detail::computeRawEyeAnchor()'s comment for why) --
+// form-aware (wolf uses a different joint + local offset) and mount-aware
+// (canoe/board/horse each get their own offset) for free in that branch,
+// since it's built on the same getSubjectEyePos() the flatscreen camera
+// already relies on.
 //
 // During an actual cutscene/door-transition event OR while transformed
 // into Wolf Link -- see isFirstPerson()'s own comment above for exactly
@@ -1151,11 +1595,26 @@ inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye) {
     auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
     if (!isFirstPerson(link)) {
         detail::s_eyeAnchorValid = false;
+        // Recalibrate on the NEXT activation rather than reusing whatever
+        // stance's height happened to be calibrated before this fallback
+        // (e.g. don't keep a crouching offset after a cutscene ends and
+        // gameplay resumes standing) -- see detail::s_coreAnchorCalibrated's
+        // own comment above.
+        detail::s_coreAnchorCalibrated = false;
         return fallbackEye;
     }
 
     const uint64_t simTick = dusk::frame_interp::sim_tick_seq();
-    const cXyz freshEye = *link->getSubjectEyePos();
+
+    // During ordinary gameplay: Link's root/core position -- physics-driven
+    // (same value setMatrix() uses to place mpLinkModel itself), not
+    // animation-driven, so it doesn't bob/roll/lurch the way the head joint
+    // does. Raised to (approximately) head height via a calibrated fixed
+    // offset -- see detail::computeRawCoreAnchoredEye()'s and
+    // detail::s_coreAnchorHeightOffset's own comments above. During a
+    // cutscene/dialogue: the original, pre-section-23 animated head-joint
+    // anchor instead -- see detail::computeRawEyeAnchor()'s own comment.
+    const cXyz freshEye = detail::computeRawEyeAnchor(link);
 
     if (!detail::s_eyeAnchorValid) {
         detail::s_eyeAnchorPrev = freshEye;
@@ -1211,6 +1670,90 @@ inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye) {
     }
 
     return extrapolated;
+}
+
+// FIXED 2026-08-08 (section 20 continuation -- user report, after
+// late-latching turned out to be a red herring: "link's entire body lags
+// behind, including the hands. If I move the headset [i.e. as Link moves]
+// ... and thats for all direction[s]"). Root cause, found by reading code
+// rather than guessing a fourth time: `daAlink_c::setMatrix()`
+// (`d_a_alink.cpp`) builds `mpLinkModel`'s own base transform directly
+// from raw `current.pos`/`shape_angle` with ZERO interpolation, and is
+// only ever called from `execute()` -- i.e. once per 30Hz SIM TICK, same
+// as the rest of this engine's fixed-timestep game logic. Meanwhile the
+// CAMERA (and, sharing the same anchor, the tracked HANDS) read
+// `getVrCameraEyeAnchor()` above, which smooths AND extrapolates every
+// render frame (72-90Hz in VR). The result: whenever Link is actually
+// moving, the camera/hands glide smoothly ahead each render frame (per
+// `kEyeAnchorExtrapolationGain`, literally extrapolated PAST the latest
+// confirmed sim-tick sample) while his own BODY MESH's world position
+// stays frozen at whatever `execute()` last set it to, visibly stair-
+// stepping 30 times a second behind them -- exactly "body lags behind...
+// for all directions" (direction-independent because extrapolation
+// applies the same way regardless of which way Link is moving) and
+// exactly why standing still ("the intro") looked fine (zero velocity ==
+// zero extrapolation == nothing to diverge). This was very likely the
+// TRUE cause of the original "hands lag" report too, more so than the
+// compositor-reprojection theory section 20 was chasing -- the previous
+// late-latching fix (re-sampling controller pose closer to draw time)
+// was solving a real but apparently much smaller problem than this one.
+//
+// Fix: rather than building a SECOND, independent prev/curr+extrapolation
+// tracker for current.pos/shape_angle (real risk of the two drifting out
+// of sync under future tuning -- this file's own standing lesson, see
+// vr_smooth_turn.hpp's header comment), reuse the eye anchor's smoothing
+// directly. `getVrCameraEyeAnchor()` already computes exactly how far
+// this frame's smoothed/extrapolated eye position has been pushed away
+// from the raw, this-sim-tick `getSubjectEyePos()` value -- that same
+// world-space delta is what the whole body needs applied to it too, to
+// stay visually rigid with the camera/hands. Returns zero whenever
+// `isFirstPerson()` is false (cutscenes, Wolf form, mounted cutscenes --
+// see that function's own comment): the camera doesn't get any smoothing
+// in those cases either (falls back to the plain flatscreen eye), so
+// there's nothing to compensate for and the body should stay exactly
+// where the base game already puts it.
+inline cXyz getVrBodyPositionOffset(daAlink_c* link) {
+    if (!link) return cXyz(0.f, 0.f, 0.f);
+    if (!isFirstPerson(link)) return cXyz(0.f, 0.f, 0.f);
+
+    // Must use the SAME raw-anchor basis getVrCameraEyeAnchor() itself
+    // smooths from -- core-anchored during gameplay, head-joint-anchored
+    // during a cutscene/dialogue (see detail::computeRawEyeAnchor()'s
+    // comment above). Using a different/fixed basis here would compare two
+    // different quantities and produce a delta that's actually the
+    // core-vs-head-joint offset, not the lag-compensation delta this
+    // function exists to compute.
+    const cXyz freshEye = detail::computeRawEyeAnchor(link);
+    const cXyz smoothedEye = getVrCameraEyeAnchor(freshEye);
+    return cXyz(smoothedEye.x - freshEye.x, smoothedEye.y - freshEye.y, smoothedEye.z - freshEye.z);
+}
+
+// Applies getVrBodyPositionOffset() to a model's own base transform as a
+// pure world-space translation (rotation left completely alone -- only
+// POSITION lag was reported) and recalculates it so the shift actually
+// reaches the draw this eye. Mathematically exact, not an approximation:
+// for an affine transform, translating a PARENT frame by a fixed delta
+// (leaving its rotation untouched) translates every descendant joint's
+// resolved world matrix by that exact same delta, regardless of how deep
+// the hierarchy is -- so rigidly shifting mpLinkModel's root here moves
+// the entire animated body (every joint, every attached part that reads
+// its matrices) in lockstep, not just the root joint itself. Called once
+// per eye, immediately before `modelDraw(mpLinkModel, ...)` -- same
+// "recalc, once per eye, right before the draw actually reads it" pattern
+// already established and working for sword/shield (section 16).
+inline void applyVrBodyPositionOffset(J3DModel* bodyModel) {
+    if (!bodyModel) return;
+    auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
+    const cXyz offset = getVrBodyPositionOffset(link);
+
+    if (offset.x == 0.f && offset.y == 0.f && offset.z == 0.f) {
+        return;
+    }
+    Mtx& base = bodyModel->getBaseTRMtx();
+    base[0][3] += offset.x;
+    base[1][3] += offset.y;
+    base[2][3] += offset.z;
+    bodyModel->calc();
 }
 
 inline void restoreVisibility() {

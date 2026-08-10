@@ -5,6 +5,7 @@
 #include "mtx.h"
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/container/flat_hash_set.h>
 
 namespace {
 
@@ -28,6 +29,9 @@ Recording g_current_recording;
 Recording g_previous_recording;
 
 absl::flat_hash_map<uintptr_t, Mtx> g_replacements;
+
+// See mark_live_this_frame()'s header comment (frame_interpolation.h).
+absl::flat_hash_set<uintptr_t> g_live_this_frame_keys;
 
 struct CameraSnapshot {
     cXyz eye{};
@@ -104,6 +108,10 @@ const Mtx* resolve_replacement(const Mtx* source, Mtx* scratch) {
         return source;
     }
 
+    if (g_live_this_frame_keys.contains(reinterpret_cast<uintptr_t>(source))) {
+        return source;
+    }
+
     auto it = g_replacements.find(reinterpret_cast<uintptr_t>(source));
     if (it == g_replacements.end()) {
         return source;
@@ -119,6 +127,10 @@ bool has_recording_data(const Recording& recording) {
 
 void clear_replacements() {
     g_replacements.clear();
+}
+
+void clear_live_this_frame() {
+    g_live_this_frame_keys.clear();
 }
 
 }  // namespace
@@ -166,6 +178,7 @@ void begin_record() {
         g_previous_recording = {};
         g_current_recording = {};
         clear_replacements();
+        clear_live_this_frame();
         s_cam_prev.valid = false;
         s_cam_curr.valid = false;
         return;
@@ -177,6 +190,7 @@ void begin_record() {
     g_recording = true;
     g_interpolating = false;
     clear_replacements();
+    clear_live_this_frame();
 
     ::camera_process_class* cam = dComIfGp_getCamera(0);
     if (cam == nullptr) {
@@ -254,6 +268,10 @@ bool lookup_replacement(const void* key, Mtx out) {
         return false;
     }
 
+    if (g_live_this_frame_keys.contains(reinterpret_cast<uintptr_t>(key))) {
+        return false;
+    }
+
     auto it = g_replacements.find(reinterpret_cast<uintptr_t>(key));
     if (it == g_replacements.end()) {
         return false;
@@ -261,6 +279,12 @@ bool lookup_replacement(const void* key, Mtx out) {
 
     MTXCopy(it->second, out);
     return true;
+}
+
+void mark_live_this_frame(const void* key) {
+    if (key != nullptr) {
+        g_live_this_frame_keys.insert(reinterpret_cast<uintptr_t>(key));
+    }
 }
 
 bool lookup_concat_replacement(const void* lhs, const void* rhs, Mtx out) {

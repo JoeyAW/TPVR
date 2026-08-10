@@ -59,6 +59,7 @@
 #include "res/Object/Alink.h"
 #include <cstring>
 #include <helpers/string.hpp>
+#include <Windows.h>  // OutputDebugStringA -- TEMP DIAGNOSTIC, remove alongside it once root-caused
 #endif
 
 static int daAlink_Create(fopAc_ac_c* i_this);
@@ -5879,6 +5880,30 @@ void daAlink_c::setSwordPos() {
     } else {
         field_0x3720 = mSwordTopPos;
     }
+}
+
+// VR tracked-item fix (vr-mod-notes section 20/16 sword-shield-lag saga):
+// mirrors setItemMatrix()'s own shield hand-attach OR-chain below exactly
+// (minus `param_0 != 0`, which section 16 already established is never true
+// at the 3 real gameplay call sites -- only true from the status-window/
+// pause-menu preview pose, d_a_alink_swindow.inc). VR code needs this exact
+// condition (not an approximation) as the gate for whether to override
+// mShieldModel's position with the tracked hand -- comparing the model's
+// OWN base transform against a freshly-re-read joint matrix (the original
+// approach) turned out unreliable during fast swing/guard animation, since
+// the joint value keeps changing between when setItemMatrix() captured it
+// (during game-logic execute) and when VR code reads it again later the
+// same tick. checkItemSwordEquip() (already public, d_a_alink.h) covers the
+// sword's equivalent case exactly (mEquipItem==0x103, no OR-chain needed
+// there).
+bool daAlink_c::checkShieldHandAttached() const {
+    return mShieldChangeWaitTimer == 0 &&
+           ((checkPlayerGuardAndAttack() && mEquipItem != dItemNo_IRONBALL_e && !checkModeFlg(0x400)) ||
+            checkNoResetFlg0(FLG0_UNK_2) ||
+            (mProcID == PROC_TOOL_DEMO && mProcVar4.field_0x3010 != 0) ||
+            (mProcID == PROC_CUT_REVERSE && mProcVar2.field_0x300c != 0) ||
+            mProcID == PROC_GUARD_BREAK ||
+            (mEquipItem == 0x103 && !checkEndResetFlg1(ERFLG1_SHIELD_BACKBONE) && !checkModeFlg(0x400)));
 }
 
 void daAlink_c::setItemMatrix(int param_0) {
@@ -19037,15 +19062,21 @@ void daAlink_c::setDrawHand() {
     mpLinkHandModel->setAnmMtx(1, mpLinkModel->getAnmMtx(9));
     mpLinkHandModel->setAnmMtx(2, mpLinkModel->getAnmMtx(0xE));
 
-    // VR tracked hands: this re-sync above runs every eye, right before
-    // mpLinkHandModel actually draws, and unconditionally overwrites
+    // VR tracked hands: this re-sync above unconditionally overwrites
     // anything written earlier in the frame -- including VR's own
-    // controller-tracked pose (vr_link::updateFrame(), which runs once
-    // before the per-eye loop even opens). Re-applying it here, as the
-    // LAST write before the draw, is what makes it actually stick -- see
-    // dusk::vr::applyTrackedHandMtx()'s comment (vr_main.hpp) for the full
-    // story of how "controllers do nothing" was root-caused to this exact
-    // ordering. No-op on flatscreen.
+    // controller-tracked pose -- so re-applying the tracked pose here
+    // keeps this call's own output correct. CORRECTED 2026-08-09: this
+    // whole function only actually runs once per SIM TICK (~30Hz, via the
+    // legacy fapGm_Execute() path) -- a full-session [dusk::vr::eyepasscheck]
+    // log capture proved daAlink_c::draw() never runs during a real VR eye
+    // pass at all, so despite this comment's older claim, this call is NOT
+    // what makes tracked hands actually reach the screen at real render
+    // rate. It's harmless to keep (matches this joint's flatscreen re-sync
+    // 1:1, and keeps frame_interp's once-per-tick recording reasonably
+    // sane as a fallback), but the real per-eye-relevant fix is
+    // dusk::vr::refreshTrackedHandDrawMtxLive(), called once per real frame
+    // from vr_main.cpp's tick() -- see its own comment (vr_link_visibility.hpp)
+    // for the full root-cause writeup. No-op on flatscreen.
     if (dusk::vr::isRenderingToHeadset()) {
         dusk::vr::applyTrackedHandMtx(mpLinkHandModel);
     }
@@ -19413,7 +19444,66 @@ void daAlink_c::modelDraw(J3DModel* i_model, int param_1) {
     g_env_light.setLightTevColorType_MAJI(i_model, &tevStr);
 
     if (param_1 == 0) {
-        mDoExt_modelEntryDL(i_model);
+#if TARGET_PC
+        // ROOT-CAUSED 2026-08-09 (section 20's "hands/body lag" saga,
+        // finally closed via two real debugger call-stack captures --
+        // see vr-mod-notes for the full trail): mDoExt_modelEntryDL()
+        // (m_Do_ext.cpp) has an early-return that SKIPS the actual
+        // matrix/geometry resubmission (mDoExt_modelDiff()) whenever
+        // !dusk::frame_interp::is_sim_frame() -- calling only the
+        // lightweight i_model->diff() instead. On flatscreen this is a
+        // deliberate, correct optimization: the frame-interpolation
+        // system substitutes already-interpolated matrices at a lower
+        // level (dusk::frame_interp::resolve_replacement(), inside the
+        // J3D draw pipeline itself) for the non-sim-tick presentation
+        // frames, so skipping the heavier full resubmission there is
+        // safe and intentional -- see that function's own "fixes issue
+        // #355, lights would flicker" comment.
+        //
+        // BOTH real debugger captures this session -- one conditioned on
+        // the corrupted (step==0) case, one on the healthy (step!=0)
+        // case -- showed daAlink_c::draw() being entered ONLY via
+        // fapGm_Execute()'s legacy once-per-sim-tick draw dispatch
+        // (fapGm_Execute -> fpcM_Management -> ... -> dScnPly_Draw ->
+        // fopAc_Draw -> daAlink_c::draw()), never once via the real
+        // per-eye VR draw path (cAPIGph_Painter(), called from
+        // vr_main.cpp's tick() once per eye at full VR framerate). That
+        // means is_sim_frame() is false for essentially every VR render
+        // frame except the rare one that happens to coincide with an
+        // actual physics tick -- so Link's own geometry/pose was
+        // ACTUALLY being resubmitted to the GPU only ~30 times a second
+        // (physics-tick rate), no matter how often or how correctly this
+        // session's tracked-hand/sword/body-position VR overrides
+        // recomputed his matrices every eye -- those fresh matrices were
+        // being computed correctly, just never reaching the render
+        // output except once per sim tick. This explains every symptom
+        // observed across this whole investigation: the world (drawn via
+        // the ordinary actor list, not this special player-draw path)
+        // stays smooth at full VR rate, while Link's own body/hands
+        // specifically stair-step at 30Hz.
+        //
+        // Fix: bypass the sim-frame-only optimization for Link
+        // specifically while a real VR eye pass is open (isEyePassOpen(),
+        // not the broader isRenderingToHeadset() -- same established
+        // lesson as every other per-eye VR override in this file) by
+        // calling mDoExt_modelUpdateDL() instead -- same file, no
+        // is_sim_frame() gate, unconditionally calls i_model->calc() +
+        // mDoExt_modelDiff() every time. Scoped to modelDraw()'s
+        // param_1==0 (actually-visible) branch only; the
+        // isPlayerNoDraw branch below already skips real geometry
+        // submission entirely. This function draws mpLinkModel,
+        // mpLinkHandModel, mSwordModel, mShieldModel, mHeldItemModel,
+        // and mpWlChainModels -- ALL of them get this fix for free,
+        // which may also explain why hand/sword tracking, while
+        // correctly positioned, never felt perfectly crisp even after
+        // being confirmed "working" in earlier sessions.
+        if (dusk::vr::isEyePassOpen()) {
+            mDoExt_modelUpdateDL(i_model);
+        } else
+#endif
+        {
+            mDoExt_modelEntryDL(i_model);
+        }
     } else {
         i_model->calcMaterial();
         i_model->diff();
@@ -19501,6 +19591,17 @@ void daAlink_c::initTevCustomColor() {
 }
 
 int daAlink_c::draw() {
+    // CONFIRMED (2026-08-09, via a full-session [dusk::vr::eyepasscheck]
+    // capture, since removed): isEyePassOpen() is NEVER true anywhere in
+    // this function -- daAlink_c::draw() is only ever entered via the
+    // legacy fapGm_Execute() path (~30Hz sim-tick rate), never from within
+    // a real VR eye pass. Any per-eye-relevant VR override placed in this
+    // function is dead code for that reason -- see
+    // vr_link_visibility.hpp's refreshTrackedHandDrawMtxLive()/
+    // refreshTrackedItemMtxLive() for where hand/sword/shield tracking
+    // actually lives now (called once per real frame from vr_main.cpp's
+    // tick(), not from here).
+
     if (checkWolf()) {
         g_env_light.settingTevStruct(9, &current.pos, &tevStr);
     } else {
@@ -19692,6 +19793,50 @@ int daAlink_c::draw() {
                                            mpLinkModel->getAnmMtx(mLeftHandJntNo),
                                            mpLinkModel->getAnmMtx(mRightItemJntNo),
                                            mpLinkModel->getAnmMtx(mRightHandJntNo));
+        }
+
+        // VR body-position lag fix (section 20 continuation, 2026-08-08
+        // user report: "link's entire body lags behind... for all
+        // direction[s]"): mpLinkModel's own base transform is only set
+        // once per sim tick (setMatrix(), called from execute()), with
+        // no render-time smoothing -- unlike the camera/hands, which
+        // read the smoothed+extrapolated eye anchor every render frame.
+        // Nudges the whole body by that same smoothing delta so it
+        // stays visually rigid with the camera/hands instead of
+        // stair-stepping behind them.
+        //
+        // ROOT-CAUSED 2026-08-09 (real call-stack capture via a debugger
+        // breakpoint, after extensive log-based bisection failed to find
+        // it): this actor's draw() is ALSO called once per SIM TICK from
+        // fapGm_Execute() -- a GameCube-era leftover where "execute"
+        // combined game-logic update AND drawing in one pass, predating
+        // this PC port's separate, decoupled render-rate-independent draw
+        // path (cAPIGph_Painter(), called explicitly from
+        // vr_main.cpp's tick(), once per eye). That legacy call happens
+        // BEFORE the real per-frame interpolation step has even been
+        // computed for this iteration (mid-sim-tick, step is legitimately
+        // 0 there -- not a bug in frame_interp itself, confirmed via a
+        // real captured call stack: daAlink_c::draw() <- fopAc_Draw <-
+        // ... <- fapGm_Execute() <- main01(), i.e. entered from the
+        // sim-tick loop, not the real per-eye draw). isRenderingToHeadset()
+        // is scoped to the WHOLE VR frame (true for this legacy call too,
+        // same class of bug already root-caused once in this file for the
+        // minimap -- see vr-mod-notes section 8, "isRenderingToHeadset()
+        // reads like a we-are-currently-rendering-an-eye flag but isn't"),
+        // so this fix was ALSO firing during that bogus legacy pass --
+        // and because it ADDS to the base transform rather than setting
+        // it, each legacy-pass call permanently corrupted mpLinkModel's
+        // shared state before the real per-eye draws ever ran, compounding
+        // every sim tick. Fixed the same way the minimap bug was fixed:
+        // gate on isEyePassOpen() (true ONLY inside a real beginEye()/
+        // endEye() bracket) instead of isRenderingToHeadset(). Kept as its
+        // own guard, separate from applyTrackedItemMtx() above -- that one
+        // is idempotent (just re-writes the same cached matrix each call)
+        // so the legacy pass calling it too is wasteful but harmless, and
+        // it's confirmed working in-headset already; touching it isn't
+        // warranted without a demonstrated bug there.
+        if (dusk::vr::isEyePassOpen()) {
+            dusk::vr::applyVrBodyPositionOffset(mpLinkModel);
         }
 #endif
 

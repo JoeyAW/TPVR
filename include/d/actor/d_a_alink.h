@@ -3640,6 +3640,29 @@ public:
     u32 checkReinRide() const { return mRideStatus == RIDETYPE_HORSE || mRideStatus == RIDETYPE_BOAR; }
     int getGrassHowlEventActor() const { return field_0x3198; }
     MtxP getShieldMtx() const { return mShieldModel->getBaseTRMtx(); }
+    // VR hand-lag fix (vr-mod-notes section 20's final root-cause writeup):
+    // lets vr_link_visibility.hpp's refreshTrackedHandDrawMtxLive() reach
+    // this model from a call site that actually runs during the real VR
+    // per-eye pass, instead of only from inside draw() (proven, via a
+    // full-session [dusk::vr::eyepasscheck] log capture, to never run
+    // there at all).
+    J3DModel* getHandModel() const { return mpLinkHandModel; }
+    // Same VR hand-lag-fix reasoning as getHandModel() above, extended to
+    // sword/shield (vr-mod-notes section 20's sword/shield follow-up):
+    // lets vr_link_visibility.hpp's refreshTrackedItemMtxLive() reach these
+    // from a real per-eye-relevant call site instead of only from inside
+    // draw() via applyTrackedItemMtx()'s old dead call path.
+    J3DModel* getBodyModel() const { return mpLinkModel; }
+    J3DModel* getSwordModel() const { return mSwordModel; }
+    J3DModel* getShieldModel() const { return mShieldModel; }
+    u16 getLeftItemJntNo() const { return mLeftItemJntNo; }
+    u16 getRightItemJntNo() const { return mRightItemJntNo; }
+    u16 getLeftHandJntNo() const { return mLeftHandJntNo; }
+    u16 getRightHandJntNo() const { return mRightHandJntNo; }
+    // Mirrors setItemMatrix()'s own shield hand-attach condition exactly --
+    // see the definition (d_a_alink.cpp) for why VR code needs the real
+    // flag here instead of a position-based heuristic.
+    bool checkShieldHandAttached() const;
     MtxP getMagneBootsMtx() { return mMagneBootMtx; }
     MtxP getMagneBootsInvMtx() { return mMagneBootInvMtx; }
     s16 getMagneBootsModelShapeAngle() const { return field_0x3118; }

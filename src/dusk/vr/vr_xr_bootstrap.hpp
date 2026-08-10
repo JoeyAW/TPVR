@@ -124,6 +124,17 @@ inline XrGraphicsDevice createXrGraphicsDevice(const Bootstrap& boot) {
             : XR_ERROR_RUNTIME_FAILURE,
         "EnumAdapterByLuid");
 
+    // REVERTED (Meta XR Simulator "solid flashing color" investigation,
+    // 2026-08-08): tried enabling the D3D12 debug layer here to catch a
+    // possible resource-state mismatch in readbackEyeCopy()'s raw D3D12
+    // copy. Instead it made D3D12CreateDevice itself fail on this
+    // adapter/interop path (VR fell back to flatscreen entirely) and was
+    // followed by an unrelated DXGI_ERROR_DEVICE_RESET crash of Aurora's
+    // own Dawn device a few seconds later -- zero validation messages were
+    // ever printed, since the debug-layer device never got created. Not a
+    // safe diagnostic on this adapter; do not re-add without a different
+    // approach (e.g. GPU-based validation off, or a build-time-only debug
+    // layer rather than runtime-conditional).
     XrGraphicsDevice gfx;
     checkResult(
         SUCCEEDED(D3D12CreateDevice(adapter.Get(), boot.d3d12Requirements.minFeatureLevel,

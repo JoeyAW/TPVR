@@ -315,6 +315,27 @@ void main01(void) {
 
         if (!aurora_begin_frame()) {
             DuskLog.debug("aurora_begin_frame returned false, skipping draw this frame");
+#ifdef TARGET_PC
+            // FOUND 2026-08-09 (RenderDoc F9 capture investigation): without
+            // this, a capture opened by the StartFrameCapture block above
+            // stays open across this `continue` -- rdocCapturing is only
+            // ever cleared by the EndFrameCapture block much further down,
+            // which this early return skips entirely. If aurora_begin_frame()
+            // keeps failing for a few iterations (window resize/minimize,
+            // etc.) while a capture is open, it accumulates many frames'
+            // worth of GPU work into one oversized capture instead of the
+            // single intended frame -- a plausible cause of RenderDoc/driver
+            // instability on a later EndFrameCapture, and definitely wrong
+            // regardless (an F9 press should always capture exactly one
+            // frame). Close it out here too.
+            if (rdocCapturing) {
+                if (RENDERDOC_API_1_1_2* rdocApi2 = getRenderDocApi()) {
+                    rdocApi2->EndFrameCapture(nullptr, nullptr);
+                    OutputDebugStringA("[dusk::renderdoc] EndFrameCapture (aurora_begin_frame failed)\n");
+                }
+                rdocCapturing = false;
+            }
+#endif
             continue;
         }
 
@@ -460,6 +481,25 @@ void main01(void) {
 
 #ifdef TARGET_PC
         if (rdocCapturing) {
+            // TEMP DIAGNOSTIC (2026-08-09, capture-truncation investigation):
+            // user's RenderDoc captures consistently stop at a small event
+            // count (~41) with no image bound past a handful of events,
+            // reproducible with AND without WinPixEventRuntime.dll present --
+            // rules out debug markers as the cause. Log Aurora's own
+            // draw-call count for THIS frame right here, before
+            // EndFrameCapture, so we can tell directly whether the game
+            // genuinely only issued a handful of GPU commands this frame
+            // (a real, separate problem) or whether it issued many more than
+            // RenderDoc actually captured (a capture/synchronization gap).
+            // Remove once root-caused.
+            if (const AuroraStats* stats = aurora_get_stats()) {
+                char statsMsg[192];
+                _snprintf_s(statsMsg, _TRUNCATE,
+                            "[dusk::renderdoc] pre-EndFrameCapture stats: drawCallCount=%u "
+                            "mergedDrawCallCount=%u\n",
+                            stats->drawCallCount, stats->mergedDrawCallCount);
+                OutputDebugStringA(statsMsg);
+            }
             if (RENDERDOC_API_1_1_2* rdocApi2 = getRenderDocApi()) {
                 rdocApi2->EndFrameCapture(nullptr, nullptr);
                 OutputDebugStringA("[dusk::renderdoc] EndFrameCapture\n");

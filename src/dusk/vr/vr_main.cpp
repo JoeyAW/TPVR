@@ -27,6 +27,8 @@
 #include "m_Do/m_Do_graphic.h"                  // mDoGph_gInf_c::captureHudBillboard
 #include "f_pc/f_pc_manager.h"                  // fpcM_DrawIterater, fpcM_Draw
 #include "dusk/game_clock.h"                    // dusk::game_clock::MainLoopPacer
+#include "dusk/settings.h"                      // dusk::getSettings().game.vrDesktopMirror
+#include "dusk/logging.h"                       // DuskLog-style aurora::Module, see VrLog below
 
 #include "dusk/vr/vr_xr_bootstrap.hpp"
 #include "dusk/vr/vr_stereo_render.hpp"         // vr_render::
@@ -77,6 +79,18 @@ extern "C" bool g_duskVREyePassOpen = false;
 namespace dusk::vr {
 
 namespace {
+// Real, persistent logging (goes to the AppData log file every user gets
+// for free, unlike OutputDebugStringA -- which only exists at all with a
+// debugger attached, and is what the rest of this file's TEMP DIAGNOSTIC
+// comments use instead). Scoped to genuinely rare, event-driven call sites
+// only (startup outcome, session-state transitions) -- NEVER called from
+// the per-eye render path. See dusk/logging.cpp's WriteLogLine(): every
+// call does a synchronous fflush() to disk under a mutex, which is cheap
+// at "once per startup" / "once per state change" rates but would be a
+// real, measurable frame-time cost (and a stutter/stall risk from disk
+// I/O) if it were ever called every VR frame.
+static aurora::Module VrLog("dusk::vr");
+
 Session* g_session = nullptr;
 std::unique_ptr<Session> g_ownedSession;  // vr_main.cpp owns the Session; g_session just points to it
 vr_combat::SwingDetector g_rightSwing;  // still deferred/unused, see its call site's comment below
@@ -278,6 +292,11 @@ bool waitForSessionReadyAndBegin(XrInstance instance, XrSession session) {
                             "[dusk::vr::startup] session state -> %d\n",
                             static_cast<int>(stateEvent.state));
                 OutputDebugStringA(msg);
+                // Event-driven (only fires when the runtime actually sends
+                // a state change, at most a handful of times during
+                // startup) -- cheap enough for real DuskLog, unlike a
+                // per-frame call would be.
+                VrLog.info("startup: session state -> {}", static_cast<int>(stateEvent.state));
 
                 if (stateEvent.state == XR_SESSION_STATE_READY) {
                     XrSessionBeginInfo beginInfo{XR_TYPE_SESSION_BEGIN_INFO};
@@ -415,8 +434,23 @@ bool startup() {
     // v7 handoff's description of that call site, never the file itself, so
     // this closes that gap rather than assuming it's wired correctly.
     OutputDebugStringA("[dusk::vr::startup] called\n");
+    // Declared here, outside the try block, so the catch block below can
+    // still reference it (with an empty systemName, from the aggregate
+    // init's zero-fill) even if the exception happened before
+    // xrGetSystemProperties() ever ran -- e.g. vr_xr::initialize() itself
+    // throwing. Queried once inside the try block below (cheap -- a single
+    // OpenXR call, not per-frame) so every later log line in this function
+    // can say which runtime it's talking about. Genuinely useful for real
+    // user bug reports: most of this project's VR history (see
+    // vr-mod-notes section 6, stereo eye alignment, aim-pose calibration,
+    // etc.) turned out to be runtime-specific (SteamVR vs. Virtual Desktop
+    // vs. Meta Link), and today none of that is visible outside a
+    // debugger session.
+    XrSystemProperties sysProps{XR_TYPE_SYSTEM_PROPERTIES};
     try {
         vr_xr::Bootstrap boot = vr_xr::initialize();
+        xrGetSystemProperties(boot.instance, boot.systemId, &sysProps);
+
         vr_xr::XrGraphicsDevice gfx = vr_xr::createXrGraphicsDevice(boot);
 
         XrSpace localSpace = XR_NULL_HANDLE;
@@ -485,6 +519,8 @@ bool startup() {
             // or a debugger's Output window; not routed to real DuskLog since
             // that call site still isn't confirmed (see catch block below).
             OutputDebugStringA("[dusk::vr::startup] FAILED: enumerateViewConfigurationViews returned 0 views\n");
+            VrLog.error("startup failed: enumerateViewConfigurationViews returned 0 views (runtime: {})",
+                        sysProps.systemName);
             return false;
         }
         // Per-eye recommended size is assumed identical across both eyes here
@@ -507,6 +543,8 @@ bool startup() {
                         "[dusk::vr::startup] FAILED: createSwapchain(%u, %u, dxgiFormat=%lld) returned false\n",
                         eyeWidth * 2, eyeHeight, static_cast<long long>(dxgiFormat));
             OutputDebugStringA(msg);
+            VrLog.error("startup failed: createSwapchain({}, {}, dxgiFormat={}) returned false (runtime: {})",
+                        eyeWidth * 2, eyeHeight, dxgiFormat, sysProps.systemName);
             return false;
         }
 
@@ -519,6 +557,8 @@ bool startup() {
             OutputDebugStringA(
                 "[dusk::vr::startup] FAILED: session never reached READY / "
                 "xrBeginSession failed (see session-state log lines above)\n");
+            VrLog.error("startup failed: session never reached READY / xrBeginSession failed (runtime: {})",
+                        sysProps.systemName);
             return false;
         }
 
@@ -540,19 +580,28 @@ bool startup() {
                         eyeWidth * 2, eyeHeight, static_cast<long long>(dxgiFormat));
             OutputDebugStringA(msg);
         }
+        VrLog.info("startup succeeded: runtime={} swapchain={}x{} dxgiFormat={}",
+                   sysProps.systemName, eyeWidth * 2, eyeHeight, dxgiFormat);
 
         return true;
     } catch (const std::exception& e) {
-        // TEMP DIAGNOSTIC (v8, remove once startup() is confirmed working
-        // in-headset): catches everything upstream, including
-        // toDxgiSwapchainFormat() throwing on an aurora::gfx::color_format()
-        // value not yet in its switch, or any OpenXR/D3D12 setup call
-        // (xrCreateInstance, D3D12CreateDevice, xrCreateSession, etc.)
-        // failing via vr_xr::checkResult(). Not routed to real DuskLog --
-        // that call site still isn't confirmed, per the original TODO here.
+        // Catches everything upstream, including toDxgiSwapchainFormat()
+        // throwing on an aurora::gfx::color_format() value not yet in its
+        // switch, or any OpenXR/D3D12 setup call (xrCreateInstance,
+        // D3D12CreateDevice, xrCreateSession, etc.) failing via
+        // vr_xr::checkResult(). NOW routed to real DuskLog too (closes the
+        // old TODO here) -- this is the single most valuable line for a
+        // real user's "VR doesn't work" report: previously this whole
+        // function silently fell back to flatscreen with zero trace
+        // outside a debugger session (see vr-mod-notes section 6's own
+        // note on this). sysProps.systemName may be empty here if the
+        // throw happened before it was queried (e.g. vr_xr::initialize()
+        // itself failing) -- that's fine, an empty runtime name is itself
+        // informative (means it failed before even reaching the runtime).
         char msg[512];
         _snprintf_s(msg, _TRUNCATE, "[dusk::vr::startup] EXCEPTION: %s\n", e.what());
         OutputDebugStringA(msg);
+        VrLog.error("startup failed: exception: {} (runtime: {})", e.what(), sysProps.systemName);
         return false;
     }
 }
@@ -635,6 +684,13 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     g_renderedToHeadsetThisFrame = false;
     g_duskVRRenderingToHeadset = false;
     g_duskVREyePassOpen = false;
+    // Desktop mirror (see the per-eye loop below, where this gets re-set for
+    // real): cleared up front like everything else in this block, so any
+    // early return between here and the real eye-rendering section (no
+    // session, XR failures, no ready gameplay view, etc.) leaves the desktop
+    // window on its normal flatscreen fallback instead of stuck showing a
+    // stale VR eye from a prior frame/session.
+    aurora::gfx::clear_present_source_mirror();
 
     if (!g_session) {
         logTickReasonOnChange("no-session");
@@ -657,6 +713,13 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
         if (event.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
             const auto& stateEvent =
                 *reinterpret_cast<const XrEventDataSessionStateChanged*>(&event);
+            // Genuinely rare mid-session event (dashboard/system overlay
+            // taking focus, headset removed, runtime shutting down) -- not
+            // logged at all before now, on any channel. Real DuskLog is
+            // exactly right here: this is precisely the kind of thing a
+            // real user's "VR randomly stopped working mid-play" report
+            // would otherwise leave zero trace of.
+            VrLog.info("session state -> {}", static_cast<int>(stateEvent.state));
             if (stateEvent.state == XR_SESSION_STATE_STOPPING) {
                 // FIXED this session: STOPPING is not permanent per the
                 // OpenXR spec -- it just means "stop submitting frames and
@@ -1195,6 +1258,12 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     // runs now instead of skipping again.
     mDoGph_gInf_c::captureMapCopy2D();
 
+    // Desktop mirror: captured from eye 0 (left) inside the loop below,
+    // applied once after it. See aurora::gfx::set_present_source_mirror()'s
+    // own comment for the mechanism; this is just where VR code decides
+    // WHICH texture and WHEN.
+    aurora::gfx::ResolvedTargets mirrorEyeTargets;
+
     for (uint32_t eye = 0; eye < viewCount; ++eye) {
         vr_render::EyeParams eyeParams{
             views[eye].pose,
@@ -1224,6 +1293,15 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
 
         aurora::gfx::ResolvedTargets targets = vr_render::endEye();
         g_duskVREyePassOpen = false;
+
+        // Desktop mirror: eye 0 only, and only when this eye actually
+        // resolved this frame (targets.colorTexture null means a foreign-
+        // pass substitution ate it -- see the comment right below this one
+        // for that whole mechanism). A stale prior-frame mirror image is a
+        // much smaller problem than trying to mirror a null texture.
+        if (eye == 0 && targets.colorTexture) {
+            mirrorEyeTargets = targets;
+        }
 
         // ROOT-CAUSED this session (VR_MOD_HANDOFF_10 follow-up): endEye()
         // now uses resolve_pass_checked() internally and returns an empty
@@ -1295,6 +1373,23 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
             static_cast<int32_t>(eye * eyeParams.width), 0};
         projViews[eye].subImage.imageRect.extent = {
             static_cast<int32_t>(eyeParams.width), static_cast<int32_t>(eyeParams.height)};
+    }
+
+    // Desktop mirror (user request 2026-08-10): show eye 0's just-rendered
+    // frame on the desktop window instead of leaving it stale/blank, which
+    // is what happens today since m_Do_main.cpp skips the normal flatscreen
+    // draw whenever tick() actually renders stereo eyes (see its own
+    // "REMOVED this session: a temporary desktop-mirror hack" comment --
+    // drawing the whole scene a SECOND time for the desktop was tried and
+    // reverted there, confirmed to corrupt state several systems assume
+    // runs exactly once per frame). This is a different mechanism entirely:
+    // no second draw, just pointing aurora's own present-resample pass
+    // (already runs every frame regardless) at a texture that's already
+    // been fully rendered for the VR submission. Safe to call unconditionally
+    // -- set_present_source_mirror() itself no-ops if mirrorEyeTargets never
+    // got populated this frame (eye 0 never resolved).
+    if (dusk::getSettings().game.vrDesktopMirror) {
+        aurora::gfx::set_present_source_mirror(mirrorEyeTargets);
     }
 
     // NEW this session (split from what used to be tick()'s tail): we can't

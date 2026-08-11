@@ -27,6 +27,16 @@ reasoning before touching any of this again.
 - **Shadows are intentionally DISABLED in VR** (`m_Do_graphic.cpp`,
   `d_drawlist.cpp`) — tested precision fixes did NOT resolve the underlying
   stretching. Do not re-enable without new diagnostic evidence.
+  **CORRECTED 2026-08-09**: this note previously covered only
+  `dDlst_shadowSimple_c::draw()` (the stencil-volume shadow) — the SEPARATE
+  `dDlst_shadowReal_c::draw()` (a projected-texture "blob" shadow cast by
+  buildings/NPCs/props) was never actually gated, just given defensive
+  frame-interp fixes; it kept drawing unconditionally in VR the whole time.
+  Root-caused via a user report of "cloud shadows on the ground, camera-
+  locked, moving opposite head turn" that turned out to be this, not
+  weather — see `vr-mod-notes` section 23. Now disabled the same way as
+  Simple shadows. Both shadow subsystems are disabled in VR as of this
+  date; the "do not re-enable without new evidence" rule applies to both.
 - **Don't retry the "solid-color-in-a-new-nested-offscreen-pass" approach**
   for water's reflection placeholder as originally written — it crashes
   (`begin_offscreen()`/`end_offscreen()` only track one level of pass

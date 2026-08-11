@@ -207,6 +207,12 @@ struct UserSettings {
         ConfigVar<Resampler> resampler;
         ConfigVar<bool> enableMapBackground;
         ConfigVar<bool> disableCutscenePillarboxing;
+        // Shows one VR eye's rendered view on the desktop window instead of
+        // leaving it stale/blank while in the headset. Reuses aurora's
+        // existing present-resample pass (see aurora::gfx::
+        // set_present_source_mirror()) -- no extra render pass, no CPU
+        // readback, near-zero cost.
+        ConfigVar<bool> vrDesktopMirror;
 
         // Audio
         ConfigVar<bool> noLowHpSound;

@@ -598,12 +598,56 @@ inline constexpr int kArmEarMaterialIndices[] = {0, 1, 2, 7, 8, 10};
 // VR camera itself (section 11's third-person wolf fallback means nobody's
 // eye is ever near this geometry in wolf form anyway), but worth guarding
 // explicitly rather than relying on that coincidence.
+// Ordon Clothes (internally "casual wear", daAlink_c::checkCasualWearFlg(),
+// dItemNo_WEAR_CASUAL_e) use a GENUINELY DIFFERENT, smaller material table
+// than Hero's Clothes -- not just a texture swap on the same one. Confirmed
+// directly in the base game's own code, not assumed: d_a_alink.cpp's Master
+// Sword glow-tint branch has a separate `else if (checkCasualWearFlg())`
+// case reading different material indices, guarded by `getMaterialNum() >=
+// 8` -- vs. the default (Hero's Clothes) branch's `>= 18`. kArmEarMaterialIndices
+// above was dumped specifically while wearing Hero's Clothes (see its own
+// comment) and is therefore meaningless while wearing Ordon Clothes: indices
+// 8/10 are simply out of range (already skipped by the bounds check below)
+// and 0/1/2/7 point at whatever unrelated materials happen to occupy those
+// slots in the casual-wear table instead. This is the reported "neck and
+// arms still visible in Ordon Clothes" bug -- same underlying mechanism as
+// the already-documented Wolf-form material-table swap above, just for a
+// different outfit nobody had captured real data for yet.
+//
+// Real capture came back (2026-08-10, [dusk::vr::ordonmats]), 8 materials,
+// "bl_" prefix (vs. Hero's Clothes' "al_"):
+//   0 bl_beltS_m   1 bl_ear_m     2 bl_earring_m  3 bl_handLA_m
+//   4 bl_handRA_m  5 bl_lowbody_m 6 bl_skin_m     7 bl_upbody_m
+//
+// No separate arm material exists at all here, unlike Hero's Clothes'
+// three (al_armL_m/al_armR_m/al_arm_m) -- bl_skin_m is the only candidate
+// for exposed arm/neck skin: face is a separate model
+// (mpLinkFaceModel, already hidden independently in updateFrame()), hands
+// are their own pair (3/4, excluded below for the same reason Hero's
+// Clothes' hand materials are -- keep visible for the tracked VR hand
+// model), and everything else here is clearly clothing (belt/lowbody/
+// upbody) -- bl_skin_m is what's left, covering exactly what Ordon
+// Clothes' short sleeves/open collar actually expose. kArmEarMaterialIndicesCasual
+// below is 1 (bl_ear_m), 2 (bl_earring_m, worn on the ear, same "don't
+// leave it floating" reasoning as Hero's Clothes' al_earring_m), and 6
+// (bl_skin_m).
+inline constexpr int kArmEarMaterialIndicesCasual[] = {1, 2, 6};
+
 inline void hideArmsAndEars(daAlink_c* link) {
     if (!link || !link->mpLinkModel || link->checkWolf()) return;
     J3DModelData* modelData = link->mpLinkModel->getModelData();
     if (!modelData) return;
 
     const u16 matNum = modelData->getMaterialNum();
+    if (link->checkCasualWearFlg()) {
+        for (int idx : kArmEarMaterialIndicesCasual) {
+            if (static_cast<u16>(idx) >= matNum) continue;
+            J3DShape* shape = modelData->getMaterialNodePointer(idx)->getShape();
+            if (shape) shape->hide();
+        }
+        return;
+    }
+
     for (int idx : kArmEarMaterialIndices) {
         if (static_cast<u16>(idx) >= matNum) continue;
         J3DShape* shape = modelData->getMaterialNodePointer(idx)->getShape();
@@ -628,6 +672,15 @@ inline void showArmsAndEars(daAlink_c* link) {
     if (!modelData) return;
 
     const u16 matNum = modelData->getMaterialNum();
+    if (link->checkCasualWearFlg()) {
+        for (int idx : kArmEarMaterialIndicesCasual) {
+            if (static_cast<u16>(idx) >= matNum) continue;
+            J3DShape* shape = modelData->getMaterialNodePointer(idx)->getShape();
+            if (shape) shape->show();
+        }
+        return;
+    }
+
     for (int idx : kArmEarMaterialIndices) {
         if (static_cast<u16>(idx) >= matNum) continue;
         J3DShape* shape = modelData->getMaterialNodePointer(idx)->getShape();
@@ -859,7 +912,29 @@ inline void updateFrame(const FrameInput& input) {
     // base game's per-frame outfit-branch logic can re-hide/re-show an
     // overlapping subset of these shapes on any given frame for unrelated
     // reasons, so a one-shot toggle would get silently reversed.
-    const bool firstPerson = isFirstPerson(link);
+    // Also show everything while the pause/status menu is open (user
+    // request 2026-08-10, "see all of link's limbs in the pause menu").
+    // d_a_alink_swindow.inc's statusWindowDraw() ("Pause Menu Player
+    // Display") draws mpLinkModel/mpLinkHandModel/mpLinkHatModel/
+    // mpLinkFaceModel -- the SAME shared model instances this function
+    // hides shapes on for first-person viewing. Shape-hide is a property
+    // of the shared J3DModelData/J3DModel resource itself, not scoped to
+    // any one camera/view, so hiding for gameplay bleeds straight into
+    // this third-person character preview too -- isFirstPerson() has no
+    // idea the pause menu is even open (checkEventRun()/checkWolf() are
+    // both unrelated to pause state; you can pause during ordinary
+    // exploration, where checkEventRun() is already false-not-relevant
+    // either way). dComIfGp_isPauseFlag() (d_com_inf_game.h) is the real,
+    // already-used pause-menu-open flag -- set/cleared directly in
+    // d_menu_window.cpp's dMw_c, confirmed by reading it, not guessed.
+    // Deliberately only affects THIS visibility decision, not
+    // isFirstPerson() itself -- the VR camera-anchor logic
+    // (getVrCameraEyeAnchor()) doesn't need to change for this: the live
+    // 3D view isn't what's on screen while paused anyway (the pause
+    // menu's own backdrop is a frozen capture -- see dDlst_MENU_CAPTURE_c
+    // in d_menu_window.cpp), so touching the shared isFirstPerson()
+    // would risk an untested side effect on the camera for no benefit.
+    const bool firstPerson = isFirstPerson(link) && !dComIfGp_isPauseFlag();
     if (firstPerson) {
         // Hide face and hat — these are separate J3DModel objects so hiding
         // their shape tables has no effect on the body or hand models.
@@ -1551,8 +1626,20 @@ inline cXyz computeRawCoreAnchoredEye(daAlink_c* link) {
 // into a crawl, so it's just as stale here as it was for swimming. Same
 // fix: fall back to the raw head-joint anchor instead. See isCrawling()'s
 // own comment for why this is an mProcID check, not a MODE_FLG bit.
+//
+// VINE CLIMBING (user request 2026-08-10, "make climbing vines
+// specifically first person"): scoped to MODE_VINE_CLIMB specifically
+// (d_a_alink.h, "used for vine climbing") -- a real, dedicated mode bit
+// distinct from general MODE_CLIMB (ladders, weak walls), so ladder/
+// weak-wall climbing is deliberately NOT affected by this, only vines.
+// Same fallback as swimming/crawling: the core anchor's standing-height
+// calibration doesn't hold up in a stance this different, and vine
+// climbing already has its own animated eye/body pose the base game
+// drives directly, same as swimming/crawling do.
 inline cXyz computeRawEyeAnchor(daAlink_c* link) {
-    if (link->checkModeFlg(daAlink_c::MODE_SWIMMING) || isCrawling(link)) {
+    if (link->checkModeFlg(daAlink_c::MODE_SWIMMING | daAlink_c::MODE_VINE_CLIMB) ||
+        isCrawling(link))
+    {
         return *link->getSubjectEyePos();
     }
     if (!link->checkEventRun()) {

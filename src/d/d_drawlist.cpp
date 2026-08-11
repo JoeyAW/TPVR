@@ -1118,6 +1118,29 @@ void dDlst_shadowReal_c::imageDraw(Mtx param_0) {
 }
 
 void dDlst_shadowReal_c::draw() {
+#if TARGET_PC
+    // ROOT-CAUSED 2026-08-09: this is what the user had been calling
+    // "cloud shadows on the ground" -- turned out to have nothing to do
+    // with clouds/weather at all (two separate, unrelated weather-related
+    // systems were investigated and ruled out first via a real log
+    // capture -- see vr-mod-notes section 23's cloud-shadow writeup).
+    // This "Real" (projected-texture blob) shadow system -- cast by
+    // buildings/NPCs/props onto the ground, distinct from
+    // dDlst_shadowSimple_c's stencil-volume shadows -- was NEVER actually
+    // covered by this project's documented "shadows are intentionally
+    // disabled in VR" guard (CLAUDE.md's permanent constraint): only
+    // dDlst_shadowSimple_c::draw() got that early-return. Here, only
+    // defensive frame-interp fixes were applied (the have_view_mtx/
+    // have_recv_proj_mtx checks below) -- the actual draw call itself was
+    // never gated, confirmed by a real [dusk::shadow]/[dusk::realshadow]
+    // log capture showing VR=1 lines firing throughout an active VR
+    // session. Disabling here COMPLETES, rather than reverses, the
+    // existing "shadows disabled in VR" intent already applied to Simple
+    // shadows -- not a new exception.
+    if (g_duskVRRenderingToHeadset) {
+        return;
+    }
+#endif
     static GXColor l_color = {0, 0, 0, 64};
     l_color.a = field_0x1;
 

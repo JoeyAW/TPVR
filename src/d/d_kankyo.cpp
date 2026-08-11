@@ -4562,7 +4562,37 @@ void dScnKy_env_light_c::setLightTevColorType_MAJI(J3DModelData* modelData_p,
         lightType = 1;
     }
 
+    // DISABLED IN VR 2026-08-09 (user request: "I need to actually disable
+    // the cloud shadows now"). dKy_cloudshadow_scroll() below drives the
+    // ground-decal cloud shadows on MA00/MA01/MA16-named terrain materials
+    // via a camera-dependent TexMtx(1) mapping -- confirmed camera-locked/
+    // counter-rotating with head movement in Ordon Village. The broader
+    // "sync the flatscreen camera to the headset" fix that would have
+    // corrected this for free (and every other camera-anchored effect at
+    // once) was tried and reverted the same session (no noticed benefit,
+    // real regression risk into cutscene audio/VFX -- see vr-mod-notes
+    // section 23). Falling back to the ordinary per-material lighting
+    // loop (the SAME `else` branch every other material already uses,
+    // via setLightTevColorType_MAJI_sub -- also still called from inside
+    // dKy_cloudshadow_scroll() itself, so lighting behavior for these
+    // materials is otherwise unchanged) is simplest and most certain to
+    // actually remove the visible shadow pattern in VR without needing to
+    // fully reverse-engineer this material's TEV/blend setup -- same
+    // "disable the camera-relative half, don't guess at the TEV math"
+    // reasoning already used for cloud shadows' billboard system
+    // (drawCloudShadow()) and the swim-ripple screen-space reflection.
+    // Flatscreen unchanged. NOTE: this was NOT actually the cause of the
+    // reported "cloud shaped shadows that move with the camera" bug --
+    // this guard is inert (dKy_cloudshadow_scroll's own TexMtx(1) scroll
+    // was never the mechanism). The real fix lives in dKy_bg_MAxx_proc's
+    // MA00/MA01/MA16 TevKColor(1) wash-out below (2026-08-10, see
+    // vr-mod-notes). Left in place regardless -- harmless, and this is a
+    // real disable of a real camera-relative effect either way.
+#ifdef TARGET_PC
+    if ((tevstr_p->Type & 0x20) && !dusk::vr::isRenderingToHeadset()) {
+#else
     if (tevstr_p->Type & 0x20) {
+#endif
         dKy_cloudshadow_scroll(modelData_p, tevstr_p, lightType);
     } else {
         for (int i = modelData_p->getMaterialNum() - 1; i >= 0; i--) {
@@ -11515,6 +11545,33 @@ void dKy_bg_MAxx_proc(void* bg_model_p) {
                     } else {
                         sp5C.a = 0;
                     }
+
+#ifdef TARGET_PC
+                    // VR: this KColor(1) red channel doubles as the ground
+                    // "cloud shadow" TEV stage's wash-out amount (max value
+                    // = fully washed out, same as this channel already
+                    // receiving max fog density) -- mechanism confirmed via
+                    // mods/effect_remover's identical technique in the
+                    // separate dusklight-mods repo. This overlay's TexMtx(1)
+                    // Envmap/Projmap UV mapping reads j3dSys.getViewMtx()
+                    // every frame, making it camera-relative -- matches the
+                    // reported "cloud-shaped shadows on the ground that
+                    // move with the camera" bug in Ordon Village (see
+                    // vr-mod-notes skill, "darkened spots" investigation).
+                    // Scoped to MA00/MA01/MA16 only, matching the EXACT
+                    // same 3-code scope dKy_cloudshadow_scroll() above
+                    // already uses for the sibling scroll-animation half of
+                    // this same overlay family (it never matches MA04
+                    // either) -- MA04 is deliberately excluded, confirmed
+                    // by mods/effect_remover's own testing to be the Faron
+                    // forest-floor shade specifically, which needs to keep
+                    // working in VR.
+                    if (dusk::vr::isRenderingToHeadset() &&
+                        memcmp(&mat_name[3], "MA04", 4) != 0)
+                    {
+                        sp5C.r = 255;
+                    }
+#endif
 
                     mat_p->setTevKColor(1, (J3DGXColor*)&sp5C);
                 }

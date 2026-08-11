@@ -56,7 +56,44 @@ this skill has the full reasoning and history behind each one.
   searching the Resource Inspector by a resource's known
   width/height/format (sort or filter the Texture List) and checking its
   "Used in Frame" events is a reliable fallback for finding the right draw
-  calls.
+  calls. (4) `WinPixEventRuntime.dll` isn't vendored in this repo or
+  present anywhere on this dev machine by default — it's the official
+  Microsoft NuGet package (`https://www.nuget.org/api/v2/package/WinPixEventRuntime`,
+  a `.nupkg`, which is just a renamed `.zip` — extract it and copy
+  `bin\x64\WinPixEventRuntime.dll` next to `dusklight.exe`, not the
+  `_UAP` variant or the ARM64 folder). (5) **A single F9 press can
+  produce a near-empty capture (a handful of state-reset calls, "No
+  Resource" bound everywhere, no real draw calls) even though the
+  headset shows a normal image at that instant** — confirmed 2026-08-09.
+  Root cause: this codebase has a known, previously-diagnosed condition
+  (see the `pacing.is_interpolating` diagnostic already in `m_Do_main.cpp`,
+  added for an earlier black-screen investigation) where
+  `dusk::vr::tick()` — the function that does ALL real per-eye VR
+  rendering — is skipped entirely on some frames. If F9 happens to land
+  on one of those frames, the capture bracket still opens/closes
+  correctly but catches almost nothing; what you see in the headset at
+  that instant is just leftover content from a prior frame still sitting
+  in the shared eye texture (RenderDoc shows whatever bytes are
+  currently in a resource regardless of whether the capture itself wrote
+  them). **Not a setup problem — just try F9 again.** A real capture is
+  unmistakably different: hundreds/thousands of events, real bound
+  textures, and a noticeably longer gap between the
+  `[dusk::renderdoc] StartFrameCapture`/`EndFrameCapture`
+  `OutputDebugStringA` lines (already present in `m_Do_main.cpp`). (6)
+  **Found and fixed a related bug while investigating (5)**:
+  `m_Do_main.cpp`'s `if (!aurora_begin_frame()) { ...; continue; }`
+  early-return skipped the `EndFrameCapture` call entirely (that check
+  lives further down, unreached by this `continue`) — meaning if
+  `aurora_begin_frame()` ever fails a few times in a row while a capture
+  is open (window resize/minimize, etc.), the capture would stay open
+  across ALL of those failed iterations instead of closing after one
+  frame, silently accumulating far more GPU work than intended — a
+  plausible cause of RenderDoc/driver instability on a later, oversized
+  `EndFrameCapture`. Fixed by closing the capture on that early-return
+  path too, matching the "F9 always captures exactly one frame" contract.
+  Built, not yet confirmed whether this was the actual cause of the
+  reported "pressing F9 twice crashes" symptom — worth retesting
+  specifically whether that crash still happens now.
 
 ## Overall VR status
 
@@ -236,7 +273,54 @@ The identical pair of fixes was then extended to crawling (a
 has no single `MODE_FLG` bit the way swimming does) — **the hand half
 failed here too ("locked in an animation," user deferred further work on
 both swimming's and crawling's hand fix)**, camera half not separately
-confirmed (see section 23's "Crawling" update). Other known issues below.
+confirmed (see section 23's "Crawling" update). The swim-ripple trail's
+screen-space-reflection half is now disabled in VR — **CONFIRMED WORKING
+in-headset** ("Water particles are gone"). Cloud shadows (camera-locked,
+moving opposite head-turn, Ordon Village) took much longer: the billboard
+system (`drawCloudShadow()`) originally disabled turned out to be the
+wrong mechanism, and four more guesses after it (ground-decal texture
+scroll, a real-but-unrelated object-shadow bug, "Moya" ground haze, a
+reverted flatscreen-camera-sync experiment) all turned out wrong or
+insufficient too — full trail below if ever needed, but **the bug is now
+FULLY FIXED, CONFIRMED IN-HEADSET 2026-08-10** (see the dedicated
+"ACTUALLY ROOT-CAUSED AND FIXED" box near the end of this section): the
+real cause was a TEV `KColor(1)` wash-out on terrain materials `MA00`/
+`MA01`/`MA16` in `dKy_bg_MAxx_proc`, found via a completely separate mods
+repo (`dusklight-mods`, a different author's `effect_remover` mod) rather
+than by continuing to bisect this repo's own code. `MA04` (the Faron
+forest-floor/tree-shadow material) was deliberately left untouched and
+confirmed still working. All `[dusk::cloudshadow]` diagnostic logging
+(`drawCloudShadow()`, `dKy_cloudshadow_scroll()`) has since been removed,
+per this project's normal practice, now that the bug is confirmed fixed
+(including the `#include <windows.h>` in `d_kankyo_rain.cpp` that only
+existed for it). A broader idea was then tried and REVERTED same session: syncing the
+shared flatscreen camera object's rotation to the headset every frame
+(would have fixed the whole camera-anchored-effect bug class at once, at
+the cost of also affecting audio panning and any other gameplay system
+reading that camera) — built, tested, no noticed benefit, and a real
+regression (cutscene camera hijacking) was found and fixed, but a
+residual unaudited risk remained, so the user chose to drop it entirely
+("Yeah maybe remove it") rather than keep it. Fully removed, not just
+disabled. Cloud shadows were then disabled two more ways
+(billboard packet, ground-decal texture scroll) — user tested with a real
+log capture and confirmed NEITHER mechanism ever fired, ruling both out.
+A real, separate bug (`dDlst_shadowReal_c` object shadows drawing
+unconditionally in VR, never actually covered by the "shadows disabled in
+VR" guard) was found and fixed along the way — genuinely worth keeping,
+but user-tested and confirmed NOT the actual cause of the reported
+symptom either. A modder-suggested lead ("Moya" ground haze —
+`dKyr_mud_draw()`/`dKyr_evil_draw()`) was tried and RULED OUT by the user
+("Moya isnt it"), then fully reverted (Moya renders normally in VR again,
+as requested). User's sharper description of the actual symptom:
+**"slightly darkened spots on the ground"** — small discrete dark
+patches, not a broad haze and not full shadow blobs. Both still-active
+disables (`drawCloudShadow()`, `dKy_cloudshadow_scroll()`) remain in
+place (inert either way — never confirmed entered) and the
+`dDlst_shadowReal_c` object-shadow fix remains in place (a real,
+independently-valid fix, just not this symptom). **Next step, agreed
+with the user: RenderDoc capture, not another named guess** — see the
+"REVERTED" update after section 23's Moya writeup. Other known issues
+below.
 
 ## Currently uncommitted working-tree changes
 
@@ -4695,6 +4779,1009 @@ once-per-tick snapshot instead of interpolating normally — this second
 possibility would directly explain "locked in an animation" (frozen) as
 opposed to "still tracking the controller." Not investigated — user
 explicitly deferred.
+
+### Vine climbing — camera falls back to first-person (head-joint anchor) — built 2026-08-10, NOT yet confirmed in-headset
+
+**Goal** (explicit user request: "make climbing vines specifically first
+person"). Same underlying gap as swimming/crawling — the core/root
+comfort anchor's height calibration (section 23) is only reasoned through
+for standing gameplay and doesn't hold up in a stance this different.
+Deliberately scoped narrower than "all climbing": Twilight Princess has a
+real, dedicated `MODE_VINE_CLIMB = 0x10000` mode bit (`d_a_alink.h`,
+comment "used for vine climbing"), genuinely distinct from the general
+`MODE_CLIMB` bit used for ladders and weak-wall climbing — confirmed by
+grepping `d_a_alink.cpp`'s real usage (e.g. line ~10323's
+`checkModeFlg(MODE_SWIMMING | MODE_ROPE_WALK | MODE_VINE_CLIMB |
+MODE_UNK_800 | MODE_RIDING | MODE_NO_COLLISION | MODE_CLIMB | MODE_JUMP)`
+lists them as separate bits in the same mask, not aliases). So this fix
+intentionally does NOT touch ladder/weak-wall climbing — only vines.
+
+**Fix** (`vr_link_visibility.hpp`'s `computeRawEyeAnchor()`): extended the
+existing `MODE_SWIMMING || isCrawling(link)` fallback condition to also
+include `MODE_VINE_CLIMB` (via `checkModeFlg(MODE_SWIMMING |
+MODE_VINE_CLIMB)`, matching the existing OR-mask calling convention
+already used elsewhere in `d_a_alink.cpp`) — falls back to the original,
+animation-driven head-joint anchor (`getSubjectEyePos()`) instead of the
+core-anchored branch while vine-climbing, same reasoning as swimming/
+crawling. **Camera-only, deliberately** — did NOT extend the
+tracked-hand-disable half (`refreshTrackedHandDrawMtxLive()`) the way
+swimming/crawling both got, since that fix is CONFIRMED FAILED for both
+of the other two modes (swimming: "still lag[ging]"; crawling: hands
+"locked in an animation") and the user only asked for the camera this
+time — no reason to carry over a proven-ineffective fix speculatively.
+
+**Built successfully** (RelWithDebInfo) — only `vr_main.cpp` needed
+recompiling (transitively includes the header), clean link, no new
+warnings.
+
+**NOT yet tested in-headset.**
+
+### Cloud shadows + swim-ripple screen-space "reflection" disabled in VR — built 2026-08-09, NOT yet confirmed in-headset
+
+**Goal** (explicit user request): "disable 2 effects: the cloud shadows on
+the ground and the screen space reflections from the trailer that link
+leaves behind in water." Asked the user to confirm scope first (VR-only,
+matching this project's usual pattern, vs. removing both effects
+everywhere like the Goron Mines heat-wave one-off) — **user chose VR-only**.
+
+**Cloud shadows** (`d_kankyo_rain.cpp`'s `drawCloudShadow()`, called from
+`d_kankyo_wether.cpp`'s `dKankyo_cloud_Packet::draw()`): same class of bug
+as the already-fixed night-sky stars (section 22) and sun/heat-wave
+kagerou effects (sections 5/10) — orients its shadow quads via
+`MTXInverse(dComIfGd_getView()->viewMtxNoTrans, camMtx)`, the FLATSCREEN
+camera's view matrix, not either eye's real per-eye VR view. Fixed the
+same way as stars: an `isRenderingToHeadset()` early-return at the top of
+the function (this file already includes `vr_main.hpp` and uses this
+exact pattern for `dKyr_drawStar()`/`dKyr_sun_move()`), skipping the whole
+draw in VR. Flatscreen unchanged.
+
+**Swim-ripple screen-space reflection** (`d_particle.cpp`'s
+`dPa_control_c::setWaterRipple()`, called from `d_a_alink.cpp` while
+swimming, `d_a_canoe.cpp` for paddle/hull ripples, and `d_a_demo00.cpp`/
+`d_particle_copoly.cpp`): this function spawns TWO particles per ripple —
+`ID_ZI_J_HAMON_A` and `ID_ZI_J_HAMON_IND` (0x1B2/0x1B3,
+`d_particle_name.h`). The `_IND`/`_A` naming pattern repeats consistently
+across dozens of other "hamon" (ripple) effects throughout this particle
+table (e.g. `ID_ZI_S_FM_HAMON_A`/`_IND`, `ID_ZI_S_BQ_APPHAMON_A`/`_IND`) —
+`_IND` is the GX indirect-texture-mapped half that actually samples/
+distorts the screen (a real screen-space reflection technique, distinct
+from this codebase's separate "dummy"-texture-swap mechanism from section
+5, but the same underlying VR problem class: a screen-relative sample
+that reads wrong per-eye/per-frame data in a headset), while `_A` is the
+plain ripple-ring shape/alpha with no screen sampling. Fixed by skipping
+just the `_IND` spawn call while `g_duskVRRenderingToHeadset` is true
+(this file already forward-declares that extern for its existing
+diagnostic-logging code), leaving `*param_0`'s tracked emitter id at 0
+(this codebase's existing "no emitter" convention, used the same way by
+every other `dComIfGp_particle_setPolyColor` caller) rather than ever
+writing a real id into it — the ordinary `_A` ripple-ring keeps spawning
+normally. Kept the whole `_A`/`_IND` PAIR loop structure intact rather
+than special-casing the array — only that one iteration is skipped.
+
+**Built successfully** (RelWithDebInfo) — `d_kankyo_rain.cpp` and
+`d_particle.cpp` recompiled, clean link, no new warnings.
+
+**IN-HEADSET RESULT: swim-ripple SSR fix CONFIRMED WORKING ("Water
+particles are gone"). Cloud shadows are NOT fixed** — user: "cloud
+shadows are still there. I see them in ordon village, and when I turn my
+head left they move right and vice versa. They rotate with the games
+flatscreen camera." User wants these actually FIXED (kept, oriented
+correctly), not disabled — reversing the earlier "disable" framing now
+that it's clear `drawCloudShadow()` wasn't the effect actually being
+seen.
+
+**Investigation (2026-08-09, same session) — `drawCloudShadow()`
+(billboard `CLOUD_EFF` packet) is very likely NOT what the user is
+seeing.** Its early-return is correctly placed (verified by re-reading the
+built code) and should reliably fire whenever `isRenderingToHeadset()` is
+true, so if the user still sees camera-locked shadows, this specific
+billboard system is probably not the actual mechanism drawing them — a
+second, real ground-DECAL system was found instead:
+`d_kankyo.cpp`'s `dKy_cloudshadow_scroll()`, called from
+`dScnKy_env_light_c::setLightTevColorType_MAJI()` whenever a material's
+`tevstr_p->Type & 0x20` bit is set. It scrolls a `TexMtx(1)` SRT
+translation on ground materials named `MA00`/`MA01`/`MA16` (real terrain
+material naming, unlike `CLOUD_EFF`'s standalone particle-style packet) —
+a much better match for "shadows on the ground, widespread in Ordon
+Village."
+
+**Traced the underlying camera dependency as far as static reading
+allows, but couldn't conclusively confirm the root cause**: `dKy_cloudshadow_scroll()`
+itself only touches a translation offset — no camera math at all. The
+actual rotation-with-camera behavior, if this is really the right
+function, would have to come from this material's `TexMtx(1)`
+**mapping mode** (`J3DTexMtxMode_Envmap`/`Projmap`/`ViewProjmap`, baked
+into the level's `.bmd` data, not visible from this C++ source) — traced
+into `J3DMatBlock.cpp`, which shows ALL of those modes correctly read
+`j3dSys.getViewMtx()`, the SAME per-eye view matrix normal (correctly
+stereo) geometry already uses. That's a real finding, but it means this
+mapping SHOULD already be VR-correct with zero extra code by the same
+reasoning that normal terrain draws correctly — which contradicts the
+observed bug, so either (a) this material uses a different, non-camera
+mapping mode after all and something else entirely is responsible, or (b)
+`j3dSys.getViewMtx()` genuinely isn't what's active at the moment this
+particular material's `calc()` runs (a timing/call-path issue, the same
+bug CLASS as several other VR bugs in this file — e.g. section 20's
+`daAlink_c::draw()` never running during a real eye pass — just not yet
+confirmed for this specific call site). A parallel hypothesis (a
+GameCube-era "already computed this frame" cache flag, `j3dSys.checkFlag(4)`/
+`checkFlag(8)`, silently reusing eye 0's matrix for eye 1) was
+investigated and RULED OUT by reading `J3DModel.cpp` — those flags
+actually gate CPU-skinning model-matrix concatenation, unrelated to
+per-eye caching.
+
+**Diagnostic logging added instead of guessing a fix blind** (this
+project's own established practice — see the Build Workflow notes on the
+`OutputDebugStringA`-log-and-test loop): `d_kankyo_rain.cpp`'s
+`drawCloudShadow()` now logs once (`[dusk::cloudshadow] drawCloudShadow
+entered in VR, mCount=...`) right before its existing early-return, so we
+can confirm/rule out whether it's ever reached at all while the user sees
+the bug. `d_kankyo.cpp`'s `dKy_cloudshadow_scroll()` now logs once when
+entered in VR (`matNum=...`), and once per matched ground material
+(`[dusk::cloudshadow] matched material name=... mProjection=... mInfo=...`)
+— `mProjection` directly reveals which `J3DTexMtxMode` this material
+actually uses (0 = Basic/no camera dependency at all, contradicting the
+whole theory; a higher value = one of the Envmap/Projmap family, meaning
+the bug is a timing/call-path issue rather than a wrong-formula issue).
+Needed a `#include <windows.h>` added to `d_kankyo_rain.cpp` (not
+previously needed there) for `OutputDebugStringA` to resolve — caught by
+the build failing immediately, fixed same round.
+
+**Built successfully** (RelWithDebInfo) — `d_kankyo.cpp` and
+`d_kankyo_rain.cpp` recompiled, clean link, no new warnings.
+
+**NOT tested in-headset before the direction changed — see below.** User
+proposed a different, much broader idea instead of chasing this one
+capture at a time: sync the shared flatscreen camera's own ROTATION to
+the headset every frame, since every one of these camera-anchored bugs
+(stars, sun/heat-wave kagerou, now cloud shadows) all read the SAME
+`dComIfGd_getView()` object for orientation — fixing that one shared
+object fixes the whole bug class at once, including undiscovered
+instances, instead of patching each read site individually. Explicit
+tradeoff flagged and accepted by the user: this same object's rotation
+also feeds the audio camera and potentially other gameplay systems
+(aiming/targeting) that read it for legitimate reasons, not just visual
+effects — those would now also respond to head rotation, previously
+inert in VR. User's response: "I think it is a good side effect, as many
+times I'd be playing and think I wish the camera was matching my
+headset."
+
+### Flatscreen camera synced to headset direction — built 2026-08-09, NOT yet confirmed in-headset (supersedes the cloud-shadow-specific investigation above)
+
+**What changed**: `d_camera.cpp`'s `camera_draw()` (the function that
+computes `view_class`'s `viewMtx`/`viewMtxNoTrans`/`projViewMtx` from
+`lookat.eye/center/up` every frame, feeds `j3dSys.setViewMtx()` for
+env-mapped materials, AND sets up `Z2GetAudience()`'s audio camera — all
+downstream of the exact same `mDoMtx_lookAt()` call) now overrides
+`process->view.lookat.center`/`.up` while `isRenderingToHeadset()`, right
+before that computation runs, using a new `dusk::vr::getHeadWorldForward()`
+accessor (`vr_main.hpp`/`.cpp` — a `cXyz`, the same real-time undamped
+head direction `getHeadMoveAngleS()` already flattens to an s16 for
+movement, now also exposed as a raw 3D vector including pitch, cached
+once per frame in `tick()` alongside it — one `computeHeadWorldForward()`
+call, two consumers). `lookat.eye` (the camera's POSITION) is
+deliberately left completely alone — the base game's own third-person
+follow-camera AI (distance, height, collision) keeps working exactly as
+before; only which direction it's looking changes. `lookat.up` is pinned
+to world-up (not head roll) — matches how the real per-eye VR render
+already handles roll correctly on its own, and avoids introducing camera
+roll into whatever else reads this shared object.
+
+**Why this should fix cloud shadows (and the stars/sun-kagerou bugs
+retroactively, if ever re-enabled)**: all of them read this same object's
+rotation (`viewMtxNoTrans` directly, or indirectly via `j3dSys.getViewMtx()`
+for env-mapped materials like the cloud-shadow ground decal). Once that
+object's rotation actually matches the headset every frame, any code
+reading it gets a head-correct answer for free, with no further per-effect
+patching needed.
+
+**Everything from the previous round left in place, not removed** (per
+explicit user instruction, "don't remove the logging until the bug is
+fixed"): the `[dusk::cloudshadow]` diagnostic logging in
+`drawCloudShadow()`/`dKy_cloudshadow_scroll()` is still in the tree — if
+this broader fix doesn't fully resolve cloud shadows, that logging is
+still the next lead to pull (e.g. it would help confirm whether
+`dKy_cloudshadow_scroll()`'s material actually uses one of the
+camera-dependent `J3DTexMtxMode`s at all, still unconfirmed). The earlier
+`drawCloudShadow()` VR-disable (the billboard `CLOUD_EFF` packet) is also
+still in place, untouched — unrelated to this fix, no reason to revert it
+without evidence it was ever the right target.
+
+**Built successfully** (RelWithDebInfo) — this changed `vr_main.hpp` (a
+widely-included header), so it triggered a full rebuild (1185 objects);
+completed cleanly, no errors, no new warnings.
+
+**IN-HEADSET RESULT: user didn't notice a clear benefit either way, but
+wants to keep the change regardless — followed by a direct "could this
+regress anything?" question, answered with a real regression review
+(below) rather than just reassurance.**
+
+**Regression review (2026-08-09, same session) — one real, concrete risk
+identified and mitigated; one residual, unaudited risk named honestly,
+not fixed.**
+
+1. **Cutscene/dialogue authored-camera hijacking (real, mitigated)**:
+   `camera_draw()` runs EVERY VR frame unconditionally — including
+   cutscenes and door/transition events, where the flatscreen camera is
+   doing something AUTHORED (a scripted pan, deliberate framing) that
+   audio panning and env-mapped VFX orientation are presumably meant to
+   track. The original version of this fix had no gate at all, meaning a
+   cutscene's audio mix / lighting-effect orientation would silently
+   follow wherever the player's head happened to be pointed instead of
+   the actual shot — desyncing those systems from what's on screen, even
+   though the real per-eye VR RENDER itself was never affected (cutscenes
+   don't read this object's rotation for the actual image — see
+   `getVrCameraEyeAnchor()`'s own fallback handling). **Fixed same
+   session**: gated the whole override on a new `dusk::vr::
+   isFirstPersonView()` (`vr_main.hpp`/`.cpp`, thin forward to
+   `vr_link::isFirstPerson()`) — now only applies during ordinary
+   first-person gameplay and plain NPC dialogue, the same scope every
+   other first-person-only VR fix in this project already uses. Cutscenes
+   keep their authored camera direction for audio/VFX; normal gameplay
+   still gets the requested head-sync effect.
+2. **Unaudited gameplay logic reading `lookat.center`/`up` as literal
+   values during ordinary FIRST-PERSON gameplay (residual, NOT fixed,
+   named honestly rather than hidden)**: even after the gate above, any
+   system that reads this shared camera's `center` as an actual WORLD
+   POSITION (not just a direction) — e.g. a reverb/audio-focus-distance
+   calculation, a "what is the camera looking at" query used by aiming or
+   auto-target-candidate selection — would now see a point ~1m in front
+   of the player's eye instead of whatever the base game normally puts
+   there (often much farther away, e.g. roughly toward Link/a target).
+   Similarly, `up` is now always pinned to world-up, discarding any
+   INTENTIONAL camera roll during special camera modes (if any exist)
+   whose downstream consumers expected real roll data. **Not fixed —
+   this needs either a full audit of every `dComIfGd_getView()` reader in
+   the codebase (large, not attempted) or empirical in-headset testing of
+   specific systems (aiming, lock-on, reverb-heavy areas) to catch
+   anything that actually breaks.** If something camera-relative feels
+   wrong during normal gameplay specifically (not cutscenes — those are
+   now excluded), START HERE.
+
+**Built successfully** (RelWithDebInfo) — `d_camera.cpp`, `vr_main.hpp`,
+`vr_main.cpp` recompiled, clean link, no new warnings.
+
+**REVERTED 2026-08-09 (same session), per explicit user request ("Yeah
+maybe remove it") after the regression review above.** No benefit had
+been noticed in-headset, and given the residual, unaudited risk (#2
+above) couldn't be fully ruled out, the user chose to drop the feature
+entirely rather than keep carrying that uncertainty. Fully removed, not
+just disabled behind a flag: the `camera_draw()` override block
+(`d_camera.cpp`, including its now-unneeded `#include "dusk/vr/vr_main.hpp"`),
+`dusk::vr::getHeadWorldForward()`/`isFirstPersonView()` and their
+declarations (`vr_main.hpp`), and `g_headWorldForward`/its per-frame
+computation (`vr_main.cpp`) — all deleted outright rather than left
+commented out or gated off, since this project's own convention is clean
+removal once something's confirmed not worth keeping, not dead scaffolding.
+`getHeadMoveAngleS()`/`g_headMoveAngleS` (movement-direction fix, section
+17, unrelated and still working) were NOT touched — only the parts added
+specifically for this camera-sync experiment came out.
+
+**Built successfully** (RelWithDebInfo) — `d_camera.cpp`, `vr_main.hpp`,
+`vr_main.cpp` recompiled, clean link, no new warnings. Confirms a clean
+revert (no leftover dangling references).
+
+**State this leaves things in**: back to the one-effect-at-a-time approach
+if this is ever revisited. Water-ripple SSR disable and the billboard
+cloud-shadow disable (both confirmed/left in from earlier this session)
+are untouched by this revert.
+
+### Ground-decal cloud shadows disabled in VR — built 2026-08-09, NOT yet confirmed in-headset (closes out this whole investigation)
+
+**Goal** (explicit user request, after the camera-sync revert: "I need to
+actually disable the cloud shadows now"): stop trying to fix the
+orientation properly (needs a full TEV/blend understanding this
+investigation never reached) — just remove them from VR, matching the
+original request pattern before the "fix them properly" detour.
+
+**Fix**: `d_kankyo.cpp`'s `dScnKy_env_light_c::setLightTevColorType_MAJI()`
+dispatches per-material lighting to one of two branches based on
+`tevstr_p->Type & 0x20` — the cloud-shadow branch
+(`dKy_cloudshadow_scroll()`, the ground-decal mechanism identified in the
+earlier investigation) or the ordinary per-material lighting loop
+(`setLightTevColorType_MAJI_sub()`, called for every other material in
+the game). Added `&& !isRenderingToHeadset()` to the condition that
+selects the cloud-shadow branch — in VR, these materials now always fall
+through to the SAME ordinary lighting path every other material uses
+(which `dKy_cloudshadow_scroll()` itself also calls internally, so normal
+ambient lighting for this terrain is unaffected — only the cloud-shadow-
+specific TevKColor tweak and TexMtx(1) scroll are skipped). Chosen over
+trying to hand-tune this material's TEV/alpha state directly (would
+require reverse-engineering a blend setup this investigation never fully
+understood) — same "disable the camera-relative half, don't guess at the
+TEV math" reasoning already used for the billboard cloud-shadow packet and
+the swim-ripple screen-space reflection earlier this session. Flatscreen
+completely unchanged.
+
+**Diagnostic logging left in place, not removed**: the `[dusk::cloudshadow]`
+`OutputDebugStringA` logging inside `dKy_cloudshadow_scroll()` (both the
+entry log and the per-material `mProjection`/`mInfo` dump) is untouched —
+it simply never fires anymore in VR now that the function isn't called
+there. Per the user's standing "don't remove the logging until the bug is
+fixed" instruction — this is a disable/workaround, not a root-cause fix,
+so the logging may still be useful if the orientation is ever properly
+investigated later.
+
+**Built successfully** (RelWithDebInfo) — only `d_kankyo.cpp` recompiled,
+clean link, no new warnings.
+
+**IN-HEADSET RESULT: still not fixed.** User captured a real log
+(`C:\Users\joeyw\Downloads\log.txt`) and confirmed: zero
+`[dusk::cloudshadow]` lines anywhere in the whole session, despite the
+capture clearly showing a real, actively-rendering VR session
+(`[dusk::vr::tick] reason -> rendering-normally`, eye buffer dumps,
+etc.). **This rules out BOTH candidate mechanisms investigated so far**
+(`drawCloudShadow()`'s billboard packet AND `dKy_cloudshadow_scroll()`'s
+ground-material texture scroll) — neither was ever entered during this
+session. Whatever the user is seeing is a third, still-unidentified thing
+— the whole "cloud shadow" framing may have been wrong from the start.
+
+### ACTUAL ROOT CAUSE FOUND: not clouds at all — `dDlst_shadowReal_c`, a real object-shadow system, was never actually disabled in VR — FIXED 2026-08-09
+
+**The real finding**: searching the same log for anything shadow-related
+(not just cloud-specific) turned up pre-existing, previously-undiscussed
+diagnostic logging already in the tree — `[dusk::shadow]`/
+`[dusk::realshadow]` (`d_drawlist.cpp`) — firing repeatedly with `VR=1`
+throughout the whole session, dumping real per-object shadow projection
+matrices (`mVolumeMtx`, `mMtx`, `finalRecvProj`) for many different world
+positions. This is `dDlst_shadowReal_c` — a SEPARATE shadow subsystem
+from `dDlst_shadowSimple_c` (the stencil-volume shadow CLAUDE.md's
+"shadows disabled in VR" permanent constraint already covers) — a
+projected-texture "blob" shadow cast by buildings/NPCs/props onto the
+ground, using `GXLoadTexMtxImm`/`mShadowRealPoly.draw()` to blend a soft
+shadow decal.
+
+**Confirmed via direct code reading, not just the log**:
+`dDlst_shadowReal_c::draw()` (`d_drawlist.cpp`) had NO
+`g_duskVRRenderingToHeadset` early-return at all — only defensive
+frame-interp guards further down (`have_view_mtx`/`have_recv_proj_mtx`,
+forced false in VR, falling back to `mReceiverProjMtx`/`mViewMtx`
+instead) — meaning `mShadowRealPoly.draw()`, the actual GPU blend of the
+shadow decal onto the ground, ran completely UNCONDITIONALLY in VR the
+whole time. This directly contradicts CLAUDE.md's "shadows are
+intentionally disabled in VR" note — that note only ever covered
+`dDlst_shadowSimple_c`; `dDlst_shadowReal_c` was apparently missed
+entirely when that disable was originally applied, and nobody had
+independently verified whether IT looked correct in VR since — every
+prior session's "shadow stretching" investigation (section 1) was about
+`dDlst_shadowSimple_c`/`dDlst_shadowReal_c::setShadowRealMtx()`'s
+PRECISION (matrix math correctness at large world coordinates), not about
+whether the Real variant's actual draw call was gated for VR at all.
+
+This fully explains the user's symptom: soft shadow blobs cast by
+Ordon Village's buildings/NPCs/fences onto the ground, rendered using a
+camera/view-relative projection matrix that was never corrected for VR's
+real per-eye view — same underlying bug CLASS as every other
+camera-anchored effect this session chased (stars, sun-kagerou,
+now-ruled-out cloud effects), just in a completely different subsystem
+nobody thought to check because "shadows" were already believed to be
+fully off.
+
+**Fix**: added the exact same VR early-return `dDlst_shadowSimple_c::draw()`
+already has, to `dDlst_shadowReal_c::draw()` too — `if
+(g_duskVRRenderingToHeadset) return;` at the top, before any GX state
+changes. This COMPLETES the existing, already-documented "shadows
+disabled in VR" intent rather than reversing or second-guessing it — CLAUDE.md's
+own standing lesson ("don't infer a fix supersedes a disable guard without
+evidence") doesn't apply in reverse here; this is disabling something
+that was actively drawing, matching the documented intent, not
+re-enabling something that was off.
+
+**Built successfully** (RelWithDebInfo) — only `d_drawlist.cpp`
+recompiled, clean link, no new warnings.
+
+**CLAUDE.md updated** to correct the permanent-constraints note — it
+previously implied ALL shadows were disabled in VR; now clarifies both
+subsystems are covered as of this fix, and explains the gap that existed
+until now.
+
+**Everything from the cloud-shadow investigation (both dead-end
+mechanisms) left in place, untouched**: the `[dusk::cloudshadow]`
+logging in `drawCloudShadow()`/`dKy_cloudshadow_scroll()`, and both VR
+disables applied to them earlier this session (the billboard packet and
+the ground-material texture scroll) — all harmless, none of them were
+ever the actual cause, but none were wrong to have tried either given the
+evidence available at each point. Not worth reverting; they just never
+mattered for this specific symptom.
+
+**IN-HEADSET RESULT: still not fixed.** Real object shadows (`dDlst_shadowReal_c`)
+were a genuine, separate bug worth fixing on their own merits, but not
+the one the user was actually describing.
+
+### ACTUAL ACTUAL root cause, from an outside source: "Moya" ground haze — FIXED 2026-08-09
+
+**The real identification, from another modder** (not found via this
+session's own investigation): "It's a particle effect, its proper name is
+'Moya', projected particle ground shading... not necessarily a typical
+EFB or scrolling texture, tho it does scroll." "Moya" (もや, "haze/mist")
+is a real, pre-existing name already in this codebase —
+`g_env_light.mMoyaMode`/`mMoyaCount` (state driven by `d_a_kytag06.cpp`,
+an environment-mist trigger actor) and, more directly, a shared texture
+resource `mpMoyaRes` used by exactly two draw functions in
+`d_kankyo_rain.cpp`: `dKyr_mud_draw()` (`dKankyo_mud_Packet`/`EF_MUD_EFF`
+— despite the internal "mud" name, this is general ground haze, not a
+mud-dungeon-specific effect) and `dKyr_evil_draw()`
+(`dKankyo_evil_Packet`/`EF_EVIL_EFF` — the Twilight/evil-realm variant,
+also calls a `dKyr_evil_draw2()` helper internally). Both use the exact
+same camera-anchored billboard technique as every other effect in this
+bug class: `MTXInverse(dComIfGd_getView()->viewMtxNoTrans, camMtx)`,
+confirmed by direct code read — the FLATSCREEN camera's matrix, not
+either eye's real per-eye VR view.
+
+Not a JPA particle system in the strict engine sense (the modder's
+"particle" description doesn't map to this codebase's actual
+`dPa_control_c`/JPA particle infrastructure used elsewhere in this
+file) — it's the same billboard-quad-with-a-haze-texture technique as
+`drawCloudShadow()`/`dKyr_drawStar()`, just under a different internal
+name ("mud"/"evil") that never surfaced in any of this session's earlier
+greps for "cloud"/"kumo"/"shadow". The "Moya" name itself is what
+finally connected it — a name this session's own code reading never
+independently arrived at.
+
+**Fix**: added the same `isRenderingToHeadset()` early-return to both
+`dKyr_mud_draw()` and `dKyr_evil_draw()` (the latter's internal
+`dKyr_evil_draw2()` helper is only ever called from within
+`dKyr_evil_draw()`, so it's covered transitively, no separate guard
+needed). Flatscreen unchanged.
+
+**Built successfully** (RelWithDebInfo) — only `d_kankyo_rain.cpp`
+recompiled, clean link, no new warnings.
+
+**Everything from every earlier wrong guess this session left in place,
+untouched**: the billboard `drawCloudShadow()` disable, the ground-decal
+`dKy_cloudshadow_scroll()` disable, the `[dusk::cloudshadow]` diagnostic
+logging, and the `dDlst_shadowReal_c` object-shadow disable — none of them
+were the actual cause of THIS symptom, but the object-shadow fix in
+particular is a real, independently-valid bug fix worth keeping regardless
+(shadows genuinely were drawing unconditionally in VR, camera-locked, even
+if that specific system wasn't what "cloud shadows" turned out to be).
+
+**IN-HEADSET RESULT: NOT the cause.** User: "Moya isnt it but make sure
+the original moya particles aren't harmed by this change." Also gave a
+sharper visual description this time, worth recording precisely for
+whoever picks this up next: **"These cloud shadows are like slightly
+darkened spots on the ground"** — small discrete dark patches, not a
+broad hazy/foggy overlay (which is what Moya actually looks like) and not
+full black shadow blobs either (already ruled out via the
+`dDlst_shadowReal_c` fix, which is real and worth keeping but also didn't
+fix this).
+
+**REVERTED same session**: both `dKyr_mud_draw()` and `dKyr_evil_draw()`
+guards removed entirely, back to their original unguarded state — Moya
+renders normally in VR again, exactly as before this whole detour. Built
+clean (`d_kankyo_rain.cpp` only), confirmed via a fresh build after the
+user closed the running game (needed — `dusklight.exe` was still running
+and would have locked the linker).
+
+**State after four wrong guesses across two sessions**: `drawCloudShadow()`
+(billboard `CLOUD_EFF`) and `dKy_cloudshadow_scroll()` (ground-material
+texture scroll) are STILL disabled in VR (never reverted — no evidence
+either was ever entered per the `[dusk::cloudshadow]` log capture, so
+disabling them is inert either way, not actively wrong to leave as-is).
+`dDlst_shadowReal_c::draw()` is STILL disabled in VR (a real, independently
+-valid fix — genuine object shadows WERE drawing unconditionally,
+camera-locked — just not this specific symptom). Moya is the only one
+reverted, since the user explicitly asked for it back.
+
+**Next step, per the plan already agreed with the user**: stop guessing
+candidate functions by name — reach for a RenderDoc capture instead (this
+project's own established fallback, Build Workflow notes: "When the
+`OutputDebugStringA`-log-and-guess loop stalls, reach for a RenderDoc GPU
+capture sooner rather than later"). With "slightly darkened spots on the
+ground" as a precise visual target, the Resource Inspector/Texture Viewer
+approach (search by known width/height/format, or use debug-group markers
+if `WinPixEventRuntime.dll` is available) should identify the actual draw
+call directly, rather than continuing to guess based on function/effect
+names that keep turning out to be red herrings.
+
+### "Darkened spots on the ground" investigation — PAUSED for the night 2026-08-09, resume here
+
+**User explicitly paused** ("Honestly its getting late. Id like to
+document this and continue it tomorrow") mid-RenderDoc investigation.
+This box is the resume point — read it before touching any of this again,
+rather than re-deriving from the play-by-play above.
+
+**Bug still NOT root-caused, after FIVE wrong guesses across two
+sessions**: slightly darkened spots on the ground, camera-locked (move
+opposite head-turn), confirmed in Ordon Village. Ruled out, in order:
+`drawCloudShadow()` (billboard `CLOUD_EFF` packet — never entered per a
+real log capture), `dKy_cloudshadow_scroll()` (ground-material texture
+scroll — also never entered), `dDlst_shadowReal_c` (real object
+"blob" shadows — a genuine separate bug, fixed, KEPT, but confirmed not
+this symptom), "Moya" ground haze (`dKyr_mud_draw()`/`dKyr_evil_draw()`
+— a specific tip from another modder, tested and ruled out, REVERTED
+back to original unguarded state per user request).
+
+**Current tool state, mid-RenderDoc-capture-debugging**:
+- `WinPixEventRuntime.dll` is in place next to `dusklight.exe`
+  (`build\windows-msvc-relwithdebinfo\`) and `DUSK_GFX_DEBUG_GROUPS=ON`
+  is set in the CMake cache — debug-group markers should show up in
+  RenderDoc's Event Browser. Confirmed NOT the cause of the capture
+  truncation below (tested with the DLL removed too, same result) — no
+  need to touch this again unless a NEW reason comes up.
+- **Captures are truncating far short of a real frame** — first attempt
+  stopped at event 8, most recent at event 41, both times with no bound
+  render target (empty Outputs tab) past event 4. Reproducible, not
+  random — ruling out an earlier "bad luck landed on a skipped-tick
+  frame" theory. NOT yet explained.
+- A real, valid bug WAS found and fixed along the way (keep this
+  regardless of whether it explains the truncation): `m_Do_main.cpp`'s
+  `if (!aurora_begin_frame()) { ...; continue; }` used to skip
+  `EndFrameCapture()` entirely, capable of leaving a capture open across
+  many more frames than intended. This measurably changed the truncation
+  point (8 → 41 event count, more consistent since), but didn't fix the
+  underlying truncation.
+- **Last diagnostic added, NOT yet captured**: `m_Do_main.cpp` now logs
+  `[dusk::renderdoc] pre-EndFrameCapture stats: drawCallCount=...
+  mergedDrawCallCount=...` (from `aurora_get_stats()`) right before every
+  `EndFrameCapture()` call. **This is the immediate next step tomorrow**:
+  take one more F9 capture, then find that exact log line in the VS
+  Output window and report the numbers back. High `drawCallCount` despite
+  a tiny RenderDoc event count would confirm a genuine capture/
+  synchronization gap (the frame's real GPU work is deferred to Aurora's
+  render worker thread — see `submitFrame()`'s `aurora::gfx::synchronize()`
+  comment in `vr_main.cpp` for the existing, possibly-incomplete fix for
+  this exact class of cross-thread timing issue) worth digging into
+  further; a low `drawCallCount` would mean the game itself is doing
+  almost nothing that frame, which is a different and probably easier
+  problem to chase (e.g. capturing during a frame where
+  `dusk::vr::tick()` doesn't run at all).
+
+**Files currently modified from this session, for a quick `git diff`
+orientation tomorrow** (see each item's own writeup above for full
+reasoning):
+- `d_particle.cpp` — swim-ripple SSR disabled in VR. **Confirmed working,
+  keep.**
+- `d_kankyo_rain.cpp` — `drawCloudShadow()` (billboard) VR-disabled +
+  `[dusk::cloudshadow]` diagnostic logging. Inert (never entered), not
+  reverted (harmless).
+- `d_kankyo.cpp` — `dKy_cloudshadow_scroll()`'s dispatch guarded off in
+  VR (`setLightTevColorType_MAJI`) + its own `[dusk::cloudshadow]`
+  logging. Also inert, also not reverted.
+- `d_drawlist.cpp` — `dDlst_shadowReal_c::draw()` VR-disabled. **Real,
+  independently-valid fix — confirmed genuine object shadows were
+  drawing unconditionally in VR. Keep regardless of the main
+  investigation's outcome.**
+- `m_Do_main.cpp` — RenderDoc capture-leak fix (keep, real bug) + the
+  `drawCallCount` diagnostic (temporary, remove once this is
+  root-caused).
+- `d_camera.cpp`, `vr_main.hpp`/`.cpp` — the flatscreen-camera-headset-sync
+  experiment. **Fully reverted, zero trace left.**
+
+**Cross-check against `mods/shadow_mod` (2026-08-10, next-day session) —
+confirms coverage is complete, no new lead.** User pointed at
+`mods/shadow_mod` (the pre-existing "[Demo] Dynamic Shadows" mod) on a
+tip from the dusklight devs that it "shows how to remove cloud shadows."
+It hooks exactly three of the game's own shadow functions to avoid
+double-shadowing its own dynamic system: `dDlst_shadowControl_c::
+imageDraw()`/`::draw()` (the umbrella class — `draw()` itself loops both
+`mSimple[]` and the `dDlst_shadowReal_c` linked-list, i.e. covers BOTH
+shadow variants already discussed in section 1) and `drawCloudShadow()`
+(confirmed, again, to be "the weather cloud shadows" function — no new
+name surfaced). Checked whether either umbrella entry point has an
+uncovered call site the way `dDlst_shadowReal_c::draw()` itself once did:
+`dComIfGd_drawShadow()`/`dComIfGd_imageDrawShadow()` each have exactly
+ONE call site in the whole codebase, both already gated on
+`!dusk::vr::isRenderingToHeadset()` (`m_Do_graphic.cpp:2623`/`:2485`), on
+top of the per-class early-returns already in `dDlst_shadowSimple_c::
+draw()`/`dDlst_shadowReal_c::draw()` themselves. **Net result: no new
+fix, no new lead — just independent confirmation that the game's entire
+built-in shadow system (both variants + cloud billboard) is fully gated
+off in VR with no remaining gaps of the kind this investigation already
+had to fix once.** Doesn't change the "darkened spots" bug's status or
+the RenderDoc-capture next step above at all — noted here mainly so a
+future session doesn't re-spend time re-deriving this same dead end from
+`shadow_mod` again.
+
+### "Darkened spots on the ground" — ACTUALLY ROOT-CAUSED AND FIXED 2026-08-10, via a second separate mods repo (`dusklight-mods`), CONFIRMED IN-HEADSET
+
+**The real find, from a completely different source than `shadow_mod`**:
+user pointed at `C:\Users\joeyw\dusklight-mods` (a SEPARATE repo/author —
+"automata-rtx" — not `mods/shadow_mod` inside this repo) and its
+`effect_remover` mod. Its "Terrain Shadow Removal" sub-feature post-hooks
+`dKy_bg_MAxx_proc` and pins `TevKColor(1)`'s red channel to 255
+(full wash-out) on terrain materials coded `MA00`/`MA01`/`MA16`/`MA04` —
+a mechanism this project's own investigation had never looked at.
+`effect_remover`'s own comments independently identify `MA00` as "the
+usual swaying forest-floor / field-floor shade" (driven by the cloud
+packet) and, critically, **`MA04` specifically as "the Faron/forest-floor
+ground shadow overlay, confirmed in-game as the slowly swaying floor
+shade there"** — i.e. tree/canopy floor shading, a DIFFERENT visual from
+the reported Ordon Village bug (which the user confirmed is NOT tree-
+shaped — "cloud shaped shadows on the ground that move with the
+camera").
+
+**Cross-checked against this repo's own code before touching anything**:
+`d_kankyo.cpp`'s `dKy_bg_MAxx_proc` has the identical `MA00`/`MA01`/
+`MA04`/`MA16` → `setTevKColor(1, ...)` block (line ~11565), confirming the
+mechanism is real here too. Also noticed `dKy_cloudshadow_scroll()` (a
+few hundred lines earlier in the same file, already VR-disabled per this
+section's own earlier rounds) matches only `MA00`/`MA01`/`MA16` in its own
+per-material loop — **it never matches `MA04` either** — independent,
+pre-existing precedent in this exact file that `MA04` is NOT part of the
+same "generic ground cloud shadow" family as the other three codes.
+
+**Fix applied** (`d_kankyo.cpp`'s `dKy_bg_MAxx_proc`): while
+`dusk::vr::isRenderingToHeadset()`, force `sp5C.r = 255` (matching
+`effect_remover`'s wash-out technique) right before the existing
+`setTevKColor(1, ...)` call — but **only** for `MA00`/`MA01`/`MA16`,
+explicitly excluding `MA04` via a `memcmp` check, deliberately mirroring
+`dKy_cloudshadow_scroll()`'s own pre-existing 3-code scope one function up
+rather than inventing a new one. Flatscreen completely unchanged (the
+whole thing is inside `#ifdef TARGET_PC` + the `isRenderingToHeadset()`
+check). Built clean, `d_kankyo.cpp` only.
+
+**CONFIRMED FIXED IN-HEADSET, first try**: user tested Ordon Village
+(cloud shadows gone) AND Faron Woods (tree/canopy floor shading still
+present, `MA04` untouched as intended) — exactly the outcome designed
+for. **This closes the "darkened spots on the ground" investigation** —
+five wrong guesses across two sessions (`drawCloudShadow()` billboard,
+`dKy_cloudshadow_scroll()` scroll, `dDlst_shadowReal_c` object shadows
+[kept, real bug, just not this], Moya haze, the reverted camera-sync
+experiment) before this. The RenderDoc-capture-truncation investigation
+from the PAUSED box above is now MOOT — no need to resume it for this
+bug. **Cleanup performed same session**: removed all `[dusk::cloudshadow]`
+diagnostic logging (`drawCloudShadow()`'s entry log, `dKy_cloudshadow_
+scroll()`'s entry log and its per-material `mProjection`/`mInfo` dump) and
+the now-unused `#include <windows.h>` it required in `d_kankyo_rain.cpp`
+— per this project's normal practice, now that the bug is confirmed
+fixed. Both functions' real VR-disable early-returns are untouched and
+still in place (harmless, real disables of real camera-relative effects,
+just not the actual cause of this specific symptom). Rebuilt clean
+(`d_kankyo.cpp` + `d_kankyo_rain.cpp`), confirmed no leftover references.
+
+**Reusable lesson**: the actual fix came from a second, independently-
+maintained mods repo the user happened to check, not from continuing to
+bisect inside this repo's own code — worth remembering that an external
+mod targeting the same base game can reveal a mechanism (here, a TEV
+KColor wash-out on a specific material-code family) that a pure
+internal-code investigation had never gone looking for, even after two
+full sessions and a RenderDoc capture in progress.
+
+### Hide neck/arms while wearing Ordon Clothes — CONFIRMED WORKING IN-HEADSET 2026-08-10
+
+**Goal** (explicit user request: "hide link's neck and arms when hes in his
+ordon clothes"). Section 18's `hideArmsAndEars()`/`showArmsAndEars()`
+already hide Link's arm/ear materials during first-person VR gameplay —
+but only correctly for Hero's Clothes. Ordon Clothes (internally "casual
+wear", `daAlink_c::checkCasualWearFlg()`, `dItemNo_WEAR_CASUAL_e` — the
+outfit Link wears for the game's opening prologue, before Wolf Link) use a
+**genuinely different, smaller material table**, not just a texture swap
+on the same one.
+
+**Confirmed directly in the base game's own code, not assumed**:
+`d_a_alink.cpp`'s Master Sword glow-tint logic has a separate
+`else if (checkCasualWearFlg())` branch reading different material
+indices, guarded by `getMaterialNum() >= 8` — vs. the default (Hero's
+Clothes) branch's `>= 18`. `kArmEarMaterialIndices` (section 18) was
+dumped specifically while wearing Hero's Clothes (see its own inline
+comment, a 2026-07-31 `OutputDebugStringA` capture) and is therefore
+meaningless for Ordon Clothes: indices 8/10 are simply out of range
+(silently skipped by the existing bounds check) and indices 0/1/2/7 hit
+whatever unrelated materials happen to occupy those slots in the
+casual-wear table instead. This fully explains the reported symptom —
+arms/neck staying visible in first-person specifically while wearing
+Ordon Clothes.
+
+**What was added** (`vr_link_visibility.hpp`): both `hideArmsAndEars()`
+and `showArmsAndEars()` now check `link->checkCasualWearFlg()` first and
+early-return (no-op, symmetric between the two — neither touches
+anything) rather than applying the wrong (Hero's-Clothes-derived)
+indices. `logCasualWearMaterialsOnce()` — same "one-time material-name
+dump" technique this file already used once for Hero's Clothes, not a
+new invention — fires the first time `checkCasualWearFlg()` is observed
+true, dumping `mpLinkModel`'s real material count and every material name
+via `[dusk::vr::ordonmats]` `OutputDebugStringA` lines. Deliberately did
+NOT guess plausible-looking indices from the Hero's-Clothes naming
+convention (`al_armL_m` etc.) — this project's own standing lesson
+(section 12 and others) is that guessing indices/mappings without real
+data wastes rounds; a real dump settles it in one pass.
+
+**Built successfully** (RelWithDebInfo) — only `vr_main.cpp` needed
+recompiling (transitively includes the header), clean link, no new
+warnings.
+
+**UPDATE (same day) — real capture came back, real fix applied.** User
+pasted a full log capture (`C:\Users\joeyw\Downloads\log.txt`), also
+noting "his ears became visible again" — expected and correct: that's
+exactly what the interim no-op fallback was designed to do (leave casual
+wear completely untouched until real data came in), not a regression.
+`[dusk::vr::ordonmats]` showed the real table — 8 materials, `bl_` prefix
+(vs. Hero's Clothes' `al_`), notably with **no separate arm material at
+all**, unlike Hero's Clothes' three dedicated ones:
+```
+0 bl_beltS_m   1 bl_ear_m     2 bl_earring_m  3 bl_handLA_m
+4 bl_handRA_m  5 bl_lowbody_m 6 bl_skin_m     7 bl_upbody_m
+```
+`bl_skin_m` (6) is the only candidate for exposed arm/neck skin: face is
+its own separate model (already hidden independently), hands are their
+own pair (3/4, deliberately excluded — same reasoning as Hero's Clothes,
+kept visible for the tracked VR hand model), and everything else is
+obviously clothing (belt/lowbody/upbody). `kArmEarMaterialIndicesCasual =
+{1, 2, 6}` — `bl_ear_m`, `bl_earring_m` (worn on the ear, same "don't
+leave it floating" inclusion reasoning as Hero's Clothes' `al_earring_m`),
+and `bl_skin_m`. Wired into both `hideArmsAndEars()`/`showArmsAndEars()`,
+branching on `checkCasualWearFlg()` the same shape as the existing
+Hero's-Clothes branch. `logCasualWearMaterialsOnce()` left in place
+(harmless, fires once) until the mapping is confirmed correct in-headset.
+
+**Built successfully** (RelWithDebInfo) — only `vr_main.cpp` needed
+recompiling, clean link, no new warnings.
+
+**CONFIRMED WORKING IN-HEADSET** — user tested and reported "Yup looks
+good." Arms, neck (via `bl_skin_m`), and ear/earring all correctly hidden
+in first-person while wearing Ordon Clothes, with no reported side
+effects elsewhere on the body (i.e. `bl_skin_m` was NOT shared with any
+unintended region). Closes out this feature — Link's first-person arm/
+ear/neck hiding now works correctly across both outfits (Hero's Clothes,
+section 18; Ordon Clothes, here).
+
+**UPDATE (same day) — `logCasualWearMaterialsOnce()` removed.** User gave
+standing permission to remove confirmed-fixed VR diagnostics without
+asking first going forward (this "leave it in until asked" pattern was a
+one-time exception for the earlier cloud-shadow investigation, not a
+general policy — see [[feedback_remove_diagnostics_freely]]). Removed the
+function and its call site from `hideArmsAndEars()`; `kArmEarMaterialIndicesCasual`
+and the hide/show logic that uses it are untouched. Built clean.
+
+### Show all of Link's limbs in the pause/status menu — CONFIRMED FIXED IN-HEADSET 2026-08-10
+
+**Goal** (explicit user request: "make it so you see all of link's limbs
+in the pause menu"). Root cause, found by reading code rather than
+guessing: `d_a_alink_swindow.inc` ("Pause Menu Player Display",
+`daAlink_c::statusWindowDraw()`) draws `mpLinkModel`/`mpLinkHandModel`/
+`mpLinkHatModel`/`mpLinkFaceModel` — the SAME shared model instances
+`hideArmsAndEars()`/`hideModel()` hide shapes on for first-person VR
+gameplay. Shape-hide (`J3DShapeTable::hide()`/`J3DShape::hide()`) is a
+property of the shared `J3DModelData`/`J3DModel` RESOURCE itself, not
+scoped to any one camera or view — so hiding for first-person gameplay
+bleeds directly into this separate third-person character-preview draw
+too. `isFirstPerson()` has no idea the pause/status menu is even open:
+`checkEventRun()`/`checkWolf()` are both unrelated to pause state (you
+can pause during completely ordinary exploration).
+
+**Fix** (`vr_link_visibility.hpp`'s `updateFrame()`): the local
+`firstPerson` bool that gates hiding is now `isFirstPerson(link) &&
+!dComIfGp_isPauseFlag()` — `dComIfGp_isPauseFlag()` (`d_com_inf_game.h`)
+is the real, already-used pause-menu-open flag, confirmed by reading
+where it's actually set/cleared (`d_menu_window.cpp`'s `dMw_c`), not
+guessed from its name. **Deliberately scoped to just this local, not
+`isFirstPerson()` itself** — `getVrCameraEyeAnchor()`/
+`getVrBodyPositionOffset()` also call `isFirstPerson()` for camera-anchor
+purposes, and changing that shared function would risk an untested side
+effect on camera behavior while paused for zero benefit: the pause
+menu's own backdrop is a frozen screen capture (`dDlst_MENU_CAPTURE_c`,
+same file), not a live re-render, so the live VR camera isn't what's
+actually on screen while paused anyway.
+
+**Built successfully** (RelWithDebInfo) — only `vr_main.cpp` needed
+recompiling (transitively includes the header), clean link, no new
+warnings.
+
+**CONFIRMED FIXED IN-HEADSET** — user tested and reported "Fixed." Link's
+face/hat/arms/ears/neck all show correctly in the pause/status menu's
+character preview now, and the existing per-frame re-application logic
+(same mechanism already covering the cutscene/Wolf-form third-person
+cases) correctly re-hides everything again once the menu closes, with no
+separate handling needed for that direction. Closes out this feature.
+
+### Persistent VR status logging via real DuskLog (not just OutputDebugStringA) — built 2026-08-10, NOT yet confirmed in-headset
+
+**Goal** (user question "would it hurt performance to log VR related
+issues", followed by "sure" to the offer of adding a low-overhead status
+logger). This project's whole `OutputDebugStringA`-based VR debug
+workflow (top of this skill file) only ever produces output visible with
+a debugger attached — meaningless for a real end user's bug report, since
+they won't have Visual Studio attached to their own game. Meanwhile
+`startup()` already had an explicit, long-standing TODO on its exception
+handler: "Not routed to real DuskLog -- that call site still isn't
+confirmed."
+
+**Why not just log everything, always**: checked `dusk/logging.cpp`'s
+actual write path before deciding — `WriteLogLine()` does
+`fprintf`+`fwrite`+`fflush()` on EVERY call (a real synchronous disk
+flush, not buffered), under a mutex, to BOTH a console stream and the
+file. Genuinely expensive per call, and unpredictable (disk I/O can stall
+for real time) — calling this every VR frame would be a measurable,
+possibly stutter-inducing cost against an ~11-14ms frame budget. Same
+underlying reasoning this project's own `OutputDebugStringA` diagnostics
+already follow ("fire once or a capped handful of times, never every
+frame") — just with a stricter version of it, since `DuskLog` is
+provably more expensive per call than `OutputDebugStringA` (which is
+near-free with no debugger attached).
+
+**What was added** (`vr_main.cpp`): a new `static aurora::Module
+VrLog("dusk::vr");`, following this codebase's existing per-subsystem
+`aurora::Module` convention (`DuskConfigLog("dusk::config")`,
+`Log("dusk::mods::manifest")`, etc.) — writes to the same real,
+persistent AppData log file every user gets automatically, no dev
+tooling required. Scoped ONLY to genuinely rare, event-driven call
+sites, never the per-eye render path:
+- `startup()`'s outcome — success (with runtime name + swapchain
+  dims/format) and all four existing failure points (0 views, swapchain
+  creation failure, session-never-READY, and the exception catch-all —
+  this closes the old TODO). A one-time `xrGetSystemProperties()` call
+  right after `vr_xr::initialize()` succeeds captures the runtime name
+  (`sysProps.systemName`, e.g. distinguishing SteamVR/Virtual
+  Desktop/Meta Link) so every log line in the function can say which
+  runtime it's talking about — genuinely high-value given how much of
+  this project's history (section 6, stereo eye alignment, aim-pose
+  calibration) turned out to be runtime-specific. `sysProps` is
+  deliberately declared OUTSIDE the `try` block (not inside, where the
+  existing `boot`/`gfx` locals live) so the `catch` block can still
+  reference it — with an empty `systemName` (from the aggregate init's
+  zero-fill) if the exception fired before the query ever ran, e.g.
+  `vr_xr::initialize()` itself throwing — which is itself informative
+  (means it failed before even reaching the runtime).
+- Session-state-changed transitions, both during startup
+  (`waitForSessionReadyAndBegin()`) and mid-session (`tick()`'s ongoing
+  event pump) — STOPPING/READY-resume/EXITING/LOSS_PENDING. The
+  mid-session pump previously had ZERO logging on any channel at all
+  (not even `OutputDebugStringA`) despite handling real scenarios like
+  system-dashboard focus stealing or headset removal — exactly the kind
+  of thing a "VR randomly stopped working mid-play" user report would
+  otherwise leave no trace of.
+
+**Built successfully** (RelWithDebInfo) — only `vr_main.cpp` needed
+recompiling, clean link, no new warnings.
+
+**NOT yet tested in-headset** — next step: launch in VR (success case)
+and check the AppData log for a `[INFO | dusk::vr] startup succeeded:
+runtime=... swapchain=...` line; separately worth deliberately
+reproducing a startup failure or a mid-session STOPPING event (e.g.
+opening the SteamVR dashboard) to confirm those paths log correctly too.
+No perf concern expected given the scoping above, but not separately
+measured this session.
+
+### Desktop mirror (show a VR eye's view on the desktop window) — CONFIRMED WORKING IN-HEADSET 2026-08-10
+
+**Goal** (explicit user request: "show the game view in the window without
+hurting performance too bad"). Today the desktop window shows essentially
+nothing/stale content while VR renders — `m_Do_main.cpp` deliberately skips
+the normal flatscreen draw whenever `isRenderingToHeadset()` is true (its
+own comment: "the game skips its own desktop redraw"). A prior session had
+already tried the obvious fix and reverted it — see the same file's
+"REMOVED this session: a temporary desktop-mirror hack" comment: drawing
+the whole scene a SECOND time (reusing the last VR eye's camera) for the
+desktop corrupted state several systems assume runs exactly once per frame
+(solid-white dialogue-vignette corruption, broken water reflections). That
+history ruled out "just draw twice" as an option before this session even
+started.
+
+**The actual mechanism used instead — reuse, don't duplicate**: `aurora`
+(the `extern/aurora` submodule) already runs a "present-resample" pass
+EVERY frame regardless of VR state — `end_frame()` always samples
+`webgpu::present_source()` (normally aurora's own internal flatscreen
+framebuffer) and scales/letterboxes it into the real OS window. Since VR's
+per-eye rendering already produces a fully-resolved, GPU-resident color
+texture every eye (`aurora::gfx::ResolvedTargets::color`/`.colorTexture`,
+returned by `vr_render::endEye()` — already used for the real XR
+swapchain submission, see section 20's `[dusk::vr::eyepasscheck]`
+investigation for how solid that pipeline is), pointing the EXISTING
+resample pass at eye 0's texture instead of the (empty, since flatscreen
+draw is skipped) internal framebuffer gets a mirror with **zero extra
+render passes, zero CPU readback** — the resample pass runs unconditionally
+either way; only WHICH texture it samples changes.
+
+**What was added**:
+- `extern/aurora/lib/webgpu/gpu.hpp`/`.cpp`: `g_presentSourceOverride`
+  (a `TextureWithSampler`, empty by default) + `set_present_source_override()`/
+  `clear_present_source_override()`. `present_source()` now checks the
+  override first before falling back to the normal internal framebuffer.
+  Plain field writes (ref-counted wgpu handle copies), no direct GPU/queue
+  calls — safe to call from the same thread as
+  `aurora_begin_frame()`/`aurora_end_frame()`, unlike e.g.
+  `resample_present_source()`'s `g_queue.WriteBuffer`, which has its own
+  `ASSERT(gfx::render_worker::is_worker_thread(), ...)` for exactly that
+  reason — this new code deliberately avoids needing that.
+- `extern/aurora/include/aurora/gfx.hpp`/`lib/gfx/common.cpp` (the PUBLIC-
+  facing layer VR code already includes, unlike the internal `webgpu::`
+  headers): `aurora::gfx::set_present_source_mirror(const ResolvedTargets&)`/
+  `clear_present_source_mirror()` — wraps the webgpu-layer functions,
+  building a `TextureWithSampler` from the `ResolvedTargets` fields plus a
+  lazily-created, cached linear/clamp sampler (same descriptor shape
+  `create_render_texture()` already uses for its own render targets — one
+  sampler instance, reused every call, no per-frame allocation). No-ops
+  safely if `source.color`/`.colorTexture` are null (a skipped/foreign-
+  substituted eye this frame).
+- `vr_main.cpp`'s `tick()`: `clear_present_source_mirror()` added to the
+  existing "reset up front" block at the very top (alongside
+  `g_duskVREyePassOpen = false` etc.) — matches this file's established
+  convention (see the `TickReentrancyGuard` writeup in section 20 for why
+  that block exists) so any of `tick()`'s many early-return paths (no
+  session, XR failures, no ready gameplay view) leave the desktop on its
+  normal flatscreen fallback rather than stuck showing a stale VR eye. Eye
+  0's `targets` are captured into a `mirrorEyeTargets` local right after
+  `endEye()` inside the per-eye loop (only when `targets.colorTexture` is
+  non-null, i.e. this eye actually resolved this frame — same
+  foreign-pass-substitution caveat already documented at that call site
+  for the real XR eye-copy path); `set_present_source_mirror()` is called
+  once, after the loop, gated on a new settings toggle.
+- `dusk/settings.h`/`.cpp`: new `ConfigVar<bool> vrDesktopMirror`
+  (`"game.vrDesktopMirror"`, default `true`) under Graphics, registered the
+  same way as every other settings bool in this file (`disableWaterRefraction`,
+  `shadowResolutionMultiplier`, etc.).
+
+**UPDATE 2026-08-10 (same day) — in-game Video-settings toggle added,
+built.** User asked how hard adding a toggle in the video settings would
+be — turned out trivial, since `dusk/ui/settings.cpp`'s "Video" tab
+already has the exact `config_bool_select(leftPane, rightPane, <ConfigVar<bool>>,
+{.key, .helpText})` pattern used for every other simple graphics toggle
+(`enableMapBackground`, `disableCutscenePillarboxing`, right next to
+where this was added). One more call in that same shape, right after
+`disableCutscenePillarboxing`'s — no new plumbing needed, since
+`vrDesktopMirror` was already a registered `ConfigVar<bool>` from the
+initial implementation above. **Not the same setting as `enableMirrorMode`**
+(labeled "Mirror Mode" in the General tab) — that's an unrelated, pre-
+existing gameplay feature (a Mirror-World-style horizontal flip), already
+noted above as a naming trap to avoid confusing with this. Built clean,
+only `settings.cpp` recompiled.
+
+**Why "eye 0 (left), fixed choice" rather than something fancier**: no
+stereo depth is needed for a 2D desktop preview, and eye 0 is already the
+convention used elsewhere in this codebase for single-eye readback (e.g.
+the existing `vr_debug_eye0.bmp`/`vr_debug_eye1.bmp` dump tooling in
+`vr_xr_submit.hpp`, which dumps both but treats eye0 as primary). No
+per-frame flip-flopping between eyes was implemented — simpler, and
+avoids a visible left/right jump if aspect/FOV differ slightly per eye.
+
+**Built successfully** (RelWithDebInfo, full rebuild since this touched
+`extern/aurora`'s public headers — 1250/1250 objects, no errors, no new
+warnings). `extern/aurora` is a submodule with its own dirty working tree
+from this change, same as the project's other in-place aurora edits
+documented elsewhere in this file (e.g. section 3's `resolve_pass_into()`
+fix) — not committed inside the submodule, matching existing practice.
+
+**CONFIRMED WORKING IN-HEADSET** — user tested and reported "It works,"
+covering both the mirror itself (desktop window shows the left eye's
+view instead of stale/blank) and the Video-settings toggle added the same
+day (below) — turning it off/on correctly stops/resumes the mirror. No
+aspect-ratio stretching or performance complaint reported. Closes out this
+feature — the near-zero-cost mechanism (reusing aurora's existing
+present-resample pass rather than adding any new render work) held up in
+practice, not just in theory.
+
+### Known issue, NOT YET INVESTIGATED — pervasive "offscreen pass" warnings throughout real VR sessions, found via the new persistent VR logging
+
+**Found incidentally** (2026-08-10) while checking the first real AppData
+log produced by the new `VrLog` status logging above — not something
+anyone was actively looking for. In
+`dusklight-20260810-154547.log`, this pair of warnings:
+```
+[WARNING | aurora::gx] aurora::gx::copy_tex: draining a queued GXCopyTex WHILE an offscreen pass is open
+[WARNING | aurora::gfx] resolve_pass_into: substituting the current pass while an offscreen pass is open (pass id=...) -- this seals/replaces whatever pass is current without checking g_inOffscreen. If something else opened that offscreen pass and expects it to still be current later, it will be silently orphaned unless it verifies via current_pass_id()/resolve_pass_checked().
+```
+fires **9,336 times** across the session — starting at line 657 (shortly
+after the VR session reaches `FOCUSED`, well before any shutdown/menu
+activity) and continuing essentially continuously through to the very end
+of the ~31,000-line log, right up to the final mod-shutdown sequence. Not
+a one-off burst tied to quitting or opening a menu — this looks like an
+ongoing, steady-state condition throughout normal VR gameplay.
+
+**Why this is worth a look eventually, not urgent right now**: this is
+directly the "foreign/nested offscreen pass substitution" bug class this
+whole project has hit multiple times before as a REAL root cause —
+`resolve_pass_checked()`/`current_pass_id()`/the "protected offscreen
+pass" mechanism (section 3's water-black bug, section 8's minimap
+black-screen bug) exist specifically because this exact substitution
+silently corrupts whatever pass it steps on. The user has NOT reported
+any specific visible symptom tied to this — no crash, no visual
+corruption currently known — so this may be an already-handled/harmless
+case (e.g. something already covered by the protected-pass guard, just
+still emitting a warning on the way), or it may be an early symptom of
+something not yet noticed. **Explicitly deferred by the user** ("just
+write that down... we can go back to it if theres a problem") — not
+investigated further this session.
+
+**If picked up later**: grep the AppData log for `pass id=` numbers
+around a few of these warnings and cross-reference against
+`current_pass_id()`/`resolve_pass_checked()` call sites to see whether
+VR's own protected eye pass is ever among the ones getting silently
+substituted (vs. some other, already-tolerated offscreen pass elsewhere
+in the frame) — that would distinguish "background noise, ignore" from
+"this might explain some other pending report." The `pass id`s logged in
+this specific capture ranged from the low 40000s up into the mid 45000s
+by the end of the session, for reference.
 
 ## Key lesson learned this session
 

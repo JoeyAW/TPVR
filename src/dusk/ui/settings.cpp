@@ -879,6 +879,13 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                             "during some cutscenes, particularly on ultra-wide displays. "
                             "Visuals beyond the original intended framing may appear buggy."
             });
+        config_bool_select(leftPane, rightPane, getSettings().game.vrDesktopMirror,
+            {
+                .key = "VR Desktop Mirror",
+                .helpText = "While playing in VR, show one eye's view in the game window "
+                            "instead of leaving it blank. Reuses the game's existing present "
+                            "pass, so this has no meaningful performance cost."
+            });
     });
 
     add_tab("Input", [this](Rml::Element* content) {

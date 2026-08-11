@@ -1464,6 +1464,32 @@ void dPa_control_c::setWaterRipple(u32* param_0, cBgS_PolyInfo& param_1, cXyz co
 
     static u16 const particleID[2] = {ID_ZI_J_HAMON_IND, ID_ZI_J_HAMON_A};
     for (int i = 0; i < 2; i++, param_0++) {
+#ifdef TARGET_PC
+        // User-reported 2026-08-09: the screen-space-reflection-style
+        // shimmer on the swim ripple trail Link leaves behind in water
+        // looks wrong in VR. ID_ZI_J_HAMON_IND (particleID[0]) is the
+        // "_IND" half of this ripple pair -- across this whole particle
+        // table, "_IND" ids consistently pair with a plain "_A" id for the
+        // SAME ripple/"hamon" effect (e.g. ID_ZI_S_FM_HAMON_A/_IND,
+        // ID_ZI_S_BQ_APPHAMON_A/_IND, d_particle_name.h) -- the "_IND"
+        // half is what actually distorts/reflects the scene via GX
+        // indirect-texture mapping (a real screen-space sample, not this
+        // codebase's separate "dummy"-texture-swap mechanism from
+        // vr-mod-notes section 5, but the same underlying class of
+        // problem: a screen-relative effect that reads wrong per-eye/
+        // per-frame data in VR). Skip spawning just the IND half in VR --
+        // same "disable the camera/screen-relative half, keep the rest"
+        // tradeoff already used for cloud shadows and night-sky stars
+        // (d_kankyo_rain.cpp) -- leaving the ordinary ripple-ring shape
+        // ("_A") intact. Left as a plain no-op (never write a nonzero id
+        // into *param_0) rather than calling the spawn function and
+        // discarding the result -- matches every other "no emitter here"
+        // state this codebase already represents with 0.
+        if (particleID[i] == ID_ZI_J_HAMON_IND && g_duskVRRenderingToHeadset) {
+            *param_0 = 0;
+            continue;
+        }
+#endif
         *param_0 = dComIfGp_particle_setPolyColor(
             *param_0, particleID[i], param_1, param_2, param_4,
             &local_50, param_5, 0, 0, param_6, 0);

@@ -53,6 +53,7 @@
 #include "d/d_com_inf_game.h"      // dComIfGd_getView()
 #include "f_op/f_op_view.h"        // view_class, lookat_class, Mtx44, Mtx
 #include "m_Do/m_Do_lib.h"         // mDoLib_clipper::setup()
+#include "m_Do/m_Do_mtx.h"         // mDoMtx_multVec() -- drawAimCrosshair()
 #include <dolphin/mtx.h>           // C_MTXPerspective, mDoMtx_lookAt (or equivalent)
 #include <dolphin/gx.h>            // GXBegin/GXEnd/etc. -- drawHudBillboard()
 #include <JSystem/J3DGraphBase/J3DSys.h> // j3dSys.setViewMtx()
@@ -864,6 +865,104 @@ inline void drawHudBillboard(TGXTexObj* hudTex) {
     GXPosition3f32(c.x[1], c.y[1], c.z[1]); GXTexCoord2f32(1.0f, 0.0f);
     GXPosition3f32(c.x[2], c.y[2], c.z[2]); GXTexCoord2f32(1.0f, 1.0f);
     GXPosition3f32(c.x[3], c.y[3], c.z[3]); GXTexCoord2f32(0.0f, 1.0f);
+    GXEnd();
+}
+
+// ---------------------------------------------------------------------------
+// World-space aim-point marker ("physical crosshair")
+// ---------------------------------------------------------------------------
+//
+// Goal (explicit user request, 2026-08-12): "add a physical crosshair in
+// the game world to show where you are aiming all items." Draws a small,
+// soft-edged glowing dot at a real WORLD-SPACE point -- deliberately NOT
+// head-locked/eye-space-fixed like drawHudBillboard() above, since this is
+// meant to look like a real object sitting at the aim point in the game
+// world (correct per-eye stereo parallax, normal depth-testing/occlusion
+// against scene geometry), not a screen overlay.
+//
+// "All items" scope: reuses daAlink_c::mSight -- the SAME shared sight/
+// aim-point object already driven by setBowSight() (bow/slingshot),
+// setHookshotSight(), AND daBoomerang_c's own throw-aim code (confirmed via
+// each one's own mSight.setPos()/onDrawFlg() calls) -- one flag+position
+// pair already covers all four items with zero per-item special-casing
+// needed here. Deliberately does NOT cover bombs (arc-thrown, not a
+// straight sight line -- mSight isn't driven for them at all) or the
+// fishing rod's cast (same reason) -- out of scope for this round, per
+// explicit user choice when this was scoped.
+//
+// Call once per eye, from vr_main.cpp's tick() right after
+// cAPIGph_Painter() (so the world's own geometry has already been drawn
+// this eye and Z-testing against it is meaningful) and before endEye().
+// Caller supplies the world-space aim point
+// (daAlink_c::getLineTopPosP()/getAimSightVisible()) -- this file stays
+// free of the heavy d_a_alink.h include, matching drawHudBillboard()'s own
+// "caller supplies pre-computed data" pattern above.
+inline void drawAimCrosshair(const cXyz& worldPos) {
+    view_class* view = dComIfGd_getView();
+    assert(view != nullptr && "VR: drawAimCrosshair() called outside gameplay?");
+
+    // Transform the world-space aim point into THIS eye's view/eye space --
+    // vertices below are authored as eye-space offsets from it, so an
+    // identity position matrix (same idiom as drawHudBillboard()) is all
+    // that's needed to place them correctly; real per-eye stereo parallax
+    // comes for free from view->viewMtx already differing per eye.
+    cXyz eyeSpacePos;
+    mDoMtx_multVec(view->viewMtx, &worldPos, &eyeSpacePos);
+
+    // Behind the eye -- nothing sensible to draw. Shouldn't normally happen
+    // for a real aim point, but a max-range miss right at the edge of view
+    // could plausibly land here; skip rather than draw garbage.
+    if (eyeSpacePos.z >= 0.0f) return;
+
+    // GXSetProjection is a stateful register write clobbered earlier this
+    // frame (2D UI, etc.) -- reassert this eye's real asymmetric projection
+    // immediately before drawing, same idiom drawHudBillboard() uses.
+    GXSetProjection(view->projMtx, GX_PERSPECTIVE);
+    GXLoadPosMtxImm(cMtx_getIdentity(), GX_PNMTX0);
+    GXSetCurrentMtx(0);
+
+    GXClearVtxDesc();
+    GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
+    GXSetVtxDesc(GX_VA_CLR0, GX_DIRECT);
+    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
+    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
+
+    // No lighting, no texture -- per-vertex color, passed straight through.
+    GXSetNumChans(1);
+    GXSetChanCtrl(GX_COLOR0, GX_DISABLE, GX_SRC_REG, GX_SRC_VTX, GX_LIGHT_NULL, GX_DF_CLAMP, GX_AF_NONE);
+    GXSetNumTexGens(0);
+    GXSetNumTevStages(1);
+    GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD_NULL, GX_TEXMAP_NULL, GX_COLOR0A0);
+    GXSetTevOp(GX_TEVSTAGE0, GX_PASSCLR);
+
+    // Alpha blend (not additive) -- a bright warm color with a per-vertex
+    // alpha falloff (near-opaque center, fully transparent edge) reads as a
+    // soft glow without washing out against bright daytime scenes the way
+    // additive blending would.
+    GXSetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_SET);
+    // Depth-TEST enabled (occluded by real geometry -- this is what makes
+    // it read as a physical object rather than a HUD overlay) but
+    // depth-WRITE disabled -- standard for translucent geometry, avoids
+    // punching a hole in the depth buffer that other translucent draws
+    // (particles, etc.) would incorrectly sort against.
+    GXSetZMode(GX_ENABLE, GX_LEQUAL, GX_FALSE);
+    GXSetCullMode(GX_CULL_NONE);
+    GXSetAlphaCompare(GX_ALWAYS, 0, GX_AOP_OR, GX_ALWAYS, 0);
+
+    constexpr int kSegments = 16;
+    constexpr float kRadiusUnits = 8.0f;  // ~8cm at this project's ~100 units/metre scale
+    constexpr GXColor kGlowColor = {235, 30, 30, 220};  // red, near-opaque center
+
+    GXBegin(GX_TRIANGLEFAN, GX_VTXFMT0, kSegments + 2);
+    GXPosition3f32(eyeSpacePos.x, eyeSpacePos.y, eyeSpacePos.z);
+    GXColor4u8(kGlowColor.r, kGlowColor.g, kGlowColor.b, kGlowColor.a);
+    for (int i = 0; i <= kSegments; ++i) {
+        const float t = (2.0f * static_cast<float>(M_PI) * static_cast<float>(i)) / static_cast<float>(kSegments);
+        const float dx = kRadiusUnits * std::cos(t);
+        const float dy = kRadiusUnits * std::sin(t);
+        GXPosition3f32(eyeSpacePos.x + dx, eyeSpacePos.y + dy, eyeSpacePos.z);
+        GXColor4u8(kGlowColor.r, kGlowColor.g, kGlowColor.b, 0);  // transparent edge
+    }
     GXEnd();
 }
 

@@ -14,7 +14,10 @@
 
 #include "dusk/vr/vr_smooth_turn.hpp"  // dusk::vr::rotateYawXr/rotateYawQuat
 #include "d/actor/d_a_alink.h"
+#include "d/actor/d_a_boomerang.h"
+#include "d/actor/d_a_mg_rod.h"
 #include "d/d_com_inf_game.h"
+#include "m_Do/m_Do_ext.h"  // mDoExt_McaMorf::getModel(), for the fishing rod's live-refresh
 #include "dusk/frame_interpolation.h"
 #include "f_op/f_op_view.h"
 #include "JSystem/J3DGraphAnimator/J3DModel.h"
@@ -733,6 +736,16 @@ inline Mtx s_shieldRestingPrevMtx;
 inline Mtx s_shieldRestingCurrMtx;
 inline uint64_t s_shieldRestingTick = ~0ull;
 inline bool s_shieldRestingValid = false;
+
+// Held-item (mHeldItemModel/mpKanteraModel) tracking state -- see
+// RawBasisCache's own comment for why this is needed (several branches
+// layer an extra local offset on top of the item joint, unlike sword/
+// shield's direct attach). Kantera also gets sword/shield's exact
+// resting-pose-smoothing treatment for its belt/back pose.
+inline Mtx s_kanteraRestingPrevMtx;
+inline Mtx s_kanteraRestingCurrMtx;
+inline uint64_t s_kanteraRestingTick = ~0ull;
+inline bool s_kanteraRestingValid = false;
 }  // namespace detail
 
 // True when the player should currently be viewing (and the VR camera
@@ -1442,6 +1455,437 @@ inline void refreshTrackedItemMtxLive() {
                                         detail::s_shieldRestingPrevMtx, detail::s_shieldRestingCurrMtx);
         }
         markModelJointsLive(shieldModel);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Held-item (mHeldItemModel / mpKanteraModel) tracked-hand attachment
+// ---------------------------------------------------------------------------
+//
+// Extends the sword/shield fix above to daAlink_c::setItemMatrix()'s
+// broader "currently equipped item" model (bow, bottles, oil bottle, copy
+// rod, boomerang, etc.) and the separate lantern/kantera model. Explicitly
+// OUT OF SCOPE, left completely untouched: the 0x106 branch (attaches to
+// the HEAD/face joint, not a hand at all), hookshot (setHookshotPos()
+// drives a real fire/retract state machine across both item joints), and
+// iron ball (setIronBallPos() reads a hardcoded joint 15 plus a real
+// chain-link simulation and AtSph collision) -- none of these are a simple
+// joint attach.
+//
+// Key difference from sword/shield: those always attach directly to their
+// item joint with ZERO extra offset, so the raw body-model item-joint
+// matrix could be used directly as computeTrackedItemMtx()'s basis.
+// Several held-item branches (bottle, oil-bottle, bow-left-hand, kantera)
+// layer an ADDITIONAL mDoMtx_stack_c translate+rotate on top of the item
+// joint -- duplicating those literal offset constants into VR code would
+// be a second place to keep in sync if setItemMatrix() ever changes them.
+// Instead, RawBasisCache captures the model's own getBaseTRMtx() -- i.e.
+// whatever setItemMatrix() actually computed this tick, offset included,
+// whichever branch it took -- ONCE PER REAL SIM TICK, BEFORE this file's
+// own tracked-pose override overwrites it. This must be cached rather than
+// read live every real frame: a later-same-tick read would see our OWN
+// prior overwrite instead of the real game pose -- the exact
+// self-corruption trap applyTrackedItemMtxIfAttached()'s own comment
+// documents two failed heuristics for (sword/shield's gating) -- avoided
+// here structurally by capturing pre-override instead of comparing
+// post-override.
+struct RawBasisCache {
+    Mtx mtx;
+    uint64_t tick = ~0ull;
+    bool valid = false;
+};
+
+// Safe to call unconditionally every real frame -- only does real work on
+// the first call after a new sim tick (sim_tick_seq() changed). Must be
+// called before any override write to `model` this frame.
+inline void captureRawBasisOnce(J3DModel* model, RawBasisCache& cache) {
+    if (!model) return;
+    const uint64_t tick = dusk::frame_interp::sim_tick_seq();
+    if (cache.valid && cache.tick == tick) return;
+    cache.tick = tick;
+    MTXCopy(model->getBaseTRMtx(), cache.mtx);
+    cache.valid = true;
+}
+
+namespace detail {
+inline RawBasisCache s_heldItemRawBasis;
+inline RawBasisCache s_kanteraRawBasis;
+}  // namespace detail
+
+enum class HeldItemAttach { None, Left, Right };
+
+// Mirrors daAlink_c::setItemMatrix()'s mHeldItemModel branch dispatch
+// (d_a_alink.cpp), in the same order, using the real predicate helpers
+// setItemMatrix() itself calls -- same "mirror the real dispatch
+// condition structurally" precedent as daAlink_c::checkShieldHandAttached()
+// (duplicates setItemMatrix()'s shield OR-chain for identical reasons).
+// One more place that would silently drift out of sync if setItemMatrix()
+// ever changes, but there's no cheaper way to ask "which branch did it
+// take" without a real flag from that function itself.
+inline HeldItemAttach computeHeldItemAttach(daAlink_c* link) {
+    const u16 equip = link->getEquipItem();
+
+    // Out of scope -- see this section's header comment.
+    if (equip == 0x106) return HeldItemAttach::None;
+    if (link->checkHookshotItem(equip)) return HeldItemAttach::None;
+    if (link->checkIronBallEquip()) return HeldItemAttach::None;
+
+    if (link->checkOilBottleItemNotGet(equip)) return HeldItemAttach::Right;
+    if (link->checkBottleItem(equip)) return HeldItemAttach::Left;
+    if (link->checkBowAndSlingItem(equip)) {
+        return link->checkBowGrabLeftHand() ? HeldItemAttach::Left : HeldItemAttach::Right;
+    }
+    // Default/generic branch (copy rod, boomerang, etc.) -- matches
+    // setItemMatrix()'s final `else`: direct mLeftItemJntNo attach, no
+    // extra offset.
+    return HeldItemAttach::Left;
+}
+
+// Mirrors the outer gate setItemMatrix() uses to decide whether
+// mpKanteraModel is drawn/positioned at all this tick.
+inline bool computeKanteraActive(daAlink_c* link) {
+    return link->checkNoResetFlg2(daAlink_c::FLG2_UNK_1) ||
+           link->checkEndResetFlg1(daAlink_c::ERFLG1_UNK_4);
+}
+
+// Mirrors the kantera branch's own hand-attach condition (only meaningful
+// when computeKanteraActive() is true) -- Left when kantera is the
+// equipped item or an oil bottle not yet obtained is, else None (resting
+// at the fixed belt/back joint 0x10, still drawn but not hand-attached).
+inline HeldItemAttach computeKanteraAttach(daAlink_c* link) {
+    const u16 equip = link->getEquipItem();
+    if (equip == dItemNo_KANTERA_e || link->checkOilBottleItemNotGet(equip)) {
+        return HeldItemAttach::Left;
+    }
+    return HeldItemAttach::None;
+}
+
+inline void detail_pickHeldItemHandRefs(daAlink_c* link, J3DModel* bodyModel, bool isLeft,
+                                         MtxP& outHandJointMtx, MtxP& outTrackedHandMtx) {
+    outHandJointMtx = bodyModel->getAnmMtx(isLeft ? link->getLeftHandJntNo() : link->getRightHandJntNo());
+    outTrackedHandMtx = isLeft ? detail::s_leftHandMtx : detail::s_rightHandMtx;
+}
+
+// Called once per real frame from vr_main.cpp's tick(), alongside (and
+// after) refreshTrackedItemMtxLive() -- same "before the per-eye loop
+// opens" ordering, same reasons.
+inline void refreshTrackedHeldItemMtxLive() {
+    auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
+    if (!link) return;
+
+    J3DModel* bodyModel = link->getBodyModel();
+    if (!bodyModel) return;
+
+    J3DModel* heldItemModel = link->getHeldItemModel();
+    if (heldItemModel) {
+        captureRawBasisOnce(heldItemModel, detail::s_heldItemRawBasis);
+
+        const HeldItemAttach attach = computeHeldItemAttach(link);
+        MtxP handJointMtx = nullptr;
+        MtxP trackedHandMtx = nullptr;
+        detail_pickHeldItemHandRefs(link, bodyModel, attach != HeldItemAttach::Right,
+                                     handJointMtx, trackedHandMtx);
+
+        const bool attached = (attach != HeldItemAttach::None) && detail::s_heldItemRawBasis.valid;
+        if (applyTrackedItemMtxIfAttached(heldItemModel, attached, detail::s_heldItemRawBasis.mtx,
+                                           handJointMtx, trackedHandMtx)) {
+            markModelJointsLive(heldItemModel);
+        }
+        // attach == None (head-item / hookshot / iron ball): leave
+        // completely untouched, including frame_interp's normal
+        // once-per-tick smoothing -- correct for everything this fix
+        // doesn't cover.
+    }
+
+    J3DModel* kanteraModel = link->getKanteraModel();
+    if (kanteraModel && computeKanteraActive(link)) {
+        captureRawBasisOnce(kanteraModel, detail::s_kanteraRawBasis);
+
+        const HeldItemAttach attach = computeKanteraAttach(link);
+        MtxP handJointMtx = bodyModel->getAnmMtx(link->getLeftHandJntNo());
+        const bool attached = (attach == HeldItemAttach::Left) && detail::s_kanteraRawBasis.valid;
+
+        const bool updated = applyTrackedItemMtxIfAttached(
+            kanteraModel, attached, detail::s_kanteraRawBasis.mtx, handJointMtx, detail::s_leftHandMtx);
+        if (!updated) {
+            refreshRestingPoseSmoothed(kanteraModel, detail::s_kanteraRestingTick, detail::s_kanteraRestingValid,
+                                        detail::s_kanteraRestingPrevMtx, detail::s_kanteraRestingCurrMtx);
+        }
+        markModelJointsLive(kanteraModel);
+    }
+}
+
+// See dusk::vr::getTrackedHandWorldPos() (vr_main.hpp) for the
+// caller-facing contract (used to VR-track a carried/grabbed actor's
+// position source, e.g. a held bomb -- see setBodyPartPos()'s call site,
+// d_a_alink.cpp). Reads the translation column directly out of
+// detail::s_leftHandMtx/s_rightHandMtx -- the same fully-calibrated,
+// confirmed-correct tracked-hand matrices buildHandMtx() already produces
+// for mpLinkHandModel/sword/shield/held items above.
+inline bool getTrackedHandWorldPos(bool isLeftHand, float& outX, float& outY, float& outZ) {
+    if (!detail::s_handMtxValid) return false;
+    MtxP m = isLeftHand ? detail::s_leftHandMtx : detail::s_rightHandMtx;
+    outX = m[0][3];
+    outY = m[1][3];
+    outZ = m[2][3];
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// getLeftItemMatrix()/getRightItemMatrix() VR-awareness
+// ---------------------------------------------------------------------------
+//
+// daAlink_c::getLeftItemMatrix()/getRightItemMatrix() (mpLinkModel->
+// getAnmMtx(mLeftItemJntNo/mRightItemJntNo), d_a_alink_link.inc) are
+// virtual and read directly by ~10 OTHER actor files for effects anchored
+// to whatever's in Link's hand: nocked arrows (d_a_alink_bow.inc,
+// d_a_arrow.cpp), boomerang throw/trail (d_a_boomerang.cpp), fishing rod
+// (d_a_mg_rod.cpp, d_a_mg_fish.cpp), several enemy-interaction actors
+// (d_a_e_bug.cpp/d_a_e_fm.cpp/d_a_e_gob.cpp/d_a_e_sm2.cpp), an NPC
+// interaction (d_a_npc_tk.cpp), an object interaction (d_a_obj_lp.cpp),
+// and the canoe paddle (d_a_alink_canoe.inc). None of those files were
+// made VR-aware by refreshTrackedHeldItemMtxLive() above (which only
+// overrides mHeldItemModel's/mpKanteraModel's OWN draw matrix, not the
+// raw body-joint matrix these other actors read directly) -- reported by
+// the user as "fishing rod and boomerang do not track."
+//
+// Fix lives at the SOURCE instead of touching every caller: since
+// getLeftItemMatrix()/getRightItemMatrix() are virtual and daAlink_c
+// already overrides them, changing the two function bodies (d_a_alink_link.inc)
+// to return a tracked-hand-relative matrix while rendering to the headset
+// fixes every one of those ~10 consumers for free, through ordinary
+// virtual dispatch -- no changes needed to any of those files. This ALSO
+// means canoe paddling and the enemy-interaction cases above now get
+// tracked-hand-relative positions too, as a natural side effect of fixing
+// the general mechanism, not something individually verified in-headset.
+//
+// Unlike the held-item RawBasisCache above, no once-per-tick caching is
+// needed here: mpLinkModel->getAnmMtx(mLeftItemJntNo/mRightItemJntNo) is
+// the BODY model's own joint matrix, which nothing in this VR code ever
+// writes to (only mSwordModel/mShieldModel/mHeldItemModel/mpKanteraModel's
+// own base transforms are overridden elsewhere in this file) -- safe to
+// read fresh every real frame with no self-corruption risk.
+//
+// Gated on isFirstPerson(link), not just isRenderingToHeadset() (unlike
+// sword/shield/held-item's own overrides above, which have no such gate --
+// safe there only because those items simply aren't drawn/equipped during
+// Wolf form or third-person cutscenes in practice). getLeftItemMatrix()/
+// getRightItemMatrix() are called unconditionally by files with no
+// awareness of Link's current form (e.g. enemy-interaction actors could
+// run in Wolf form too) -- during Wolf form mLeftItemJntNo/mLeftHandJntNo
+// collapse to the SAME joint (19), which would make the computed relative
+// offset an identity and return the tracked hand's raw matrix directly,
+// wrong for Wolf's different rig/third-person camera. Gating on
+// isFirstPerson() (already covers Wolf/mounted-cutscene/hidden-cutscene
+// correctly, see its own definition below) avoids that risk instead of
+// discovering it via a report later.
+namespace detail {
+inline Mtx s_trackedLeftItemJointMtx;
+inline Mtx s_trackedRightItemJointMtx;
+inline bool s_trackedItemJointMtxValid = false;
+}  // namespace detail
+
+// Called once per real frame from vr_main.cpp's tick(), before the
+// per-eye loop opens -- same ordering as every other refresh*Live()
+// function in this file.
+inline void refreshTrackedItemJointMtxLive() {
+    detail::s_trackedItemJointMtxValid = false;
+
+    auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
+    if (!link || !detail::s_handMtxValid || !isFirstPerson(link)) return;
+
+    J3DModel* bodyModel = link->getBodyModel();
+    if (!bodyModel) return;
+
+    MtxP leftItemJointMtx = bodyModel->getAnmMtx(link->getLeftItemJntNo());
+    MtxP leftHandJointMtx = bodyModel->getAnmMtx(link->getLeftHandJntNo());
+    MtxP rightItemJointMtx = bodyModel->getAnmMtx(link->getRightItemJntNo());
+    MtxP rightHandJointMtx = bodyModel->getAnmMtx(link->getRightHandJntNo());
+
+    const bool leftOk = computeTrackedItemMtx(
+        detail::s_trackedLeftItemJointMtx, leftItemJointMtx, leftHandJointMtx, detail::s_leftHandMtx);
+    const bool rightOk = computeTrackedItemMtx(
+        detail::s_trackedRightItemJointMtx, rightItemJointMtx, rightHandJointMtx, detail::s_rightHandMtx);
+    detail::s_trackedItemJointMtxValid = leftOk && rightOk;
+}
+
+// Copies the tracked-hand-relative item-joint matrix into outMtx; returns
+// false (leaving outMtx untouched) if not available this frame -- caller
+// (daAlink_c::getLeftItemMatrix()/getRightItemMatrix(), d_a_alink_link.inc)
+// falls back to the raw joint matrix in that case.
+inline bool getTrackedItemJointMtx(bool isLeft, Mtx outMtx) {
+    if (!detail::s_trackedItemJointMtxValid) return false;
+    MTXCopy(isLeft ? detail::s_trackedLeftItemJointMtx : detail::s_trackedRightItemJointMtx, outMtx);
+    return true;
+}
+
+// VR fix (2026-08-12): boomerang lag, same root cause/fix shape as the
+// hand/sword/shield lag section 20 root-caused -- getLeftItemMatrix() is
+// fresh every real frame (via refreshTrackedItemJointMtxLive() above), but
+// daBoomerang_c::setKeepMatrix() (its own base-transform setter) is only
+// ever called once per sim tick, from procWait() -- so the boomerang's
+// visible position stair-stepped at 30Hz even though the matrix it reads
+// was already fresh. Fixed the same way as every other item in this file:
+// re-run just the transform-setting half
+// (daBoomerang_c::applyTrackedKeepTransforms(), split out of
+// setKeepMatrix() for exactly this purpose) once per real frame here, on
+// top of setKeepMatrix()'s own once-per-tick call (which still separately
+// owns current.pos and the wait-animation restart -- both intentionally
+// excluded from the live-refreshed half, see applyTrackedKeepTransforms()'s
+// own comment in d_a_boomerang.h).
+//
+// Gated to the KEPT (held, not yet thrown) boomerang only --
+// getThrowBoomerangAcKeep()'s id becomes valid at the exact moment the
+// same actor transitions from procWait (held, hand-attached) to procMove
+// (thrown flight, positioned entirely by setMoveMatrix()'s own physics,
+// unrelated to the tracked hand) -- checked directly against the real
+// state transition rather than assumed.
+//
+// ROUND 2 FIX (user-tested round 1, still laggy): setBaseTRMtx() alone
+// was never enough -- missed the other half of the ALREADY-established
+// pattern (applyTrackedItemMtxIfAttached()/markModelJointsLive() above):
+// without an explicit calc() AND mark_live_this_frame() call THIS real
+// frame, frame_interp's own draw-time substitution overrides the fresh
+// transform with a stale once-per-tick-interpolated snapshot regardless
+// of how often setBaseTRMtx() itself gets called -- the exact mechanism
+// section 20 root-caused for hands/sword/shield. Explicit calc() here
+// (not left to daBoomerang_c::draw()'s own mDoExt_modelUpdateDL() call)
+// matches applyTrackedItemMtxIfAttached()'s own shape exactly, rather
+// than assuming draw() runs at a point in the frame that makes it moot.
+inline void refreshTrackedBoomerangMtxLive() {
+    auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
+    if (!link || !isFirstPerson(link)) return;
+
+    if (link->getThrowBoomerangAcKeep()->getID() != fpcM_ERROR_PROCESS_ID_e) return;
+
+    fopAc_ac_c* boomActor = link->getBoomerangActor();
+    if (!boomActor) return;
+
+    daBoomerang_c* boomerang = static_cast<daBoomerang_c*>(boomActor);
+    boomerang->applyTrackedKeepTransforms();
+
+    if (J3DModel* m = boomerang->getBoomModel()) {
+        m->calc();
+        markModelJointsLive(m);
+    }
+    if (J3DModel* m = boomerang->getShippuModel()) {
+        m->calc();
+        markModelJointsLive(m);
+    }
+    if (J3DModel* m = boomerang->getSetboomEfModel()) {
+        m->calc();
+        markModelJointsLive(m);
+    }
+}
+
+// VR fix (2026-08-12): same root cause/fix shape as
+// refreshTrackedBoomerangMtxLive() above, applied to the fishing rod.
+// rod_control() (d_a_mg_rod.cpp) only ever runs once per sim tick, inside
+// the fishing minigame's own execute() -- even though getLeftItemMatrix()/
+// getRightItemMatrix() are now fresh every real frame (via
+// refreshTrackedItemJointMtxLive() above), the rod's own attach-point
+// derivation only ever sampled that fresh value at 30Hz, so the rod
+// visibly stair-stepped the same way the boomerang did. Re-runs it here at
+// real frame rate via dmg_rod_refreshTrackedPositionLive() (d_a_mg_rod.h),
+// which snapshots/restores the one piece of real per-tick state
+// rod_control() writes (a tip-position delta-tracking pair, presumably
+// feeding rod-tip-velocity physics elsewhere) so this extra call can't
+// corrupt whatever downstream logic reads it -- see that function's own
+// comment for the full field-write audit this rests on.
+// ROUND 2 FIX (user-tested round 1, still laggy) -- same missing piece as
+// the boomerang's own round 2 above: dmg_rod_refreshTrackedPositionLive()
+// re-runs rod_control() (which calls setBaseTRMtx() on several models),
+// but without an explicit calc() + mark_live_this_frame() call THIS real
+// frame, frame_interp's draw-time substitution still overrides the fresh
+// transform with a stale once-per-tick snapshot regardless of how often
+// setBaseTRMtx() itself runs. Marks every model rod_control() (or the
+// rod's own draw()) could plausibly set a transform on -- deliberately
+// over-inclusive rather than tracing exactly which ones rod_control()
+// itself touches per kind/action, matching markModelJointsLive()'s own
+// established "small models, negligible extra cost" reasoning.
+inline void refreshTrackedFishingRodMtxLive() {
+    auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
+    if (!link || !isFirstPerson(link)) return;
+
+    fopAc_ac_c* rodActor = fopAcM_SearchByName(fpcNm_MG_ROD_e);
+    if (!rodActor) return;
+
+    dmg_rod_class* rod = reinterpret_cast<dmg_rod_class*>(rodActor);
+    dmg_rod_refreshTrackedPositionLive(rod);
+
+    auto markLive = [](J3DModel* m) {
+        if (!m) return;
+        m->calc();
+        markModelJointsLive(m);
+    };
+
+    for (int i = 0; i < 15; ++i) markLive(rod->rod_uki_model[i]);
+    for (int i = 0; i < 6; ++i) markLive(rod->unk_ring_model[i]);
+    for (int i = 0; i < 5; ++i) markLive(rod->lure_model[i]);
+    for (int i = 0; i < 2; ++i) markLive(rod->hook_model[i]);
+    for (int i = 0; i < 2; ++i) markLive(rod->esa_model[i]);
+    markLive(rod->ring_model);
+    markLive(rod->uki_model);
+    markLive(rod->uki_saki_model);
+    if (rod->rod_modelMorf) markLive(rod->rod_modelMorf->getModel());
+}
+
+// VR fix (2026-08-12): the clawshot's hand-grip tracking -- deliberately
+// scoped to JUST the two grip models (mHeldItemModel/getHookshotSecondaryModel()),
+// same "simple joint attach" category already fixed for every other held
+// item. The CHAIN itself (the procedural rope-of-links visual,
+// hsChainShape_c::draw()) is a genuinely separate, raw-immediate-mode GX
+// system with its own pre-existing flatscreen interpolation
+// (mHsChainInterp*) that doesn't go through J3DModel/frame_interp at all --
+// NOT attempted this round, matching section 16's original scoping
+// decision to exclude hookshot as "not a simple joint attach." The grip
+// models alone are what makes it LOOK like the player is holding the
+// clawshot; the chain's own root end already reads mHeldItemRootPos/
+// field_0x3810 (now tracked, since applyTrackedHookshotGripTransforms()
+// computes them from the tracked grip matrices) at whatever rate
+// setHookshotPos() itself runs -- so the chain's near end should visually
+// follow the grip even without touching its rendering directly, just not
+// at real frame rate yet (same "one level downstream" gap the boomerang/
+// rod fixes each ran into with their OWN models).
+//
+// Gated on daPy_py_c::checkHookshotItem(getEquipItem()) -- the exact same
+// condition setItemMatrix() itself already uses to decide whether to call
+// setHookshotPos() at all (d_a_alink.cpp), checked directly rather than
+// assumed.
+inline void refreshTrackedHookshotMtxLive() {
+    auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
+    if (!link || !isFirstPerson(link)) return;
+    if (!daPy_py_c::checkHookshotItem(link->getEquipItem())) return;
+
+    link->applyTrackedHookshotGripTransforms();
+
+    if (J3DModel* m = link->getHeldItemModel()) {
+        m->calc();
+        markModelJointsLive(m);
+    }
+    if (J3DModel* m = link->getHookshotSecondaryModel()) {
+        m->calc();
+        markModelJointsLive(m);
+    }
+
+    // Follow-up (2026-08-12): the secondary tip resting on the (now
+    // tracked) secondary grip -- see
+    // applyTrackedHookshotTipRestingTransform()'s own comment for why
+    // only this one (of the two tips) is covered here.
+    link->applyTrackedHookshotTipRestingTransform();
+    if (J3DModel* m = link->getHookshotSecondaryTipModel()) {
+        m->calc();
+        markModelJointsLive(m);
+    }
+
+    // 2nd follow-up (2026-08-12): the primary tip's resting/READY
+    // transform turned out to be the same safe shape as the secondary
+    // tip's above -- see applyTrackedHookshotPrimaryTipRestingTransform()'s
+    // own comment.
+    link->applyTrackedHookshotPrimaryTipRestingTransform();
+    if (J3DModel* m = link->getHookshotPrimaryTipModel()) {
+        m->calc();
+        markModelJointsLive(m);
     }
 }
 

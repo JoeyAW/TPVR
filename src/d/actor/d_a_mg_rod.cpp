@@ -29,6 +29,7 @@
 #include "dusk/frame_interpolation.h"
 #include "dusk/settings.h"
 #include "dusk/version.hpp"
+#include "dusk/vr/vr_main.hpp"
 #endif
 
 class dmg_rod_HIO_c : public JORReflexible {
@@ -241,7 +242,24 @@ static int dmg_rod_Draw(dmg_rod_class* i_this) {
         dComIfGd_set3DlineMat(&i_this->linemat);
 
 #if TARGET_PC
-        if (dusk::frame_interp::is_enabled()) {
+        // VR fix (2026-08-12): this flatscreen-only mechanism smooths the
+        // line's rendered position between two SIM-TICK-boundary snapshots
+        // (mLineInterpPrev/Curr), blended via get_interpolation_step() --
+        // the fraction of progress within the CURRENT sim tick. It was
+        // harmless before dmg_rod_refreshTrackedPositionLive() existed
+        // (the underlying position only changed once per tick anyway, so
+        // prev/curr stayed nearly identical between real frames). Now that
+        // the rod's position is refreshed live every real frame, this same
+        // capture runs every real frame too -- snapshotting adjacent REAL
+        // FRAMES instead of tick boundaries, then blending them with an
+        // alpha that's still on the tick clock, not the real-frame clock.
+        // That mismatch is what caused the reported "hook is jittery when
+        // moving": the interpolated result jumps between two nearly-
+        // adjacent, already-live samples using a stale-cadence alpha.
+        // Skipped entirely in VR -- no smoothing is needed since the
+        // position is already fresh every real frame; the un-interpolated
+        // linemat.update() call just above this block stands as-is.
+        if (dusk::frame_interp::is_enabled() && !dusk::vr::isRenderingToHeadset()) {
             if (i_this->mLineInterpCurrValid) {
                 memcpy(i_this->mLineInterpPrev, i_this->mLineInterpCurr, MG_ROD_LURE_LINE_LEN * sizeof(cXyz));
                 i_this->mLineInterpPrevValid = true;
@@ -277,7 +295,24 @@ static int dmg_rod_Draw(dmg_rod_class* i_this) {
         dComIfGd_set3DlineMat(&i_this->linemat);
 
 #if TARGET_PC
-        if (dusk::frame_interp::is_enabled()) {
+        // VR fix (2026-08-12): this flatscreen-only mechanism smooths the
+        // line's rendered position between two SIM-TICK-boundary snapshots
+        // (mLineInterpPrev/Curr), blended via get_interpolation_step() --
+        // the fraction of progress within the CURRENT sim tick. It was
+        // harmless before dmg_rod_refreshTrackedPositionLive() existed
+        // (the underlying position only changed once per tick anyway, so
+        // prev/curr stayed nearly identical between real frames). Now that
+        // the rod's position is refreshed live every real frame, this same
+        // capture runs every real frame too -- snapshotting adjacent REAL
+        // FRAMES instead of tick boundaries, then blending them with an
+        // alpha that's still on the tick clock, not the real-frame clock.
+        // That mismatch is what caused the reported "hook is jittery when
+        // moving": the interpolated result jumps between two nearly-
+        // adjacent, already-live samples using a stale-cadence alpha.
+        // Skipped entirely in VR -- no smoothing is needed since the
+        // position is already fresh every real frame; the un-interpolated
+        // linemat.update() call just above this block stands as-is.
+        if (dusk::frame_interp::is_enabled() && !dusk::vr::isRenderingToHeadset()) {
             if (i_this->mLineInterpCurrValid) {
                 memcpy(i_this->mLineInterpPrev, i_this->mLineInterpCurr, MG_ROD_UKI_LINE_LEN * sizeof(cXyz));
                 i_this->mLineInterpPrevValid = true;
@@ -582,6 +617,27 @@ static void rod_main(dmg_rod_class* i_this) {
     fopAc_ac_c* actor = &i_this->actor;
     rod_control(i_this);
 }
+
+#if TARGET_PC
+// See d_a_mg_rod.h's own comment for the full reasoning. Snapshot/restore
+// covers exactly the two field pairs rod_control() writes that must stay
+// at sim-tick cadence -- confirmed by enumerating every `i_this->` field
+// write in rod_control() directly (only rod_angle_y, a harmless per-call
+// output, and this pair, were found).
+void dmg_rod_refreshTrackedPositionLive(dmg_rod_class* i_this) {
+    const cXyz savedTipPrev = i_this->field_0x6b8;
+    const cXyz savedTipCurr = i_this->rod_tip_pos;
+    const cXyz savedGripPrev = i_this->field_0x6d4;
+    const cXyz savedGripCurr = i_this->field_0x6c8;
+
+    rod_control(i_this);
+
+    i_this->field_0x6b8 = savedTipPrev;
+    i_this->rod_tip_pos = savedTipCurr;
+    i_this->field_0x6d4 = savedGripPrev;
+    i_this->field_0x6c8 = savedGripCurr;
+}
+#endif
 
 static npc_henna_class* henna;
 

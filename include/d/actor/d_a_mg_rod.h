@@ -308,4 +308,25 @@ public:
 #endif
 };
 
+#if TARGET_PC
+// VR fix (2026-08-12): re-derives the rod's hand-attach position/orientation
+// (rod_control(), d_a_mg_rod.cpp) at real VR frame rate instead of only
+// once per 30Hz sim tick -- same root cause/fix shape as the boomerang and
+// original hand/sword/shield lag. Safe to call more often than once per
+// tick: rod_control() was audited (every `i_this->` field write inside it
+// enumerated directly) and writes exactly two things -- rod_angle_y (a pure
+// per-call output, harmless to refresh) and a previous/current tip-position
+// delta-tracking pair (field_0x6b8/rod_tip_pos, field_0x6d4/field_0x6c8,
+// presumably feeding rod-tip-velocity physics elsewhere) that MUST stay at
+// tick cadence. This wrapper snapshots that delta-tracking pair, calls
+// rod_control(), then restores it -- so an extra real-frame call refreshes
+// every visual output (the joint-position array, all rod/lure model base
+// transforms) while leaving the next real sim tick's rod_control() call to
+// see exactly the state it would have if this extra call had never
+// happened. Declared here (not just kept static in the .cpp) so VR code
+// can call it after finding the live actor via
+// fopAcM_SearchByName(fpcNm_MG_ROD_e).
+void dmg_rod_refreshTrackedPositionLive(dmg_rod_class* i_this);
+#endif
+
 #endif /* D_A_MG_ROD_H */

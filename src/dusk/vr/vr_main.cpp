@@ -411,6 +411,34 @@ void refreshTrackedItemMtxLive() {
     vr_link::refreshTrackedItemMtxLive();
 }
 
+void refreshTrackedHeldItemMtxLive() {
+    vr_link::refreshTrackedHeldItemMtxLive();
+}
+
+bool getTrackedHandWorldPos(bool isLeftHand, float& outX, float& outY, float& outZ) {
+    return vr_link::getTrackedHandWorldPos(isLeftHand, outX, outY, outZ);
+}
+
+void refreshTrackedItemJointMtxLive() {
+    vr_link::refreshTrackedItemJointMtxLive();
+}
+
+bool getTrackedItemJointMtx(bool isLeft, float (*outMtx)[4]) {
+    return vr_link::getTrackedItemJointMtx(isLeft, outMtx);
+}
+
+void refreshTrackedBoomerangMtxLive() {
+    vr_link::refreshTrackedBoomerangMtxLive();
+}
+
+void refreshTrackedFishingRodMtxLive() {
+    vr_link::refreshTrackedFishingRodMtxLive();
+}
+
+void refreshTrackedHookshotMtxLive() {
+    vr_link::refreshTrackedHookshotMtxLive();
+}
+
 void applyVrBodyPositionOffset(J3DModel* bodyModel) {
     vr_link::applyVrBodyPositionOffset(bodyModel);
 }
@@ -1116,6 +1144,31 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     // cause). See refreshTrackedItemMtxLive()'s own comment.
     dusk::vr::refreshTrackedItemMtxLive();
 
+    // Same fix, extended further to mHeldItemModel/mpKanteraModel (bow,
+    // bottles, lantern, etc.). See refreshTrackedHeldItemMtxLive()'s own
+    // comment (vr_link_visibility.hpp).
+    dusk::vr::refreshTrackedHeldItemMtxLive();
+
+    // Extends tracking to getLeftItemMatrix()/getRightItemMatrix()
+    // themselves (fixes fishing rod/boomerang/nocked arrows/etc. -- see
+    // refreshTrackedItemJointMtxLive()'s own comment, vr_link_visibility.hpp).
+    dusk::vr::refreshTrackedItemJointMtxLive();
+
+    // The held (not-yet-thrown) boomerang's OWN base-transform setter only
+    // samples getLeftItemMatrix() once per sim tick (see
+    // refreshTrackedBoomerangMtxLive()'s own comment) -- re-run it here at
+    // real frame rate too, same shape as every other live-refresh above.
+    dusk::vr::refreshTrackedBoomerangMtxLive();
+
+    // Same fix, same reason, extended to the fishing rod -- see
+    // refreshTrackedFishingRodMtxLive()'s own comment.
+    dusk::vr::refreshTrackedFishingRodMtxLive();
+
+    // Same fix, extended to the clawshot's hand-grip models (chain itself
+    // deliberately not touched this round -- see
+    // refreshTrackedHookshotMtxLive()'s own comment).
+    dusk::vr::refreshTrackedHookshotMtxLive();
+
     // World-space point both eyes anchor their view matrix to this frame --
     // see vr_link::getVrCameraEyeAnchor()'s comment. Computed once (not per
     // eye) since it doesn't depend on which eye is rendering, only on
@@ -1286,6 +1339,19 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
 
         fpcM_DrawIterater((fpcM_DrawIteraterFunc)fpcM_Draw);
         cAPIGph_Painter();
+
+        // World-space aim-point marker ("physical crosshair") -- drawn
+        // after the world/HUD (cAPIGph_Painter() above) so it's properly
+        // depth-tested against real scene geometry, but still inside this
+        // eye's open pass. Reuses daAlink_c::mSight, the same shared aim
+        // point already driving the flatscreen bow/slingshot/hookshot/
+        // boomerang 2D reticle -- see drawAimCrosshair()'s own comment
+        // (vr_stereo_render.hpp) for the full "all items" scoping.
+        if (auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer())) {
+            if (link->getAimSightVisible()) {
+                vr_render::drawAimCrosshair(*link->getLineTopPosP());
+            }
+        }
 
         // TODO: inject hand mesh before resolving the pass:
         // vr_render::HandPayload payload{ eye == 0 ? leftPose : rightPose };

@@ -5783,6 +5783,783 @@ in the frame) — that would distinguish "background noise, ignore" from
 this specific capture ranged from the low 40000s up into the mid 45000s
 by the end of the session, for reference.
 
+### VR tracked-hand attachment extended past sword/shield to held items + bombs — built 2026-08-12, NOT yet confirmed in-headset
+
+**Goal** (explicit user request: "put all of the items that you can equip
+and hold in your hand" [VR-tracked], calling out bombs specifically).
+Extends section 16's sword/shield tracked-hand fix to `mHeldItemModel`
+(bow, bottles, oil bottle, copy rod, boomerang, etc.), the separate
+`mpKanteraModel` (lantern), and bombs — the three pieces section 16's own
+writeup had explicitly scoped out/deferred.
+
+**`mHeldItemModel`/`mpKanteraModel`** (`vr_link_visibility.hpp`'s new
+`refreshTrackedHeldItemMtxLive()`, called from `vr_main.cpp`'s `tick()`
+right after the existing `refreshTrackedItemMtxLive()`): reuses the exact
+proven architecture (`computeTrackedItemMtx()`, `applyTrackedItemMtxIfAttached()`,
+`markModelJointsLive()`, `refreshRestingPoseSmoothed()`) with one real
+generalization. Sword/shield always attach directly to their item joint
+with zero extra offset, so the raw body-model item-joint matrix could be
+used directly as the "current relationship to the hand" basis. Several
+held-item branches (bottle, oil-bottle, bow-left-hand, kantera) layer an
+*additional* `mDoMtx_stack_c` translate+rotate on top of the item joint in
+`setItemMatrix()` — rather than duplicate those literal offset constants
+into VR code (a second place to keep in sync), a new `RawBasisCache`
+captures the model's own `getBaseTRMtx()` — i.e. whatever `setItemMatrix()`
+actually computed that tick, offset included, whichever branch it took —
+**once per real sim tick, before this file's own override overwrites it**.
+This sidesteps, by construction, the exact self-corruption trap
+`applyTrackedItemMtxIfAttached()`'s own comment documents two failed
+heuristics for on sword/shield's gating (a live re-read after the first
+frame would see our own prior overwrite instead of the real game pose).
+
+`computeHeldItemAttach()`/`computeKanteraAttach()` mirror `setItemMatrix()`'s
+real branch dispatch (same precedent as `checkShieldHandAttached()` already
+established: duplicating the real dispatch condition structurally, since
+there's no cheaper way to ask "which branch did it take"). **Deliberately
+excluded, left completely untouched**: the `0x106` branch (attaches to the
+HEAD/face joint, not a hand), hookshot (`setHookshotPos()` drives a real
+fire/retract state machine across both item joints, swapping which
+physical model gets which joint), and iron ball (`setIronBallPos()` reads
+a hardcoded joint 15 plus a real chain-link simulation and `AtSph`
+collision) — none of these are a simple joint attach, matching section
+16's original scoping boundary. Kantera additionally reuses
+`refreshRestingPoseSmoothed()` for its belt/back resting pose (it has one,
+unlike `mHeldItemModel`, which is always hand-attached to *something*
+whenever the model exists at all).
+
+**Known, accepted gap, not fixed this round**: bottles get a *second*,
+independent position write via a J3D animation callback
+(`bottleModelCallBack()`, `d_a_alink_bottle.inc`) that writes
+`mHeldItemModel`'s own joint 1 directly from `mRightItemJntNo` — bypasses
+`setBaseTRMtx()` entirely, so this fix's base-transform override doesn't
+reach it. Left as a residual visual imperfection (bottle's sub-joint,
+maybe a cork/stopper piece, won't track as tightly as the rest of the
+model) rather than chasing it this round.
+
+**Bombs** — architecturally separate (confirmed via exploration): once
+pulled out, a bomb is a real actor (`dBomb_c`), positioned every sim tick
+by `daAlink_c::setGrabItemPos()` (`d_a_alink_grab.inc`) at
+`(mLeftHandPos + mRightHandPos) * 0.5` plus a small local offset.
+`mLeftHandPos`/`mRightHandPos` themselves are computed once per sim tick in
+`setBodyPartPos()` from the flatscreen-animated hand joints — same bug
+class as sword/shield's original "floating" symptom, just one level
+removed (an averaged midpoint feeding a carried actor's real physics
+transform, not a model's own draw matrix). **Fix**: while
+`isRenderingToHeadset()`, `setBodyPartPos()`'s human-form branch now
+overrides `mLeftHandPos`/`mRightHandPos` with the real tracked controller
+positions (new `dusk::vr::getTrackedHandWorldPos()`, reading the
+translation column of `vr_link::detail::s_leftHandMtx`/`s_rightHandMtx` —
+falls back to the original flatscreen-joint computation if hand-tracking
+data isn't valid yet). Verified safe against every other read of
+`mLeftHandPos`/`mRightHandPos` in `d_a_alink.cpp`: the wolf-form branch
+(a separate, untouched code path) feeds `setWolfCollisionPos()`; the two
+remaining human-form reads (fishing-rod-lure spawn position, bomb spawn
+position) both benefit from the more-accurate tracked position, no adverse
+consumer found.
+
+**Explicitly a PARTIAL fix for bombs, not the same depth as sword/shield**:
+`setBodyPartPos()` runs at sim-tick rate (~30Hz) regardless of this
+change, and `setGrabItemPos()` — what actually consumes this for a carried
+actor — runs at the same rate, so some residual stair-step lag is expected
+even after this fix, matching the class of bug section 20 had to fix more
+deeply (`mark_live_this_frame()`/`mDoExt_modelUpdateDL()`) for Link's own
+body/hands. A full fix would need extending that live-mark/override
+technique to the carried actor's own `current.pos`, which is real
+physics/collision state (read by `dBomb_c`'s own logic), not just a draw
+matrix — a materially riskier change than anything else in this section,
+deliberately not attempted, not yet explored.
+
+**Built successfully** (RelWithDebInfo, `windows-msvc-relwithdebinfo`
+preset) — `vr_link_visibility.hpp`, `vr_main.hpp`/`.cpp`, `d_a_alink.h`,
+`d_a_alink.cpp` all recompiled, clean link, no new warnings, verified via
+a second no-op incremental rebuild.
+
+**NOT yet tested in-headset.** Next step for whoever picks this up: equip
+and draw the bow (both grip stances if reachable), a bottle, an oil bottle
+(if reachable pre-item-get), the lantern/kantera, copy rod, and boomerang
+— confirm each tracks the real hand instead of floating at the old
+flatscreen position. Confirm hookshot and iron ball are UNCHANGED (sanity
+check, not a regression target). Pull out and hold a bomb — confirm it now
+sits at/moves with the real tracked hand (not necessarily perfectly
+smooth, per the documented partial-fix caveat above).
+
+### `getLeftItemMatrix()`/`getRightItemMatrix()` made VR-aware — fixes fishing rod, boomerang, nocked arrows, and ~7 other downstream consumers at once — built 2026-08-12, NOT yet confirmed in-headset
+
+**Follow-up to the section above**, same day. User tested and reported
+"Double clawshot, fishing rod and boomerang do not track on my hands."
+Split into two different situations:
+- **Double clawshot (hookshot)**: deliberately excluded by the section
+  above (physics/chain-driven state machine, not a simple attach) — asked
+  the user whether to attempt it now or defer; **user chose to defer**
+  ("Leave it out for now").
+- **Fishing rod and boomerang**: a real, unaddressed gap. While just
+  *held* (not actively used), both are positioned by `mHeldItemModel`'s
+  generic branch, already covered by the fix above. But an actively-cast
+  fishing rod (`d_a_mg_rod.cpp`, the fishing minigame) and a thrown/flying
+  boomerang (`d_a_boomerang.cpp`) are their own separate actors that read
+  `daAlink_c::getLeftItemMatrix()`/`getRightItemMatrix()` DIRECTLY — the
+  raw, untracked body-joint matrix (`mpLinkModel->getAnmMtx(mLeftItemJntNo/
+  mRightItemJntNo)`) — never touched by the previous fix (which only
+  overrides `mHeldItemModel`'s/`mpKanteraModel`'s OWN draw matrix, not the
+  raw joint other actors read independently). This is exactly the "ripple
+  effect" gap section 16's original writeup flagged as the harder,
+  unaddressed part of extending VR tracking past sword/shield: `getLeftItemMatrix()`/
+  `getRightItemMatrix()` are read directly by ~10 actor files besides
+  `mHeldItemModel` itself — nocked arrows (`d_a_alink_bow.inc`,
+  `d_a_arrow.cpp`), boomerang throw/trail (`d_a_boomerang.cpp`, 3 call
+  sites), fishing rod (`d_a_mg_rod.cpp`, 4 call sites; `d_a_mg_fish.cpp`),
+  several enemy-interaction actors (`d_a_e_bug.cpp`/`d_a_e_fm.cpp`/
+  `d_a_e_gob.cpp`/`d_a_e_sm2.cpp`), an NPC interaction (`d_a_npc_tk.cpp`),
+  an object interaction (`d_a_obj_lp.cpp`), and the canoe paddle
+  (`d_a_alink_canoe.inc`).
+
+**Fix, at the source rather than touching every caller**: `getLeftItemMatrix()`/
+`getRightItemMatrix()` (`d_a_alink_link.inc`) are `virtual`, and `daAlink_c`
+already overrides them — so changing the two function BODIES fixes every
+one of those ~10 downstream consumers at once, through ordinary virtual
+dispatch, with zero changes needed to any of those files. Each now checks
+`isRenderingToHeadset()` first and, if a fresh tracked-hand-relative
+matrix is available this frame, returns a `static Mtx` local holding it
+instead of the raw joint matrix — same "stable `MtxP` into persistent
+storage" contract `getAnmMtx()` itself already provides, so no caller
+needed to change how it uses the return value.
+
+**New plumbing** (`vr_link_visibility.hpp`): unlike the held-item
+`RawBasisCache`, no once-per-tick caching is needed here — `mpLinkModel->
+getAnmMtx(mLeftItemJntNo/mRightItemJntNo)` is the BODY model's own joint
+matrix, which nothing in this VR code ever writes to (only
+`mSwordModel`/`mShieldModel`/`mHeldItemModel`/`mpKanteraModel`'s own base
+transforms are overridden elsewhere), so it's safe to read fresh every
+real frame with no self-corruption risk. `refreshTrackedItemJointMtxLive()`
+(called once per real frame from `vr_main.cpp`'s `tick()`, alongside the
+other `refresh*Live()` calls) computes both sides via the same
+`computeTrackedItemMtx()` used for held items, caching into
+`detail::s_trackedLeftItemJointMtx`/`s_trackedRightItemJointMtx`;
+`getTrackedItemJointMtx(bool isLeft, Mtx outMtx)` copies the cached result
+out, returning false if unavailable.
+
+**Deliberately gated on `isFirstPerson(link)`, not just
+`isRenderingToHeadset()`** — a difference from sword/shield/held-item's
+own overrides, which have no such gate (safe there only because those
+models simply aren't drawn/equipped during Wolf form or third-person
+cutscenes in practice). `getLeftItemMatrix()`/`getRightItemMatrix()` are
+called unconditionally by files with zero awareness of Link's current
+form (an enemy-interaction actor could run during Wolf form too). During
+Wolf form, `mLeftItemJntNo`/`mLeftHandJntNo` collapse to the SAME joint
+(19) — the computed relative offset would reduce to identity, returning
+the tracked hand's raw matrix directly, which is wrong for Wolf's
+different rig and third-person camera. Gating on `isFirstPerson()` (already
+correctly covers Wolf/mounted-cutscene/hidden-cutscene, see its own
+definition) avoids that risk by construction instead of discovering it via
+a report later.
+
+**Known, accepted side effect, not individually verified**: this also
+changes canoe-paddle positioning and the several enemy-interaction actors'
+hand-reference point during ordinary first-person gameplay (they now get
+the same tracked-hand-relative treatment for free) — a natural consequence
+of fixing the general mechanism at its source rather than per-caller, not
+something individually tested in-headset. If canoe paddling or an
+enemy-grab animation looks off after this, start here.
+
+**Built successfully** (RelWithDebInfo) — `vr_link_visibility.hpp`,
+`vr_main.hpp`/`.cpp`, `d_a_alink_link.inc` (via `d_a_alink.cpp`)
+recompiled, clean link, no new warnings, verified via a second no-op
+incremental rebuild.
+
+**NOT yet tested in-headset.** Next step for whoever picks this up: cast
+the fishing rod and confirm it tracks the real hand during the minigame;
+throw a boomerang and confirm its trail/flight tracks correctly; as a
+bonus check, nock an arrow with the bow and paddle a canoe to see whether
+either looks better or worse than before (neither was reported broken,
+but both are now affected by this same mechanism). Double clawshot remains
+a known, deliberately-deferred gap — not attempted this round.
+
+### Boomerang + fishing rod still laggy after the above — same root cause as the original hand/sword/shield bug, one level downstream — FIXED 2026-08-12, built, NOT yet confirmed in-headset
+
+**User report, testing the two sections above**: "the boomerang and
+fishing rod are in the hand, but they're lagging behind just like the
+hands, sword, and shield originally did. the other items do not lag. the
+clawshot is still not tracked" (clawshot expected — deliberately deferred
+above).
+
+**Root cause**: `getLeftItemMatrix()`/`getRightItemMatrix()` themselves
+are fresh every real VR frame (previous section) — but their two
+`d_a_mg_rod.cpp`/`d_a_boomerang.cpp` consumers only ever *sample* that
+fresh value once per 30Hz sim tick, then hold the resulting model
+transform fixed until the next tick — the exact same bug class section
+20 spent a whole investigation on for Link's own body/hands, just one
+level removed (the accessor is fixed; the caller only reads it at tick
+rate). Confirmed directly by call-stack tracing, not inference:
+- `daBoomerang_c::setKeepMatrix()` (sets `mp_boomModel`/`mp_shippuModel`/
+  `mp_setboomEfModel`'s base transforms from `getLeftItemMatrix()`) is only
+  ever called from `procWait()` — the boomerang's own `m_procFn`, run once
+  per sim tick — and once from `create()`.
+- `rod_control()` (the fishing rod's attach-point/IK-chain derivation,
+  reading `getLeftItemMatrix()`/`getRightItemMatrix()`) is only ever
+  called from `rod_main()`, itself only called from `dmg_rod_Execute()` —
+  the rod's sim-tick execute function.
+
+**Fix shape, boomerang (straightforward)**: `setKeepMatrix()` split into
+`daBoomerang_c::applyTrackedKeepTransforms()` (the pure visual half —
+`getLeftItemMatrix()` read + `mDoMtx_stack_c` offset/rotate +
+`setBaseTRMtx()` × 3) and the original `setKeepMatrix()` (now just calls
+the new function, then keeps `current.pos` and `simpleAnmPlay()` for
+itself — both deliberately excluded from the live-refreshed half:
+`current.pos` is real collision/logic state that belongs at tick rate,
+and re-triggering `simpleAnmPlay()` every real frame would restart the
+wait animation instead of just refreshing a transform).
+`vr_link::refreshTrackedBoomerangMtxLive()` (`vr_link_visibility.hpp`),
+called once per real frame from `vr_main.cpp`'s `tick()`, re-invokes
+`applyTrackedKeepTransforms()` — gated to the KEPT (held, not thrown)
+boomerang only, checked via `getThrowBoomerangAcKeep()->getID() ==
+fpcM_ERROR_PROCESS_ID_e` (a real state-transition check, not a guess —
+that id becomes valid at the exact moment the same actor's `m_procFn`
+flips from `procWait` to `procMove`/thrown flight, which is positioned by
+`setMoveMatrix()`'s own unrelated physics).
+
+**Fix shape, fishing rod (needed a real audit first — initial "just
+re-call it" assumption was wrong)**: `rod_control()` is a ~250-line
+procedural IK chain (16 rod segments derived from the attach matrix +
+persistent "spring" scalars). First assumption — that it's pure/stateless
+enough to safely re-invoke at real frame rate — turned out to be **almost
+but not quite right**: enumerating every single `i_this->` field write
+inside the function (not sampled — every one) found exactly two things
+written: `rod_angle_y` (a harmless per-call output) and a
+previous/current tip-position delta-tracking pair
+(`field_0x6b8`/`rod_tip_pos`, `field_0x6d4`/`field_0x6c8` — presumably
+feeding rod-tip-velocity physics read elsewhere, e.g. cast/fish-bite
+detection). Naively re-calling `rod_control()` extra times per real frame
+would have corrupted that pair (each extra call's "previous" value would
+be a fraction of a tick old instead of one full tick old), risking a
+subtle, hard-to-notice break in fishing-minigame feel — exactly the class
+of risk this project's own notes already flag for bombs' physics state
+("materially riskier... not attempted"). **Fix**: `dmg_rod_
+refreshTrackedPositionLive()` (new, `d_a_mg_rod.h`/`.cpp`) snapshots that
+one delta-tracking pair, calls `rod_control()`, then restores it — so an
+extra real-frame call refreshes every visual output (the 16-segment
+position array, every rod/lure model's base transform) while leaving the
+*next real sim tick's* `rod_control()` call to see exactly the state it
+would have if the extra call had never happened. No duplication of the
+IK math itself — the real function runs unmodified, just bracketed.
+`vr_link::refreshTrackedFishingRodMtxLive()` (`vr_link_visibility.hpp`),
+called once per real frame from `tick()`, finds the live rod actor via
+`fopAcM_SearchByName(fpcNm_MG_ROD_e)` (`dmg_rod_class` has no dedicated
+accessor on `daAlink_c` the way the boomerang does — this is the
+established fallback for actors without one) and calls the new wrapper.
+
+**Both gated on `isFirstPerson(link)`**, matching every other item-tracking
+live-refresh in this section.
+
+**Built successfully** (RelWithDebInfo, two separate incremental builds —
+boomerang fix built and verified clean first, fishing rod fix added and
+rebuilt clean second) — `d_a_boomerang.h`/`.cpp`, `d_a_mg_rod.h`/`.cpp`,
+`vr_link_visibility.hpp`, `vr_main.hpp`/`.cpp` all recompiled across the
+two rounds, no errors, no new warnings either time.
+
+**ROUND 2 (same day) — user tested round 1, "They both still lag." Real
+missing piece found and fixed, built, NOT yet confirmed in-headset.**
+
+Round 1 only did HALF of the already-established fix pattern. Comparing
+directly against `applyTrackedItemMtxIfAttached()`/`markModelJointsLive()`
+(the proven, confirmed-working mechanism for sword/shield/held items)
+found the gap: calling `setBaseTRMtx()` at real frame rate is necessary
+but NOT sufficient. Without an explicit `model->calc()` **and**
+`dusk::frame_interp::mark_live_this_frame()` call on that model's joints
+THIS SAME real frame, `frame_interp`'s own draw-time substitution
+(`resolve_replacement()`, inside `J3DShapeMtx.cpp`) overrides the fresh
+transform with a stale once-per-tick-interpolated snapshot regardless of
+how often `setBaseTRMtx()`/`calc()` themselves run — this is the exact
+mechanism section 20 spent a full investigation root-causing for Link's
+own hands/sword/shield, and round 1 of this fix rediscovered the same
+gap by skipping the step rather than by a new bug.
+
+**Fix, boomerang**: `refreshTrackedBoomerangMtxLive()` now explicitly
+calls `->calc()` and `markModelJointsLive()` on `mp_boomModel`,
+`mp_shippuModel`, and `mp_setboomEfModel` after
+`applyTrackedKeepTransforms()`. Those three fields are private on
+`daBoomerang_c`, so three small public getters
+(`getBoomModel()`/`getShippuModel()`/`getSetboomEfModel()`) were added
+rather than widening the class's public data surface further.
+
+**Fix, fishing rod**: `refreshTrackedFishingRodMtxLive()` now marks EVERY
+model the rod could plausibly touch — `rod_uki_model[15]`,
+`unk_ring_model[6]`, `lure_model[5]`, `hook_model[2]`, `esa_model[2]`,
+`ring_model`, `uki_model`, `uki_saki_model`, and
+`rod_modelMorf->getModel()` — deliberately over-inclusive rather than
+tracing exactly which subset `rod_control()` itself sets per kind/action
+this frame, matching `markModelJointsLive()`'s own established "small
+models, negligible extra cost, guessing an index wrong silently
+reintroduces the bug for that index" reasoning. `dmg_rod_class`'s fields
+are all `public` already (no `private:`/`protected:` anywhere in
+`d_a_mg_rod.h`, confirmed by grep), so no new accessors were needed there
+— just a new `#include "m_Do/m_Do_ext.h"` in `vr_link_visibility.hpp` for
+`mDoExt_McaMorf`'s full type (needed to call `rod_modelMorf->getModel()`,
+previously only forward-declared through this file's other includes).
+
+**Built successfully** (RelWithDebInfo) — `d_a_boomerang.h`,
+`vr_link_visibility.hpp`, `vr_main.cpp` recompiled, clean link, no new
+warnings.
+
+**NOT yet tested in-headset.** Next step for whoever picks this up: hold
+the boomerang (unthrown) and confirm it no longer stair-steps; cast/reel
+the fishing rod and confirm the same, AND — since the rod fix's safety
+rests on the snapshot/restore around `rod_tip_pos`/`field_0x6c8` being
+sufficient (round 1's own audit) — pay particular attention to anything
+tip-velocity-related (does casting still feel right, do fish still
+bite/hook normally) in case some other, not-yet-found consumer of that
+pair was missed. If EITHER still lags after this round, the next thing to
+verify directly (not guess) is whether `daBoomerang_c::draw()`/
+`dmg_rod_Draw()` are actually reached during a real VR eye pass at all —
+section 20's saga eventually found `daAlink_c::draw()` was NOT (only ever
+called via the legacy `fapGm_Execute()` path) — that was never
+independently re-checked for these two actors specifically, just assumed
+safe by analogy; a real debugger call stack (same conditional-breakpoint
+technique section 20 used) would settle it directly. Double clawshot
+remains deliberately deferred (unchanged from the section above).
+
+**ROUND 3 (same day) — user confirmed both fixed ("theyre fixed now"),
+but a NEW symptom surfaced: "the actual hook on the fishing rod is
+jittery when im moving." Root-caused and fixed, built, NOT yet confirmed
+in-headset.**
+
+**Root cause**: `dmg_rod_Draw()` has a pre-existing, flatscreen-only
+smoothing mechanism (`mLineInterpPrev`/`mLineInterpCurr`,
+`dmg_rod_interp_callback()`) that snapshots the fishing LINE's rendered
+vertex positions (`linemat.getPos(0)`) once per `dmg_rod_Draw()` call,
+shifts prev←curr, and later blends prev/curr using
+`dusk::frame_interp::get_interpolation_step()` — the fraction of progress
+through the CURRENT SIM TICK. This was harmless before round 1/2's fix:
+since the line's underlying position only changed once per 30Hz tick
+either way, `dmg_rod_Draw()` calling this every real frame just captured
+the SAME position repeatedly — prev and curr stayed nearly identical, so
+the blend was a no-op. **Round 1/2's live-refresh broke this assumption**:
+the line's position now changes every real frame (as intended), so this
+same capture now snapshots ADJACENT REAL FRAMES into prev/curr instead of
+tick boundaries — but the blend is still driven by `get_interpolation_step()`,
+a value on the SIM-TICK clock, completely unrelated to the real-frame
+cadence prev/curr are now actually sampled at. That clock mismatch is what
+produced the jitter: the interpolated result jumps between two
+already-live, nearly-adjacent samples using a stale-cadence alpha,
+visibly worse the more the underlying position actually changes per
+frame (i.e. worse while moving) — exactly the reported symptom.
+
+**Fix**: gated both `if (dusk::frame_interp::is_enabled())` call sites in
+`dmg_rod_Draw()` (LURE and UKI branches) with `&& !dusk::vr::
+isRenderingToHeadset()` — skips the whole prev/curr-capture-and-
+interpolation-callback-registration block in VR entirely. No smoothing is
+needed there anymore: the position is already fresh every real frame
+thanks to round 1/2's fix, so the un-interpolated `linemat.update()` call
+immediately above this block (already using live data) stands as-is.
+`dmg_rod_interp_callback()` itself needed no separate guard — it only
+ever runs if registered via `add_interpolation_callback()`, which this
+fix stops doing during VR. Needed a new `#include "dusk/vr/vr_main.hpp"`
+under this file's existing `#if TARGET_PC` include block.
+
+**Built successfully** (RelWithDebInfo) — `d_a_mg_rod.cpp` recompiled,
+clean link, no new warnings.
+
+**IN-HEADSET RESULT: round 3 did NOT fix it** — user: "It still jitters."
+So the line-interpolation-cadence-mismatch theory, while a real and
+correctly-fixed bug on its own terms, is not the (or not the whole) cause
+of the hook jitter specifically. **User explicitly deprioritized this**
+("That's ok, we need to fix the clawshots") rather than asking for a
+4th round immediately — picked back up whenever fishing-rod work resumes.
+Live leads for a future round, not yet tried: (a) the "rod model itself,
+not just the line" possibility flagged above was never actually ruled
+out — worth checking directly rather than assuming the line fix was
+sufficient; (b) `hook_model[]`/`esa_model[]` (the actual hook/bait,
+closest to what the user would be looking at as "the hook") are NOT
+positioned inside `rod_control()` at all (confirmed via that function's
+own field-write audit) — they're set later in `dmg_rod_Draw()` itself
+from data `rod_control()` produces, a code path not yet read/traced this
+session; since round 2's `markModelJointsLive()` pass marks them
+over-inclusively but doesn't control WHEN/HOW their base transform is
+actually computed, if THAT computation has its own tick-vs-real-frame
+mismatch (same bug class, different location), marking them live wouldn't
+fix it — this is the more likely remaining culprit than the already-fixed
+line interpolation, and matches "the actual hook" being the user's precise
+wording rather than "the line" or "the rod."
+
+### Double clawshot / hookshot grip tracking — deliberately excluded by section 16, tackled 2026-08-12 (grip only, NOT the chain) — built, NOT yet confirmed in-headset
+
+**User request**: "That's ok, we need to fix the clawshots" (deprioritizing
+the still-unresolved fishing-rod hook jitter above). Double clawshot was
+the one item section 16 explicitly scoped out as "not a simple joint
+attach" — a real fire/retract state machine across both item joints,
+swapping which physical model represents which hand.
+
+**Investigation confirmed section 16's scoping was right, but found the
+scope splits cleanly into a safe part and a genuinely separate, riskier
+part**: `daAlink_c::setHookshotPos()` (`d_a_alink_hook.inc`) is a ~380-line
+function (916-1294, much bigger than an initial partial read suggested —
+cost a build error to discover, see below) covering BOTH:
+1. **Hand-grip positioning** (top of the function): sets
+   `mHeldItemModel`/`field_0x0710` (the two physical grip models — WHICH
+   one represents left vs right hand swaps every call via `field_0x3020`/
+   `getHookshotLeft()`, since double clawshot alternates hands) directly
+   from `mpLinkModel->getAnmMtx(mLeftItemJntNo/mRightItemJntNo)` —
+   **bypassing `getLeftItemMatrix()`/`getRightItemMatrix()` entirely**,
+   unlike the fishing rod/boomerang/nocked-arrow consumers fixed earlier —
+   this is why those two accessors' own VR-awareness fix never reached the
+   clawshot at all. Also computes `mHeldItemRootPos`/`field_0x3810` (the
+   chain's ROOT/near-hand anchor points, read by `getHsChainRootPos()`/
+   `getHsSubChainRootPos()`) directly from those same grip models' base
+   transforms.
+2. **Real per-tick physics** (the rest of the function, not touched): shoot/
+   fly/return state transitions, animation-frame counters, sound triggers,
+   and the actual chain-length/target-collision simulation that positions
+   `mHookshotTopPos` (the chain's FAR/grapple-side end) — genuine
+   integrator state, same category this project has repeatedly treated as
+   too risky to duplicate-call (bombs' `current.pos`, the fishing rod's
+   tip-velocity pair).
+
+**Fix, scoped to (1) only**: split the grip-positioning logic out into a
+new `daAlink_c::applyTrackedHookshotGripTransforms()`, using
+`getLeftItemMatrix()`/`getRightItemMatrix()` instead of the direct
+`getAnmMtx()` reads — reusing the SAME already-VR-aware basis every other
+held item already benefits from, rather than architecting new tracking
+logic. `setHookshotPos()` now just calls this new function first, then
+continues into its own real per-tick logic unchanged.
+`vr_link::refreshTrackedHookshotMtxLive()` (`vr_link_visibility.hpp`),
+called once per real frame from `tick()`, re-invokes
+`applyTrackedHookshotGripTransforms()` and then explicitly `calc()`s +
+`markModelJointsLive()`s both grip models — same proven shape as the
+boomerang/rod fixes. Gated on `daPy_py_c::checkHookshotItem(getEquipItem())`
+— the exact condition `setItemMatrix()` itself already uses to decide
+whether to call `setHookshotPos()` at all.
+
+**Deliberately NOT attempted this round: the chain itself**
+(`hsChainShape_c::draw()`) — a genuinely separate, raw-immediate-mode GX
+system (procedural chain-link segments computed and submitted via
+`GXLoadPosMtxImm`/`simpleDrawCache()` every draw call, not through
+J3DModel/`frame_interp`'s joint-matrix substitution mechanism at all) with
+its OWN pre-existing flatscreen interpolation (`mHsChainInterp*` fields,
+captured inside `daAlink_c::draw()` — itself of uncertain real-per-eye
+reachability, same open question section 20 left for `daBoomerang_c::draw()`/
+`dmg_rod_Draw()`). Given the fishing-rod hook jitter (three rounds, still
+unresolved) suggests a real gap in this project's current understanding of
+this exact bug class's timing, extending the same guesswork to a MORE
+novel subsystem without new verification was judged too risky for this
+round — matches section 16's own original reasoning for excluding
+hookshot, just now narrowed to specifically the chain rather than the
+whole item. The chain's near/root end should still visually follow the
+grip to some degree even untouched (it reads the now-tracked
+`mHeldItemRootPos`/`field_0x3810` whenever `setHookshotPos()` itself
+runs), just not confirmed to update at real frame rate the way the grip
+models now do.
+
+**Build note**: first attempt failed to compile —
+`static Vec const hookRoot = {0.0f, 0.0f, 23.5f};` had been declared as a
+function-local inside what was assumed to be the END of `setHookshotPos()`
+(around where the grip logic stopped), but the function actually continues
+~380 lines further and references that same local further down (lines
+~1090/~1292 in the current file) — a direct consequence of not having read
+the function's real extent before splitting it. Fixed by hoisting the
+constant to file scope (both functions can see it now) rather than
+duplicating the declaration in two places. **Lesson reinforced**: before
+splitting a function found via a partial read, grep for the function's own
+closing boundary (next sibling function signature) to confirm the read
+covered the WHOLE thing — this cost a wasted build cycle here, cheap to
+avoid next time.
+
+**Built successfully** (RelWithDebInfo, second attempt) —
+`d_a_alink.h`, `d_a_alink_hook.inc`, `vr_link_visibility.hpp`,
+`vr_main.hpp`/`.cpp` recompiled, clean link, no new warnings.
+
+**NOT yet tested in-headset.** Next step for whoever picks this up: equip
+the (double) clawshot and confirm the hand-grip models now track the real
+controllers instead of floating at the old flatscreen position; fire it
+and confirm sheathing/firing/retracting still behaves normally (none of
+that state-machine logic was touched, but worth a sanity check given how
+large and previously-unread the function turned out to be); separately
+note whether the CHAIN visually looks acceptable as a secondary
+observation, not a pass/fail target for this round — if it's reported
+laggy/jittery, that's the deliberately-deferred piece, not a regression.
+
+**IN-HEADSET RESULT: grips confirmed tracked ("They're tracked now"),
+follow-up report: "the tips that actually fire lag behind."** Traced
+directly (not guessed): each hookshot has TWO tip models —
+`mpHookTipModel` (the PRIMARY/actively-aimed-or-flying tip) and
+`field_0x0714` (the SECONDARY tip, resting on whichever grip isn't
+currently active) — swapped via `changeHookshotDrawModel()`, same
+swap-which-physical-model-represents-which-hand pattern as the grips.
+Both remained entirely inside the still-tick-rate-only tail of
+`setHookshotPos()` (past where the grip fix's extraction stopped), so
+neither benefited from the live-refresh at all — matching the report
+exactly.
+
+**Split findings by risk, fixed only the safe half**:
+- **`field_0x0714` (secondary, resting tip) — FIXED**: when
+  `field_0x3024 == 0` (not mid a `cLib_chasePos()` "settle to new resting
+  spot" — real per-tick integrator state, left untouched), its transform
+  is a pure derivation: `field_0x0710`'s (now-tracked) base transform plus
+  the same fixed `hookRoot` offset used everywhere else in this file — no
+  side effects, directly analogous to the grip fix itself. New
+  `daAlink_c::applyTrackedHookshotTipRestingTransform()`, called from
+  `refreshTrackedHookshotMtxLive()` alongside the grip refresh, same
+  `calc()`/`markModelJointsLive()` treatment.
+- **`mpHookTipModel` (primary, actively-aimed tip) — NOT attempted,
+  genuinely riskier**: traced its READY-mode (aiming-before-firing)
+  positioning to lines ~1044-1093 of `setHookshotPos()` and found it is
+  NOT a simple grip-offset derivation — its ORIENTATION comes from Link's
+  aim direction/body angle (`mBodyAngle`, `mProcID`, target-lock via
+  `mTargetedActor`/`getBodyAngleXAtnActor()`), and the exact branch taken
+  also triggers a real one-shot sound effect
+  (`seStartOnlyReverb(Z2SE_LK_HS_SHOOT)`) and writes real state
+  (`field_0x3028`, `field_0x3828`) that other branches of the SAME
+  function (the iron-ball-adjacent RETURN-mode chase-detection heuristic)
+  read later. Duplicate-calling this at real frame rate risks either
+  sound-spamming every real frame or corrupting that shared state,
+  neither of which could be verified without in-headset testing this
+  session didn't have time for. Deliberately left untouched — this is the
+  literal continuation of the chain-rendering gap flagged above, not a
+  new discovery: `mpHookTipModel`'s in-flight physics were always
+  correctly out of scope, but its RESTING/READY position turned out to be
+  entangled with gameplay/aim/sound logic in a way `field_0x0714`'s
+  simpler resting case wasn't.
+
+**Built successfully** (RelWithDebInfo) — `d_a_alink.h`,
+`d_a_alink_hook.inc`, `vr_link_visibility.hpp` recompiled, clean link, no
+new warnings.
+
+**NOT yet tested in-headset.** Next step for whoever picks this up: check
+whether the secondary (resting) tip now tracks correctly; if the PRIMARY
+aimed tip is still the dominant complaint (most likely, since that's the
+one visibly in front of you while aiming to fire), that's the deliberately
+-deferred piece above — picking it up would mean either (a) carefully
+replicating just the READY-mode angle/position derivation (lines
+~1044-1093) into a new side-effect-free function the same way this round
+did for the secondary tip, being careful to exclude the sound trigger and
+either duplicate or reason out whether the `field_0x3028`/`field_0x3828`
+writes are safe to duplicate, or (b) asking the user whether a genuinely
+different design (the aim tip tracks the controller's own aim/pointing
+direction directly, rather than deriving from Link's body-relative aim
+angle at all) is preferable for VR specifically -- not yet discussed with
+the user.
+
+**IN-HEADSET RESULT: "The tip in the right hand is fixed, but not tip on
+the left hand."** Not a new/separate bug — this is a report of the
+already-known gap above (the primary tip, `mpHookTipModel`), just
+identifying WHICH hand it currently happened to be on (the primary/
+secondary grip assignment swaps via `field_0x3020`, so "left" here isn't
+a stable identity — it's whichever hand `mHeldItemModel` currently maps
+to). Prompted a closer re-read of `setHookshotPos()`'s exact brace
+structure (previous round's risk assessment had been reasoning from a
+partial read) — **found the primary tip's resting/READY-mode transform is
+actually the SAME safe shape as the secondary tip's, not the riskier
+one**: the earlier assumption that it derives from
+`mDoMtx_stack_c::transS(mHookshotTopPos)`/`ZXYrotM(...)` (the
+angle/physics rebuild) was wrong — that rebuild only happens in
+`setHookshotPos()`'s SEPARATE "else" branch (actively flying, gated by
+the SAME top-level `if (checkHookshotWait() || mItemMode == 2) {...}
+else {...}` the wait-branch is also inside) — while
+`checkHookshotWait()` is true (`mItemMode` is NONE or READY, which
+by construction excludes both `mItemMode==2`, the one-tick "just fired"
+transition with its sound effect, and all of SHOOT/FLY/RETURN), the tip's
+final transform is simply `mHeldItemModel`'s (already tracked) base
+transform plus the same fixed `hookRoot` offset — no angle math, no sound,
+no shared-state writes needed at all.
+
+**Fixed**: `daAlink_c::applyTrackedHookshotPrimaryTipRestingTransform()`
+(`d_a_alink_hook.inc`) — gated on `checkHookshotWait()` alone (already
+public, already exactly the right condition), directly mirrors
+`applyTrackedHookshotTipRestingTransform()`'s shape one-for-one, just
+using `mHeldItemModel` instead of `field_0x0710`. Wired into
+`refreshTrackedHookshotMtxLive()` the same way, with its own
+`calc()`/`markModelJointsLive()` pair. **Both tips are now covered** —
+the risk assessment from the previous round undersold this one; it was
+never actually as entangled as it looked from a partial function read.
+
+**Built successfully** (RelWithDebInfo) — `d_a_alink.h`,
+`d_a_alink_hook.inc`, `vr_link_visibility.hpp` recompiled, clean link, no
+new warnings.
+
+**CONFIRMED FIXED IN-HEADSET** — user tested and reported "That's fixed."
+Both grips and both tips (primary and secondary, whichever hand each
+currently maps to via `field_0x3020`) now track the real controllers.
+**This closes out the clawshot/double-clawshot hand-tracking work** —
+the only deliberately-untouched piece is the chain itself (both the
+procedural rope rendering, `hsChainShape_c::draw()`, and the actual
+in-flight grapple physics/`mHookshotTopPos` integration while SHOOT/FLY/
+RETURN), unchanged from every round above. If the chain is ever reported
+looking wrong, that's expected/known, not a regression — start with this
+section's own scoping notes rather than re-investigating from scratch.
+
+### Item-tracking status summary (as of 2026-08-12, end of session)
+
+Quick reference for what's confirmed vs. still open across everything
+extended past sword/shield/basic held items this session:
+- **Confirmed working in-headset**: held items generally (bow, bottles,
+  lantern, copy rod — from the original round), `getLeftItemMatrix()`/
+  `getRightItemMatrix()` consumers generally, boomerang (held, unthrown),
+  fishing rod's own base/grip tracking, clawshot/double-clawshot grips
+  AND both tips.
+- **Confirmed NOT fixed, deferred by user choice**: the fishing rod's
+  hook/line jitter (3 rounds attempted, root cause still not fully
+  understood — see that section's own "live leads for a future round").
+- **Deliberately out of scope, not attempted**: bombs' full physics-rate
+  tracking (partial fix only, documented gap), double clawshot's CHAIN
+  rendering/flight physics (this section), fishing rod's actively-cast/
+  reeled physics beyond the grip.
+
+### World-space aim-point marker ("physical crosshair") — CONFIRMED WORKING IN-HEADSET 2026-08-12 (scope finalized)
+
+**Goal** (explicit user request): "add a physical crosshair in the game
+world to show where you are aiming all items." Scoped first via two
+questions rather than guessed: visual style (**simple glowing dot/sphere**,
+chosen over a surface-oriented ring decal or a billboarded cross symbol)
+and item scope (**bow, slingshot, hookshot, boomerang** — everything
+`checkSightLine()` already supports natively — chosen over a narrower
+bow/slingshot-only scope matching the existing flatscreen reticle, or a
+broader scope including bombs' arc-thrown trajectory, which would need
+new prediction math).
+
+**Reused the existing aim-point computation instead of writing new
+raycasting logic**: `daAlink_c::checkSightLine()` (`d_a_alink.cpp`) is an
+already-existing, general-purpose function that computes a world-space
+sight/aim point via `dBgS_LinChk` line-collision checks, already
+special-cased per item (hookshot/slingshot start from `mHeldItemRootPos`;
+bow starts from the arrow actor; boomerang uses its own `mBoomerangLinChk`).
+It's already the thing driving the existing flatscreen 2D reticle
+(`daAlink_c::mSight`, a `daAlink_sight_c`/`daPy_sightPacket_c`-derived
+sprite packet) — confirmed by reading each item's own call site:
+`setBowSight()` (bow/slingshot), `setHookshotSight()` (hookshot, also
+handles a locked-target case via `mHookTargetAcKeep`), and
+`daBoomerang_c`'s own throw-aim code (`d_a_alink_boom.inc`) — ALL three
+call `mSight.setPos(...)`/`mSight.onDrawFlg()`/`offDrawFlg()` on the SAME
+shared `daAlink_c::mSight` object. This means one single flag+position
+pair (`mSight.getDrawFlg()`, `mSight.getPosP()` — the latter already had
+a public accessor, `getLineTopPosP()`) already covers all four scoped
+items with zero per-item special-casing needed in new code. Added one
+new public accessor, `daAlink_c::getAimSightVisible()`, mirroring
+`getLineTopPosP()`'s existing shape (non-`const`, matching — `getDrawFlg()`
+itself is non-`const`, caught by a build error on the first attempt).
+
+**Rendering**: new `vr_render::drawAimCrosshair(const cXyz& worldPos)`
+(`vr_stereo_render.hpp`), called once per eye from `vr_main.cpp`'s
+`tick()` right after `cAPIGph_Painter()` (so the world's own geometry has
+already been drawn this eye and Z-testing against it is meaningful) and
+before `endEye()` — a real, proven-reachable per-eye call site this
+session already used repeatedly, not a leap of faith. Deliberately NOT
+head-locked/eye-space-fixed the way `drawHudBillboard()` is (that
+function's own comment explains why identity-position-matrix vertices
+make a panel head-locked "for free") — this needs to look like a real
+object AT the aim point, so the world position is transformed into the
+CURRENT eye's view space via `mDoMtx_multVec(view->viewMtx, ...)` first,
+then drawn with an identity position matrix relative to THAT (same
+"vertices already in eye-space" idiom, different anchor). A 16-segment
+camera-facing triangle fan, no texture (raw vertex-color TEV pass-through,
+`GXSetTevOp(GX_TEVSTAGE0, GX_PASSCLR)` — same minimal pattern used by
+`d_home_button.cpp`'s own plain-colored-quad draw, adapted to add an
+RGBA/alpha channel), warm white/yellow color, center vertex near-opaque
+fading to fully transparent at the rim (a soft glow via per-vertex alpha,
+no texture asset needed). **Z-test ENABLED, Z-write disabled** — the
+"physical, not a HUD overlay" requirement means it must be occluded by
+real geometry (a wall between you and the aim point should hide it);
+write is disabled per the standard translucent-geometry convention (avoid
+punching a depth-buffer hole other translucent draws would incorrectly
+sort against). Fixed 8-unit world-space radius (~8cm at this project's
+~100 units/metre scale) — deliberately NOT distance-compensated to a
+constant screen size, since that would read as more HUD-like and less
+"physical," the opposite of what was asked for; will naturally shrink
+with distance like a real small object would.
+
+**Deliberately excluded**: bombs (arc-thrown, `mSight` isn't driven for
+them at all — would need new trajectory-prediction math, out of scope per
+the scoping question above) and the fishing rod's cast (same reason).
+Double clawshot's hookshot IS covered (per the scoping choice) but note
+it's driven by `setHookshotSight()`'s OWN aim computation, independent of
+this session's earlier hookshot hand-tracking fixes — no interaction
+between the two features expected, but not something to assume without
+seeing it in-headset.
+
+**Build note**: first attempt failed — `getAimSightVisible()` was
+initially declared `const`, but `daPy_sightPacket_c::getDrawFlg()` itself
+is non-`const`; fixed by dropping `const` to match `getLineTopPosP()`'s
+existing (non-`const`) convention on the same class.
+
+**Built successfully** (RelWithDebInfo, second attempt) — `d_a_alink.h`,
+`vr_stereo_render.hpp`, `vr_main.cpp` recompiled, clean link, no new
+warnings.
+
+**NOT yet tested in-headset.** Next step for whoever picks this up: draw
+the bow/slingshot/boomerang (aiming/charging, not just holding) and ready
+the hookshot, and confirm a small glowing dot appears at the actual aim
+point, correctly occluded by walls/terrain between the player and that
+point, with correct stereo depth (should visually sit AT the surface it's
+aiming at, not float in front of or behind it — the most likely thing to
+be subtly wrong on a first pass, worth checking carefully). Also worth
+sanity-checking the hookshot's locked-target case (`mHookTargetAcKeep`
+branch in `setHookshotSight()`) shows the dot on the actual target actor,
+not just terrain. Tune `kRadiusUnits`/`kGlowColor`
+(`vr_stereo_render.hpp`) if the size/brightness feels off — untested
+guesses, not derived from anything.
+
+**IN-HEADSET RESULT, round 2: "Clawshot and boomerang render the dot but
+not the bow, slingshot, or ball and chain. Can you make the dot red
+too."** Two different situations, handled separately:
+
+- **Ball and chain (iron ball)**: correct as-is, NOT a bug — it's a swung
+  melee weapon with no ranged sight line at all. `checkSightLine()` is
+  never invoked for it anywhere in the codebase (no `setIronBallSight()`
+  or equivalent exists), so `mSight` is never driven for this item on
+  flatscreen either. No fix made; explained to the user rather than
+  guessing at a "swing indicator" feature nobody asked for.
+- **Bow/slingshot — real bug, found by reading `setBowSight()`
+  (`d_a_alink_bow.inc`) directly, unrelated to anything touched this
+  session**: it calls `mSight.offDrawFlg()` UNCONDITIONALLY in BOTH its
+  aiming and non-aiming branches — meaning the "Aiming Reticle" settings
+  toggle (the base-game feature this whole `mSight` mechanism traces back
+  to, section "World-space aim-point marker" above) currently does
+  NOTHING even on flatscreen; the draw flag never turns on regardless of
+  the setting. `mSight`'s POSITION is still updated correctly whenever
+  aiming (`mSight.setPos(&sight_pos)` runs fine, only the flag is
+  affected), so the fix doesn't touch `setBowSight()`/flatscreen code at
+  all (deliberately, per this project's general caution around unrelated
+  fixes) — instead, `getAimSightVisible()` (`d_a_alink.h`) now falls back
+  to independently re-deriving the same "is aiming" condition
+  (`checkBowAndSlingItem(mEquipItem) && checkBowChargeWaitAnime() &&
+  !dComIfGp_checkPlayerStatus0(0, 0x200000)` — the exact condition
+  `setBowSight()`'s own `if` already gates on) whenever `mSight`'s own
+  flag reads false, so the VR crosshair works regardless of that
+  flatscreen bug (or the setting's state) without depending on either.
+- **Color**: `kGlowColor` (`vr_stereo_render.hpp`) changed from warm
+  white/yellow to red (`{235, 30, 30, 220}`), same near-opaque-center/
+  transparent-edge falloff shape, unchanged otherwise.
+
+**Built successfully** (RelWithDebInfo) — `d_a_alink.h`,
+`vr_stereo_render.hpp` recompiled, clean link, no new warnings.
+
+User's response to the `setBowSight()` flatscreen bug report: "I will fix
+it later" — explicitly deferred, own code to fix in their own time, not
+something for a future VR-mod session to pick up. Not blocking: the VR
+crosshair fix above works around it independently (re-derives the aiming
+condition itself rather than relying on `mSight`'s flag), so it functions
+correctly in-headset regardless of whether/when that flatscreen fix lands.
+
+**CONFIRMED WORKING IN-HEADSET (round 3)** — user tested and reported bow
+and slingshot now show the red dot correctly (the `getAimSightVisible()`
+fallback fixed it). Two follow-up items raised ("not the ball and the
+rod") turned out to be scope questions, not bugs, and were resolved by
+asking rather than guessing:
+- **Ball and chain (iron ball)**: reconfirmed correct as-is — it's a
+  swung melee weapon with no ranged sight line at all, on flatscreen
+  either (`checkSightLine()`/`mSight` is never invoked for it anywhere in
+  the codebase). Nothing to add.
+- **Fishing rod's cast**: still deliberately out of scope. Asked the user
+  directly whether to build new arc-trajectory prediction for it (its
+  cast isn't a straight sight line the way the other four items are, so
+  it can't just reuse `mSight` the way this feature does for everything
+  else) — **user chose to leave it out**, confirming the original scoping
+  decision rather than expanding it.
+
+**This closes out the aim-point marker feature** — final scope is bow,
+slingshot, hookshot, and boomerang, all confirmed working in-headset with
+correct stereo depth/occlusion (no issues reported on either), red glow
+color as requested. Ball-and-chain has no applicable concept of an aim
+point; fishing rod's cast remains a known, explicitly-declined gap, not
+an oversight, should anyone ask about it again later.
+
 ## Key lesson learned this session
 
 Don't infer that an uncommitted fix supersedes a nearby disable guard just

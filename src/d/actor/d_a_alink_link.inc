@@ -404,6 +404,24 @@ u32 daAlink_c::checkHorseRide() const {
 }
 
 MtxP daAlink_c::getLeftItemMatrix() {
+#if TARGET_PC
+    // VR: this virtual accessor is read directly by ~10 other actor files
+    // (nocked arrows, boomerang, fishing rod, several enemy-interaction
+    // actors, the canoe paddle) for effects anchored to Link's hand --
+    // returning the tracked-hand-relative matrix here fixes all of them
+    // at once via ordinary virtual dispatch. See
+    // vr_link::refreshTrackedItemJointMtxLive()'s comment
+    // (vr_link_visibility.hpp) for the full reasoning, including why this
+    // is gated on first-person specifically. Static storage: the caller
+    // expects a stable MtxP (pointer into a persistent buffer), same
+    // contract mpLinkModel->getAnmMtx() itself provides.
+    if (dusk::vr::isRenderingToHeadset()) {
+        static Mtx s_vrTrackedLeftItemMtx;
+        if (dusk::vr::getTrackedItemJointMtx(true, s_vrTrackedLeftItemMtx)) {
+            return s_vrTrackedLeftItemMtx;
+        }
+    }
+#endif
     return mpLinkModel->getAnmMtx(mLeftItemJntNo);
 }
 
@@ -430,6 +448,15 @@ void daAlink_c::onSceneChangeArea(u8 i_exitID, u8 i_exitDirection, fopAc_ac_c* i
 }
 
 MtxP daAlink_c::getRightItemMatrix() {
+#if TARGET_PC
+    // See getLeftItemMatrix()'s comment above -- same reasoning, mirrored.
+    if (dusk::vr::isRenderingToHeadset()) {
+        static Mtx s_vrTrackedRightItemMtx;
+        if (dusk::vr::getTrackedItemJointMtx(false, s_vrTrackedRightItemMtx)) {
+            return s_vrTrackedRightItemMtx;
+        }
+    }
+#endif
     return mpLinkModel->getAnmMtx(mRightItemJntNo);
 }
 

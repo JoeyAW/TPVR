@@ -2602,6 +2602,53 @@ public:
     int setHookshotHangMoveBGCollect();
     void setHookshotTopPosFly();
     void setHookshotPos();
+    // VR fix (2026-08-12): the grip-positioning half of setHookshotPos(),
+    // split out so it can be re-run at real-VR-frame rate (see
+    // dusk::vr::refreshTrackedHookshotMtxLive()) on top of setHookshotPos()'s
+    // own once-per-sim-tick call from setItemMatrix() -- same shape as
+    // daBoomerang_c::applyTrackedKeepTransforms(). Deliberately excludes
+    // setHookshotPos()'s animation-frame advancement, sound triggers, and
+    // the shoot/fly/return chain-length physics (mHookshotTopPos
+    // integration) that follow it in the original function -- all real
+    // per-tick state that must stay at tick cadence. Uses
+    // getLeftItemMatrix()/getRightItemMatrix() (already VR-aware, unlike
+    // setHookshotPos()'s original direct mpLinkModel->getAnmMtx() reads)
+    // so this reuses the same tracked-hand basis already proven for every
+    // other held item, rather than duplicating that logic a second time.
+    void applyTrackedHookshotGripTransforms();
+    // VR fix (2026-08-12), follow-up: the SECONDARY hookshot tip
+    // (field_0x0714 -- the claw resting on whichever grip isn't currently
+    // firing) is positioned from the SECONDARY grip's own base transform
+    // (field_0x0710, now tracked) plus a fixed offset -- a pure
+    // derivation, safe to refresh live, same shape as
+    // applyTrackedHookshotGripTransforms() itself. Deliberately does
+    // NOT touch mIronBallBgChkPos or run while field_0x3024 != 0 (a real
+    // cLib_chasePos() integrator mid-"settle to new resting spot" --
+    // same category of per-tick state this project has repeatedly left
+    // alone elsewhere, e.g. the fishing rod's tip-velocity pair). The
+    // PRIMARY tip (mpHookTipModel, the one actively aimed/fired) is NOT
+    // covered by this function -- its resting/READY position depends on
+    // Link's aim direction and target-lock state (mBodyAngle/mProcID/
+    // mTargetedActor), not just a grip offset, and its mode transitions
+    // trigger a real sound effect -- a materially riskier extraction not
+    // attempted this round.
+    void applyTrackedHookshotTipRestingTransform();
+    // VR fix (2026-08-12), 2nd follow-up: the PRIMARY tip's (mpHookTipModel)
+    // resting/READY-mode transform turned out to be the SAME shape as
+    // applyTrackedHookshotTipRestingTransform() above -- a prior read of
+    // setHookshotPos() had conflated it with the SEPARATE shoot/fly-physics
+    // branch's mDoMtx_stack_c::transS(mHookshotTopPos)/ZXYrotM() rebuild,
+    // but that rebuild only happens in setHookshotPos()'s "else" (actively
+    // flying) branch -- while checkHookshotWait() is true (mItemMode is
+    // NONE or READY, i.e. genuinely at rest, never the one-tick "just
+    // fired" transition which is mItemMode==2 specifically and triggers a
+    // real sound effect + mode change this function deliberately never
+    // reaches), the tip's transform is simply mHeldItemModel's (now
+    // tracked) base transform plus the same fixed hookRoot offset used
+    // everywhere else in this file. checkHookshotWait() itself already
+    // excludes all of SHOOT/FLY/RETURN, so no separate guard against the
+    // physics branch is needed.
+    void applyTrackedHookshotPrimaryTipRestingTransform();
     void setHookshotRoofWaitAnime();
     void setHookshotWallWaitAnime();
     void hookshotRoofTurn();
@@ -3655,6 +3702,25 @@ public:
     J3DModel* getBodyModel() const { return mpLinkModel; }
     J3DModel* getSwordModel() const { return mSwordModel; }
     J3DModel* getShieldModel() const { return mShieldModel; }
+    // Same VR held-item tracking, extended past sword/shield to the
+    // broader "currently equipped item" model and the separate lantern/
+    // kantera model (see vr_link_visibility.hpp's
+    // refreshTrackedHeldItemMtxLive()).
+    J3DModel* getHeldItemModel() const { return mHeldItemModel; }
+    J3DModel* getKanteraModel() const { return mpKanteraModel; }
+    // The clawshot's SECOND hand-grip model -- setHookshotPos()/
+    // applyTrackedHookshotGripTransforms() swap which of mHeldItemModel/
+    // this one represents the left vs right hand via field_0x3020
+    // (getHookshotLeft()) each call, since which physical grip belongs to
+    // which hand can change (double clawshot, alternating throws).
+    J3DModel* getHookshotSecondaryModel() const { return field_0x0710; }
+    // The secondary tip resting on getHookshotSecondaryModel() -- see
+    // applyTrackedHookshotTipRestingTransform()'s own comment.
+    J3DModel* getHookshotSecondaryTipModel() const { return field_0x0714; }
+    // The primary tip resting on getHeldItemModel() -- see
+    // applyTrackedHookshotPrimaryTipRestingTransform()'s own comment.
+    J3DModel* getHookshotPrimaryTipModel() const { return mpHookTipModel; }
+    u16 getEquipItem() const { return mEquipItem; }
     u16 getLeftItemJntNo() const { return mLeftItemJntNo; }
     u16 getRightItemJntNo() const { return mRightItemJntNo; }
     u16 getLeftHandJntNo() const { return mLeftHandJntNo; }
@@ -3901,6 +3967,28 @@ public:
     }
 
     cXyz* getLineTopPosP() { return mSight.getPosP(); }
+
+    // VR fix (2026-08-12): mSight is the SAME shared sight/aim-point object
+    // driven by setBowSight() (bow/slingshot), setHookshotSight(), AND
+    // daBoomerang_c's own throw-aim code (d_a_alink_boom.inc, confirmed via
+    // its own mSight.setPos()/onDrawFlg() calls) -- one flag+position pair
+    // already covers all four items, no per-item special-casing needed.
+    // Used by the VR world-space aim-point marker
+    // (vr_render::drawAimCrosshair(), vr_stereo_render.hpp).
+    //
+    // FOLLOW-UP (same day): bow/slingshot don't actually reach this --
+    // setBowSight() (d_a_alink_bow.inc) calls mSight.offDrawFlg()
+    // UNCONDITIONALLY in both its aiming and non-aiming branches (a
+    // pre-existing bug, unrelated to anything touched this session --
+    // the "Aiming Reticle" settings toggle currently does nothing on
+    // flatscreen either). mSight's POSITION is still updated correctly
+    // whenever aiming, just never its draw flag, so checked independently
+    // here instead of depending on (or fixing) that flatscreen code path.
+    bool getAimSightVisible() {
+        if (mSight.getDrawFlg() != 0) return true;
+        return checkBowAndSlingItem(mEquipItem) && checkBowChargeWaitAnime() &&
+               !dComIfGp_checkPlayerStatus0(0, 0x200000);
+    }
 
     cXyz* getBoomerangLockPosP() { return &mHeldItemRootPos; }
 

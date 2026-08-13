@@ -633,7 +633,7 @@ void daBoomerang_c::setRoomInfo() {
     fopAcM_SetRoomNo(this, roomNo);
 }
 
-void daBoomerang_c::setKeepMatrix() {
+void daBoomerang_c::applyTrackedKeepTransforms() {
     daAlink_c* player = daAlink_getAlinkActorClass();
 
     mDoMtx_stack_c::copy(player->getLeftItemMatrix());
@@ -641,11 +641,21 @@ void daBoomerang_c::setKeepMatrix() {
     mDoMtx_stack_c::XYZrotM(cM_deg2s(-4.0f), cM_deg2s(39.0f), cM_deg2s(-9.0f));
     mp_boomModel->setBaseTRMtx(mDoMtx_stack_c::get());
     mp_shippuModel->setBaseTRMtx(player->getLeftItemMatrix());
+    mp_setboomEfModel->setBaseTRMtx(player->getLeftItemMatrix());
+}
 
+void daBoomerang_c::setKeepMatrix() {
+    applyTrackedKeepTransforms();
+
+    // current.pos (the actor's real collision/logic position) and the wait
+    // animation restart both only belong at sim-tick rate -- deliberately
+    // NOT part of applyTrackedKeepTransforms(), which VR also calls at real
+    // frame rate (see dusk::vr::refreshTrackedBoomerangMtxLive()). Reuses
+    // the mDoMtx_stack_c state applyTrackedKeepTransforms() just left
+    // behind (still holds mp_boomModel's T*R-applied matrix), matching this
+    // function's original behavior exactly.
     mDoMtx_stack_c::multVecZero(&current.pos);
     daAlink_c::simpleAnmPlay(m_waitEffBtk);
-
-    mp_setboomEfModel->setBaseTRMtx(player->getLeftItemMatrix());
 }
 
 void daBoomerang_c::setMoveMatrix() {

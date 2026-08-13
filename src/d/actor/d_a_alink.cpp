@@ -5600,6 +5600,36 @@ void daAlink_c::setBodyPartPos() {
         cMtx_multVec(mpLinkModel->getAnmMtx(field_0x30b4), &localHeadTop, &mHeadTopPos);
         mDoMtx_multVecZero(mpLinkModel->getAnmMtx(mLeftHandJntNo), &mLeftHandPos);
         mDoMtx_multVecZero(mpLinkModel->getAnmMtx(mRightHandJntNo), &mRightHandPos);
+#if TARGET_PC
+        // VR: mLeftHandPos/mRightHandPos feed carried/grabbed-actor
+        // positioning (e.g. a held bomb -- daAlink_c::setGrabItemPos(),
+        // d_a_alink_grab.inc, averages the two) off the FLATSCREEN-
+        // ANIMATED hand joints above -- same "floats at the flatscreen
+        // position instead of the real hand" bug class already fixed for
+        // sword/shield/tracked hands, just reached via an averaged
+        // hand-position midpoint instead of a direct joint attach.
+        // Overriding with the real tracked controller position corrects
+        // the SOURCE (a carried item now averages between the real
+        // tracked hands, not the animated ones). Deliberately a PARTIAL
+        // fix: this whole function only runs once per SIM TICK (~30Hz,
+        // called from execute()), and setGrabItemPos() -- what actually
+        // consumes this for a carried actor -- runs at the same rate, so
+        // some residual stair-step lag is expected, matching the class of
+        // bug section 20 (vr-mod-notes) had to fix more deeply for Link's
+        // own body/hands. A full fix would need extending the live-mark/
+        // override technique to the carried actor's own current.pos,
+        // which is real physics/collision state (read by dBomb_c's own
+        // logic), not just a draw matrix -- deliberately not attempted
+        // here; not yet explored.
+        if (dusk::vr::isRenderingToHeadset()) {
+            float lx, ly, lz, rx, ry, rz;
+            if (dusk::vr::getTrackedHandWorldPos(true, lx, ly, lz) &&
+                dusk::vr::getTrackedHandWorldPos(false, rx, ry, rz)) {
+                mLeftHandPos.set(lx, ly, lz);
+                mRightHandPos.set(rx, ry, rz);
+            }
+        }
+#endif
         mDoMtx_multVecZero(mpLinkModel->getAnmMtx(field_0x30bc), &mLeftFootPos);
         mDoMtx_multVecZero(mpLinkModel->getAnmMtx(field_0x30be), &mRightFootPos);
     }

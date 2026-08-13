@@ -152,6 +152,73 @@ void applyTrackedItemMtx(J3DModel* swordModel, J3DModel* shieldModel,
 // vr_link_visibility.hpp), since this is a new VR-internal-only call site.
 void refreshTrackedItemMtxLive();
 
+// Extends refreshTrackedItemMtxLive() above to mHeldItemModel (bow,
+// bottles, oil bottle, copy rod, boomerang, etc.) and the separate
+// lantern/kantera model -- same "call once per real frame, before the
+// per-eye loop opens" reasoning. Thin forward to
+// vr_link::refreshTrackedHeldItemMtxLive() (vr_link_visibility.hpp) --
+// see its own comment for which items this covers and which are
+// deliberately excluded (hookshot, iron ball, the head-attached 0x106
+// item).
+void refreshTrackedHeldItemMtxLive();
+
+// Returns the real tracked controller's world-space position (same game
+// coordinate convention/units as e.g. daAlink_c::mLeftHandPos/
+// mRightHandPos) via outX/outY/outZ, for VR-tracking a carried/grabbed
+// actor's position source -- see setBodyPartPos()'s call site
+// (d_a_alink.cpp), used there to fix a held bomb's position source.
+// Returns false (leaving outX/outY/outZ untouched) if hand-tracking data
+// isn't valid yet this session, so the caller can fall back to the
+// flatscreen-animated joint position. Plain floats rather than cXyz,
+// deliberately -- vr_main.hpp avoids pulling in core-game math headers
+// just for this one type, same reasoning as applyTrackedItemMtx()'s plain
+// float(*)[4] parameters above.
+bool getTrackedHandWorldPos(bool isLeftHand, float& outX, float& outY, float& outZ);
+
+// Extends held-item tracking to daAlink_c::getLeftItemMatrix()/
+// getRightItemMatrix() (d_a_alink_link.inc) themselves -- fixes every
+// downstream consumer of those two (virtual) accessors at once through
+// ordinary virtual dispatch (nocked arrows, boomerang, fishing rod,
+// several enemy-interaction actors, canoe paddle -- see
+// vr_link::refreshTrackedItemJointMtxLive()'s own comment,
+// vr_link_visibility.hpp, for the full list and reasoning). Call once per
+// real frame from tick(), before the per-eye loop opens, same as the
+// other refresh*Live() functions above.
+void refreshTrackedItemJointMtxLive();
+
+// Copies the tracked-hand-relative version of mLeftItemJntNo's/
+// mRightItemJntNo's raw world matrix into outMtx (3x4, same layout as
+// applyTrackedItemMtx()'s float(*)[4] params above); returns false
+// (leaving outMtx untouched) if not available this frame -- caller
+// (daAlink_c::getLeftItemMatrix()/getRightItemMatrix()) falls back to the
+// raw joint matrix in that case.
+bool getTrackedItemJointMtx(bool isLeft, float (*outMtx)[4]);
+
+// VR fix (2026-08-12): re-runs daBoomerang_c::applyTrackedKeepTransforms()
+// (the visual-transform half of setKeepMatrix(), split out for exactly
+// this purpose) once per real frame -- fixes the held boomerang's own
+// visible stair-stepping, on top of getLeftItemMatrix()'s own fix above
+// (which fixed fishing-rod/nocked-arrow/canoe consumers, but not this one,
+// since setKeepMatrix() only ever samples that matrix once per sim tick).
+// See vr_link::refreshTrackedBoomerangMtxLive()'s own comment
+// (vr_link_visibility.hpp) for the full gating reasoning. Call once per
+// real frame from tick(), same as the other refresh*Live() functions.
+void refreshTrackedBoomerangMtxLive();
+
+// VR fix (2026-08-12): same shape as refreshTrackedBoomerangMtxLive()
+// above, applied to the fishing rod -- see
+// vr_link::refreshTrackedFishingRodMtxLive()'s own comment
+// (vr_link_visibility.hpp) for the full reasoning. Call once per real
+// frame from tick(), same as the other refresh*Live() functions.
+void refreshTrackedFishingRodMtxLive();
+
+// VR fix (2026-08-12): the clawshot's hand-grip tracking (deliberately
+// scoped to the two grip models only, not the chain itself -- see
+// vr_link::refreshTrackedHookshotMtxLive()'s own comment,
+// vr_link_visibility.hpp, for the full reasoning and scoping). Call once
+// per real frame from tick(), same as the other refresh*Live() functions.
+void refreshTrackedHookshotMtxLive();
+
 // FIXED 2026-08-08 (section 20 continuation -- "link's entire body lags
 // behind... for all direction[s]" when moving): mpLinkModel's own base
 // transform is only ever set once per 30Hz sim tick (daAlink_c::

@@ -884,8 +884,17 @@ void daAlink_c::setHookshotTopPosFly() {
 
 static cXyz l_hookSnowSandHitScale(0.5f, 0.5f, 0.5f);
 
-void daAlink_c::setHookshotPos() {
-    mDoMtx_stack_c::copy(mpLinkModel->getAnmMtx(mLeftItemJntNo));
+// Was a local `static Vec const` inside the ORIGINAL setHookshotPos() --
+// hoisted to file scope when applyTrackedHookshotGripTransforms() was
+// split out of it (2026-08-12), since setHookshotPos() is a much larger
+// function (916-1294) than that split suggested and references this same
+// constant much further down in its own body (its shoot/fly/return chain
+// physics), which a function-local declaration in the split-out piece
+// can no longer reach.
+static Vec const hookRoot = {0.0f, 0.0f, 23.5f};
+
+void daAlink_c::applyTrackedHookshotGripTransforms() {
+    mDoMtx_stack_c::copy(getLeftItemMatrix());
     mDoMtx_stack_c::transM(-2.0f, 1.0f, 1.0f);
     mDoMtx_stack_c::XYZrotM(cM_deg2s(5.7f), cM_deg2s(162.0f), 0);
 
@@ -897,7 +906,7 @@ void daAlink_c::setHookshotPos() {
     }
     model->setBaseTRMtx(mDoMtx_stack_c::get());
 
-    mDoMtx_stack_c::copy(mpLinkModel->getAnmMtx(mRightItemJntNo));
+    mDoMtx_stack_c::copy(getRightItemMatrix());
     mDoMtx_stack_c::transM(-2.0f, 0.0f, 1.0f);
     mDoMtx_stack_c::XYZrotM(cM_deg2s(-78.0f), cM_deg2s(182.0f), cM_deg2s(-99.0f));
 
@@ -907,6 +916,39 @@ void daAlink_c::setHookshotPos() {
         model = mHeldItemModel;
     }
     model->setBaseTRMtx(mDoMtx_stack_c::get());
+
+    mDoMtx_multVec(mHeldItemModel->getBaseTRMtx(), &hookRoot, &mHeldItemRootPos);
+    mDoMtx_multVec(field_0x0710->getBaseTRMtx(), &hookRoot, &field_0x3810);
+}
+
+void daAlink_c::applyTrackedHookshotTipRestingTransform() {
+    // field_0x3024 != 0 means field_0x0714's resting spot is mid-chase
+    // (cLib_chasePos(&mIronBallBgChkPos, field_0x3810, ...), further down
+    // in setHookshotPos()) -- real per-tick integrator state, left
+    // completely alone here, matching this project's standing caution
+    // around duplicate-calling anything with its own persisted delta.
+    if (field_0x3024 != 0 || !field_0x0710 || !field_0x0714) return;
+
+    mDoMtx_stack_c::copy(field_0x0710->getBaseTRMtx());
+    mDoMtx_stack_c::transM(cXyz(hookRoot));
+    field_0x0714->setBaseTRMtx(mDoMtx_stack_c::get());
+}
+
+void daAlink_c::applyTrackedHookshotPrimaryTipRestingTransform() {
+    // checkHookshotWait() == mItemMode is NONE or READY -- never the
+    // one-tick "just fired" transition (mItemMode==2, real sound effect +
+    // mode change, deliberately unreachable here) or any of SHOOT/FLY/
+    // RETURN (real chain-flight physics, an entirely separate branch of
+    // setHookshotPos() this function doesn't touch).
+    if (!checkHookshotWait() || !mHeldItemModel || !mpHookTipModel) return;
+
+    mDoMtx_stack_c::copy(mHeldItemModel->getBaseTRMtx());
+    mDoMtx_stack_c::transM(cXyz(hookRoot));
+    mpHookTipModel->setBaseTRMtx(mDoMtx_stack_c::get());
+}
+
+void daAlink_c::setHookshotPos() {
+    applyTrackedHookshotGripTransforms();
 
     if (mItemMode == 2 || mItemMode == HS_MODE_SHOOT_e) {
         field_0x33dc += 1.0f;
@@ -950,9 +992,10 @@ void daAlink_c::setHookshotPos() {
     mItemBck.entry(field_0x0710->getModelData(), 0.0f);
     field_0x0710->calc();
 
-    static Vec const hookRoot = {0.0f, 0.0f, 23.5f};
-    mDoMtx_multVec(mHeldItemModel->getBaseTRMtx(), &hookRoot, &mHeldItemRootPos);
-    mDoMtx_multVec(field_0x0710->getBaseTRMtx(), &hookRoot, &field_0x3810);
+    // mHeldItemRootPos/field_0x3810 already computed above by
+    // applyTrackedHookshotGripTransforms() -- calc() only resolves the
+    // joint tree from getBaseTRMtx(), it doesn't change getBaseTRMtx()
+    // itself, so recomputing here would give the identical result.
 
     mpHookSound->framework(0, mVoiceReverbIntensity);
 

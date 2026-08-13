@@ -97,6 +97,28 @@ public:
     void resetLockActor();
     void setRoomInfo();
     void setKeepMatrix();
+    // VR fix (2026-08-12): the visual-transform half of setKeepMatrix(),
+    // split out so it can be re-run at real-VR-frame rate (see
+    // dusk::vr::refreshTrackedBoomerangMtxLive()) on top of setKeepMatrix()'s
+    // own once-per-sim-tick call from procWait() -- same root cause and fix
+    // shape as section 20's hand/sword/shield lag (getLeftItemMatrix() is
+    // fresh every real frame, but this actor previously only ever SAMPLED
+    // it once per 30Hz tick). Deliberately excludes setKeepMatrix()'s
+    // current.pos write and simpleAnmPlay() call -- both are only meant to
+    // run once per tick (current.pos is the actor's real collision/logic
+    // position; simpleAnmPlay() would restart the wait animation if called
+    // every real frame instead of just refreshing visuals).
+    void applyTrackedKeepTransforms();
+    // VR fix (2026-08-12), round 2: applyTrackedKeepTransforms() alone
+    // wasn't sufficient -- frame_interp's draw-time substitution still
+    // overrides a freshly-set base transform with a stale once-per-tick
+    // snapshot unless the model is also explicitly calc()'d and marked
+    // live THIS real frame (dusk::frame_interp::mark_live_this_frame(),
+    // vr code only -- these plain getters exist so VR code can do that
+    // without mp_boomModel/etc. needing to become fully public).
+    J3DModel* getBoomModel() { return mp_boomModel; }
+    J3DModel* getShippuModel() { return mp_shippuModel; }
+    J3DModel* getSetboomEfModel() { return mp_setboomEfModel; }
     void setMoveMatrix();
     void setRotAngle();
     void setAimPos();

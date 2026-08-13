@@ -158,6 +158,12 @@ XrInstance g_xrInstance = XR_NULL_HANDLE;
 // rotation immediately, not lag.
 s16 g_headMoveAngleS = 0;
 
+// Real right-controller-pointing aim yaw/pitch -- see getControllerAimAngles()'s
+// own declaration comment (vr_main.hpp). Computed once per frame in tick(),
+// same pattern/reasoning as g_headMoveAngleS above.
+s16 g_controllerAimYawS = 0;
+s16 g_controllerAimPitchS = 0;
+
 // ROOT-CAUSED this session ("VR stops updating after creating a save file"):
 // true once xrBeginSession() has actually succeeded and false once the
 // runtime has told us to stop (XR_SESSION_STATE_STOPPING) -- distinct from
@@ -449,6 +455,11 @@ float getSmoothTurnYawRad() {
 
 s16 getHeadMoveAngleS() {
     return g_headMoveAngleS;
+}
+
+void getControllerAimAngles(s16* outYawS, s16* outPitchS) {
+    *outYawS = g_controllerAimYawS;
+    *outPitchS = g_controllerAimPitchS;
 }
 
 // Call once at startup, after an aurora::gfx device exists (per the
@@ -1109,6 +1120,48 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
         const cXyz headForward =
             vr_render::computeHeadWorldForward(hmdPose, dusk::vr::getSmoothTurnYawRad());
         g_headMoveAngleS = cM_atan2s(headForward.x, headForward.z);
+    }
+
+    // Right-controller-pointing aim direction -- see g_controllerAimYawS/
+    // g_controllerAimPitchS's own declaration comment. yaw/pitch formulas
+    // match g_headMoveAngleS's own cM_atan2s(x, z) / cM_atan2s(y,
+    // horizontalLength) conventions just above (already proven correct
+    // there for the HMD's own forward direction).
+    //
+    // REJECTED, first attempt: sourced this from buildHandMtx()'s grip-based
+    // mesh-forward calibration. Real in-headset test found yaw off by a
+    // FIXED 90 degrees AND -- the more important finding -- physically
+    // yawing the controller made pitch/roll appear to swap, direct evidence
+    // of a wrong SOURCE vector, not just a wrong constant. A follow-up
+    // angle-space patch (subtract 90 degrees from yaw, negate pitch) was
+    // reverted without even testing it -- per this project's own hard-won
+    // "don't attempt a column swap to fix an axis-confusion symptom --
+    // provably cannot work" lesson (CLAUDE.md section 12's algebraic proof),
+    // a uniform correction (matrix column swap OR constant angle offset)
+    // cannot change which physical rotation axis feeds which computed
+    // output, only the resting orientation -- so patching the angle output
+    // further was never going to fix an axis-confusion symptom. See
+    // vr_link::computeControllerAimForward()'s own comment
+    // (vr_link_visibility.hpp) for the full writeup and the current
+    // approach (OpenXR's own aim pose, rightAimPose, instead of the grip
+    // pose + mesh calibration).
+    //
+    // CONFIRMED in-headset (round 2): the aim-pose switch fixed the
+    // axis-confusion symptom entirely -- yaw and pitch now respond only to
+    // their own physical motion, no bleed-through -- leaving just a plain
+    // inverted pitch. Unlike round 1's rejected pitch negation (which was
+    // discarded alongside a wrong SOURCE vector, so it was never actually
+    // safe to trust in isolation), this negation is now applied on top of
+    // a confirmed-correctly-separated source, which is exactly the class
+    // of fix a plain sign flip IS capable of (see the "column swap" lesson
+    // above -- it only ever objected to using a uniform correction to fix
+    // axis MIXING, not to a sign flip on an already axis-clean value).
+    {
+        const vr_link::Vec3f aimForward =
+            vr_link::computeControllerAimForward(rightAimPose, dusk::vr::getSmoothTurnYawRad());
+        const float horiz = std::sqrt(aimForward.x * aimForward.x + aimForward.z * aimForward.z);
+        g_controllerAimYawS = cM_atan2s(aimForward.x, aimForward.z);
+        g_controllerAimPitchS = static_cast<s16>(-cM_atan2s(aimForward.y, horiz));
     }
 
     constexpr u32 kVrPadPort = PAD_CHAN0;

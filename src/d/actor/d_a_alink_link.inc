@@ -112,6 +112,34 @@ BOOL daAlink_c::setBodyAngleToCamera() {
         onEndResetFlg2(ERFLG2_UNK_20);
 
         s16 sp8;
+#if TARGET_PC
+        // VR controller-pointing aim (explicit user request: "aim with the
+        // controllers and where you point them"). ABSOLUTE assignment, not
+        // an incremental delta the way stick/gyro/mouse/touch aim below
+        // are -- point the real right controller where you want the shot
+        // to go, matching a real bow/slingshot/hookshot/throw. Right hand
+        // unconditionally (not whichever hand the item model renders in --
+        // see vr_link::computeControllerAimForward()'s own comment,
+        // vr_link_visibility.hpp, for why). Entirely replaces the other
+        // input methods below for this function rather than layering on
+        // top of them (see the !isRenderingToHeadset() guards added to
+        // those blocks further down) -- "point where you want it to go"
+        // and "nudge with a stick/gyro on top of that" don't compose
+        // sensibly. Same sp8-clamp-to-mBodyAngle.x safety check the stick/
+        // gyro/touch branches below already apply, kept for consistency
+        // even though an absolute controller-driven pitch is less likely
+        // to need it in practice.
+        if (dusk::vr::isRenderingToHeadset()) {
+            s16 aimYawS, aimPitchS;
+            dusk::vr::getControllerAimAngles(&aimYawS, &aimPitchS);
+            shape_angle.y = aimYawS;
+            sp8 = aimPitchS;
+
+            if (checkNotItemSinkLimit() && sp8 > 0 && sp8 > mBodyAngle.x) {
+                sp8 = mBodyAngle.x;
+            }
+        } else
+#endif
         if (checkInputOnR()) {
             f32 var_f31 = 512.0f * mMoveValue * mMoveValue;
             if (checkWolfEyeUp()) {
@@ -133,7 +161,11 @@ BOOL daAlink_c::setBodyAngleToCamera() {
         }
 
 #if TARGET_PC
-        if ((dusk::getSettings().game.enableGyroAim ||
+        // Guarded off in VR -- see the isRenderingToHeadset() branch above,
+        // which fully replaces stick/gyro/mouse/touch aim rather than
+        // layering on top of them.
+        if (!dusk::vr::isRenderingToHeadset() &&
+            (dusk::getSettings().game.enableGyroAim ||
              dusk::getSettings().game.enableMouseAim) &&
              checkAimInputContext())
         {
@@ -167,7 +199,8 @@ BOOL daAlink_c::setBodyAngleToCamera() {
             }
         }
 
-        if (dusk::getSettings().game.enableTouchControls && checkAimInputContext()) {
+        if (!dusk::vr::isRenderingToHeadset() &&
+            dusk::getSettings().game.enableTouchControls && checkAimInputContext()) {
             f32 touchYawDp = 0.0f;
             f32 touchPitchDp = 0.0f;
             if (dusk::touch_camera::consume_delta(touchYawDp, touchPitchDp)) {

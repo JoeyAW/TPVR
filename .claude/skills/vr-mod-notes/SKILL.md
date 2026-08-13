@@ -6560,6 +6560,173 @@ color as requested. Ball-and-chain has no applicable concept of an aim
 point; fishing rod's cast remains a known, explicitly-declined gap, not
 an oversight, should anyone ask about it again later.
 
+### Controller-pointing item aim ("aim with the controllers and where you point them") — CONFIRMED WORKING IN-HEADSET 2026-08-12
+
+**Goal** (explicit user request): first-person item aiming (bow, slingshot,
+hookshot, boomerang) should follow the real controller's physical pointing
+direction instead of stick/gyro/mouse/touch input.
+
+**Found the right insertion point by reading code, not guessing**:
+`daAlink_c::setBodyAngleToCamera()` (`d_a_alink_link.inc`) is the ONE
+shared function every aim-capable item already funnels through — bow,
+hookshot, boomerang, copy rod, ball-and-chain, plus the general
+horse/wolf/swim "subjective" look modes, all call it (confirmed via a
+grep of every call site). It already computes `shape_angle.y` (aim yaw)
+and a local `sp8` (feeds `mBodyAngle.x`, aim pitch) from whichever input
+method is active — stick (`checkInputOnR()`), gyro, mouse, or touch —
+gated by the same pre-existing `checkAimInputContext()`/camera-attention
+check for all of them. This is the same function the world-space aim-dot
+feature (previous section) already reads the RESULT of via `mSight`/
+`checkSightLine()` — so pointing the controller here changes what the dot
+marks too, for free.
+
+**Which hand**: right hand, unconditionally — asked the user directly
+(varies-per-item was the alternative, since bow/hookshot/boomerang can
+each attach to either hand depending on state) rather than guessing;
+**user chose right-always** for simplicity/predictability.
+
+**Direction source**: reuses `buildHandMtx()`'s own already-fully-
+confirmed-working right-hand calibration (`applyStaticCorrection(
+right_hand_cal::kLocalForward)` rotated by the live, smooth-turn-adjusted
+grip quaternion, section 12) rather than the separate OpenXR aim-pose
+action — deliberately, since aim pose was already found to be
+runtime-dependently unreliable in this exact codebase (section 12's "aim
+pose data itself is broken on whatever runtime this was tested on"),
+while grip pose has never shown that problem. This is also the exact
+direction the player already sees their tracked hand mesh pointing, so
+aiming should feel visually consistent with the hand rather than aiming
+from some invisible, separately-calibrated reference.
+
+**New code**:
+- `vr_link::computeControllerAimForward(rightControllerPoseXR, yawRad)`
+  (`vr_link_visibility.hpp`) — returns a world-space (game-convention, no
+  axis flip needed) direction vector. Deliberately returns a raw vector,
+  not an angle, mirroring `computeHeadWorldForward()`'s own shape (the
+  cM_atan2s conversion happens in vr_main.cpp, keeping this
+  coordinate-math file free of engine-angle-convention specifics).
+- `vr_main.cpp`'s `tick()`: computed once per frame right next to the
+  existing `g_headMoveAngleS` block (same `rightPose`/
+  `getSmoothTurnYawRad()` inputs already available there). Yaw:
+  `cM_atan2s(fwd.x, fwd.z)`, matching `g_headMoveAngleS`'s own established
+  convention. Pitch: `cM_atan2s(fwd.y, horizontalLength)` — matches an
+  existing precedent found elsewhere in this codebase for deriving
+  `mBodyAngle.x` from a direction vector
+  (`d_a_alink_guard.inc`'s `cM_atan2s(dmg_vec->y, dmg_vec->absXZ())`)
+  rather than inventing a new sign convention from scratch. **Not
+  independently verified against a real in-headset test** — same
+  "flip the sign if it reads backwards" caveat every other rotation-sign
+  guess in this project has needed at least once before landing.
+  Exposed via `dusk::vr::getControllerAimAngles(s16*, s16*)`.
+- `d_a_alink_link.inc`'s `setBodyAngleToCamera()`: new
+  `isRenderingToHeadset()` branch, checked first, ABSOLUTE-assigns
+  `shape_angle.y`/`sp8` from the controller angles instead of applying an
+  incremental delta — deliberately replaces stick/gyro/mouse/touch input
+  entirely for this function while in VR (guarded the three existing
+  input blocks with `!isRenderingToHeadset()`) rather than layering a
+  delta on top of an absolute pointing direction, which wouldn't compose
+  sensibly. Sits inside the same pre-existing outer
+  `dComIfGp_checkCameraAttentionStatus(field_0x317c, 0x10)` gate every
+  other input method already uses, so scoping to "actually in an
+  aim/subjective context" needed no new condition.
+
+**Known, accepted side effect, not separately verified**: since
+`setBodyAngleToCamera()` is shared by the general horse/wolf/swim
+"subjective look" states too (not just weapon aim), those also now follow
+the controller's pointing direction — in practice this was very likely
+already the ONLY functional input for them in VR anyway (the right stick
+was unbound from aiming for VR smooth-turn back in section 15, and
+gyro/mouse aim are unlikely to be enabled by someone playing in a
+headset), so this is expected to read as "now it works" rather than a
+behavior change, but hasn't been tested specifically for the non-weapon
+subjective-look cases.
+
+**Built successfully** (RelWithDebInfo) — `vr_link_visibility.hpp`,
+`vr_main.hpp`/`.cpp`, `d_a_alink_link.inc` (via `d_a_alink.cpp`)
+recompiled, clean link, no new warnings.
+
+**ROUND 1 in-headset result: real axis-confusion symptom found, first fix
+attempt rejected without testing, source swapped entirely — built, NOT
+yet re-tested.** User report: "the yaw is rotated 90 degrees to the
+right" and, critically, "rotating on the yaw axis made the pitch and roll
+axis switch places." The first finding alone (fixed 90° yaw offset) would
+have been a simple constant to subtract — but the second finding is the
+signature of a genuinely wrong SOURCE vector, not a wrong constant: this
+project already has a hard-won, explicit standing lesson for exactly this
+symptom (CLAUDE.md's permanent constraints, and section 12's full
+algebraic proof) — **a uniform correction (matrix column swap OR a
+constant angle offset) cannot change which physical rotation axis feeds
+which computed output, only the resting orientation.** A first attempt at
+exactly that kind of fix (subtract 90° from yaw, negate pitch) was
+written and built, then **discarded without even sending it back for
+testing** once the second symptom made clear it was the wrong class of
+fix — no point spending the user's headset time confirming something the
+math already rules out.
+
+**Real fix**: switched `computeControllerAimForward()` from the grip pose
++ `right_hand_cal` mesh calibration (tuned for how the tracked hand MESH
+should visually look, never verified as "the direction a player naturally
+points this controller") to OpenXR's own **aim pose** directly — spec-
+defined specifically as "the direction the user would point the
+controller to indicate a target" (local -Z axis), independent of any
+mesh calibration. `rightAimPose` was already located every frame
+(existing infrastructure from the section 12 hand-rotation-calibration
+saga, kept in the tree specifically because it "could be reused directly"
+later). Local -Z + `rotateVecByQuat()`-direct mirrors
+`computeHeadWorldForward()`'s own already-proven-correct convention for
+the HMD exactly, rather than inventing a new one.
+
+**Known risk carried forward, not newly introduced**: aim pose was found
+runtime-dependently unreliable in this exact project once before (section
+12, one Virtual Desktop capture showed a physically-impossible
+world-frame-fixed grip/aim relationship; a LATER capture on the same
+runtime was fine). That finding was about the RELATIVE grip/aim
+relationship across many samples, not aim pose's own absolute quality in
+general — and this feature uses aim pose directly, not derived from grip
+— but it's not proven reliable for this exact use yet either. If yaw/pitch
+come back scrambled or erratic (as opposed to a clean, describable
+offset) after this change, aim-pose unreliability on the current runtime
+is the next thing to suspect, not another correction attempt.
+
+**Built successfully** (RelWithDebInfo) — `vr_link_visibility.hpp`,
+`vr_main.hpp`/`.cpp` recompiled, clean link, no new warnings.
+
+**ROUND 2 in-headset result: axis confusion fully gone, plain inverted
+pitch left — fixed, built, NOT yet re-tested.** User confirmed: "The axis
+are right but pitch is inverted." The aim-pose switch fully resolved the
+axis-mixing symptom (yaw/pitch each now respond only to their own
+physical motion) — leaving just a clean sign flip, unlike round 1's
+rejected pitch negation (which was discarded specifically because it was
+riding on top of a confirmed-wrong source vector, not because negation
+itself was the wrong idea). Negated `g_controllerAimPitchS` in
+`vr_main.cpp`. This is exactly the class of fix a plain sign flip IS
+capable of — the "don't fix axis-mixing with a uniform correction" lesson
+was never an objection to sign flips in general, only to using one to
+paper over a wrong source.
+
+**Built successfully** (RelWithDebInfo) — only `vr_main.cpp` recompiled,
+clean link, no new warnings.
+
+**CONFIRMED FIXED IN-HEADSET** — user tested and reported "pitch is fixed
+now, aim dot tracks too." Yaw, pitch, and the world-space aim dot (earlier
+section, reads the same `mSight`/`checkSightLine()` result this feature
+now drives) all confirmed correct together. **This closes out the
+controller-pointing aim feature.**
+
+Worth remembering as a reusable lesson alongside section 12's original
+one: the axis-confusion symptom ("yawing swapped pitch/roll") was
+correctly diagnosed from a single in-headset report, without needing to
+build and test a doomed fix first — the fix that was written and
+discarded before ever reaching the headset (a uniform angle-space
+correction) would have failed for the same provable reason section 12's
+"column swap" lesson already covers. Recognizing the SAME underlying
+class of symptom is what made this a same-day fix instead of another
+multi-round saga like section 12's original hand-rotation calibration.
+The actual fix (switching source from grip pose + mesh calibration to
+OpenXR's own aim pose) took one round once framed correctly; the final
+pitch sign flip took one more, and was safe specifically because it was
+applied on top of an already axis-clean source, not a substitute for
+fixing the source.
+
 ## Key lesson learned this session
 
 Don't infer that an uncommitted fix supersedes a nearby disable guard just

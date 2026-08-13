@@ -262,6 +262,21 @@ float getSmoothTurnYawRad();
 // relationship to where the player's head is actually turned in VR.
 s16 getHeadMoveAngleS();
 
+// Real right-controller-pointing aim yaw/pitch (same s16 BAMS unit as
+// daAlink_c::shape_angle.y / mBodyAngle.x), for first-person item aiming
+// (bow/slingshot/hookshot/boomerang, all funneling through
+// daAlink_c::setBodyAngleToCamera() -- see that function's own VR branch,
+// d_a_alink_link.inc) to follow the real controller's pointing direction
+// instead of stick/gyro/mouse deltas. Computed once per frame in tick(),
+// same pattern as getHeadMoveAngleS() above (0/0 before the first frame or
+// outside VR -- callers already gate on isRenderingToHeadset() plus the
+// game's own aim-context check, so a stale zero here is harmless when
+// unused). See vr_link::computeControllerAimForward()'s own comment
+// (vr_link_visibility.hpp) for why the RIGHT hand is used unconditionally
+// and why this sources from OpenXR's own aim pose rather than the tracked
+// hand mesh's grip-based calibration.
+void getControllerAimAngles(s16* outYawS, s16* outPitchS);
+
 // Runs the first half of one VR frame: xrWaitFrame/xrBeginFrame, per-eye
 // render (including the fpcM_DrawIterater/cAPIGph_Painter draw call), and
 // encodes (but does not yet submit) the eye-texture copy for each eye.

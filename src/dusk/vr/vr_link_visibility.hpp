@@ -530,6 +530,81 @@ inline void buildHandMtx(
 }
 
 // ---------------------------------------------------------------------------
+// Controller-pointing aim direction ("point where you want it to go")
+//
+// Goal (explicit user request): first-person item aiming (bow, slingshot,
+// hookshot, boomerang -- everything that funnels through
+// daAlink_c::setBodyAngleToCamera(), d_a_alink_link.inc, the same function
+// gyro/mouse/touch aim already hook into) should follow the real RIGHT
+// controller's pointing direction, not stick/gyro/mouse deltas -- point the
+// controller where you want the shot to go, the way a real bow/slingshot/
+// hookshot/boomerang throw would work. Right hand chosen unconditionally
+// (explicit user choice) regardless of which hand the 3D item model happens
+// to render in for a given item -- simpler and more predictable than
+// tracking each item's own (sometimes switchable, e.g. checkBowGrabLeftHand())
+// hand assignment.
+//
+// FIRST VERSION (reverted) reused buildHandMtx()'s right-hand mesh-forward
+// calibration (applyStaticCorrection(right_hand_cal::kLocalForward), rotated
+// by the grip quaternion). Real in-headset test found it off by a FIXED
+// 90 degrees in yaw AND, more tellingly, physically yawing the controller
+// made pitch/roll appear to swap -- direct evidence the underlying vector
+// isn't correctly axis-aligned with the physical pointing direction at all
+// (right_hand_cal's "forward" was calibrated for how the MESH should
+// visually look holding a sword, section 12, never verified as "the
+// direction a player naturally points this controller to aim"). A follow-up
+// fixed-angle-space correction (subtract 90 degrees from yaw, negate pitch)
+// was tried and also rejected without even reaching the headset: per this
+// project's own hard-won lesson (CLAUDE.md, "don't attempt a column swap to
+// fix an axis-confusion symptom -- provably cannot work", full algebraic
+// proof in CLAUDE.md section 12) a UNIFORM correction -- whether a matrix
+// column swap or a constant angle offset -- cannot change which physical
+// rotation axis (yaw/pitch/roll) feeds which computed output; it can only
+// shift the resting orientation. The "pitch/roll swapped" symptom is
+// exactly what that lesson predicts for a wrong SOURCE vector, so patching
+// the angle output further was the wrong class of fix.
+//
+// CURRENT VERSION: uses OpenXR's own AIM POSE directly instead of deriving
+// from the grip/mesh calibration at all -- aim pose is spec-defined
+// specifically as "the direction the user would point the controller to
+// indicate a target" (local -Z axis), computed by the runtime from the
+// controller's own tracked geometry, not from anything this app assumes
+// about mesh orientation. This sidesteps the whole "which mesh-calibrated
+// local axis is really the pointing direction" question by not depending on
+// right_hand_cal/applyStaticCorrection at all. Local -Z convention and the
+// rotateVecByQuat()-direct approach both mirror
+// vr_stereo_render.hpp's computeHeadWorldForward() (the HMD's own already-
+// proven-correct forward direction, confirmed via working VR movement
+// direction) exactly, rather than inventing a new convention.
+//
+// Known risk, accepted for now: aim pose was found to be runtime-
+// dependently unreliable in THIS project once before (CLAUDE.md section 12,
+// "aim pose data itself is broken on whatever runtime this was tested on")
+// -- but that finding was about the RELATIVE offset between grip and aim
+// pose staying constant across many samples in one specific capture; a
+// LATER capture on the SAME runtime showed aim pose behaving as a proper,
+// physically meaningful fixed local-frame offset from grip. Used directly
+// here (not derived FROM grip at all), so that specific failure mode
+// doesn't apply the same way -- but this hasn't been proven reliable for
+// this exact use yet either; worth a real in-headset test before trusting
+// it as the final answer.
+//
+// Returns a world-space (game-world-convention, matching buildHandMtx()'s
+// position math and computeHeadWorldForward()'s own convention -- no axis
+// flip needed) direction vector, NOT an angle -- callers convert to this
+// engine's s16 BAMS yaw/pitch themselves via cM_atan2s(), same reasoning as
+// computeHeadWorldForward() (keeps this coordinate-math file free of an
+// engine-specific angle convention).
+inline Vec3f computeControllerAimForward(const XrPosef& rightAimPoseXR, float yawRad) {
+    const XrQuaternionf q = dusk::vr::rotateYawQuat(rightAimPoseXR.orientation, yawRad);
+    // OpenXR spec: aim pose's own local -Z axis is "the direction the user
+    // would point the controller to indicate a target" -- same local
+    // forward convention computeHeadWorldForward() already uses for the HMD.
+    constexpr Vec3f kAimPoseForwardLocal{0.f, 0.f, -1.f};
+    return rotateVecByQuat(q.x, q.y, q.z, q.w, kAimPoseForwardLocal);
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 

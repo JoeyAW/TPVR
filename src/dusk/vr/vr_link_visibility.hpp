@@ -2200,12 +2200,39 @@ inline bool s_coreAnchorCalibrated = false;
 //     out-of-range case (unexpected rig/scale) doesn't retry forever stuck
 //     on the placeholder default -- past that many attempts, accept
 //     whatever the latest sample is rather than never calibrating at all.
+//
+// WIDENED 2026-08-14 (user report: "the camera still sometimes goes on the
+// ground in ordon village", specifically walking INTO the village -- a
+// room-transition event, not a shop door or a mount/dismount, and the
+// camera stayed stuck rather than self-correcting, matching this same
+// calibrate-once-and-hold-forever failure shape). A single plausible
+// sample one tick after reactivation was enough for a shop doorway
+// (small, fast transition) but is not a strong enough defense for a
+// bigger/slower one like entering a village -- current.pos and
+// getSubjectEyePos() can each individually land inside the 20-100
+// plausible band while still disagreeing with each other, e.g. mid-load
+// with current.pos already at the new area's spawn point but the animated
+// eye joint still one or two ticks behind (or vice versa), by coincidence
+// producing a "plausible" but wrong gap that then gets held for the rest
+// of the session -- exactly the "next lever" this fix's own 2026-08-13
+// comment already flagged: require several CONSECUTIVE plausible samples,
+// not just one, before trusting the transition has actually settled.
 inline bool s_coreAnchorActivationTickKnown = false;
 inline uint64_t s_coreAnchorActivationSimTick = 0;
 inline uint64_t s_coreAnchorLastAttemptSimTick = 0;
 inline int s_coreAnchorCalibrationAttempts = 0;
+inline int s_coreAnchorConsecutivePlausible = 0;
+inline float s_coreAnchorLastPlausibleCandidate = 0.0f;
 inline constexpr float kCoreAnchorHeightOffsetPlausibleMin = 20.0f;
 inline constexpr float kCoreAnchorHeightOffsetPlausibleMax = 100.0f;
+// How much a new plausible sample is allowed to differ from the previous
+// plausible one and still count as part of the same consecutive run --
+// distinguishes "still settling, jumping around within the plausible
+// band" from "genuinely steady." 5 units (~2in) is comfortably tighter
+// than ordinary per-tick head/root jitter while standing still, but loose
+// enough not to reject legitimate small posture drift between ticks.
+inline constexpr float kCoreAnchorConsecutiveTolerance = 5.0f;
+inline constexpr int kCoreAnchorRequiredConsecutivePlausible = 3;
 inline constexpr int kCoreAnchorCalibrationMaxAttempts = 30;  // ~1s at 30Hz sim tick
 
 // ADDED 2026-08-09 (user report, after testing the core-anchor change
@@ -2252,7 +2279,26 @@ inline cXyz computeRawCoreAnchoredEye(daAlink_c* link) {
             const float candidate = realEye.y - link->current.pos.y;
             const bool plausible = candidate >= kCoreAnchorHeightOffsetPlausibleMin &&
                                     candidate <= kCoreAnchorHeightOffsetPlausibleMax;
-            if (plausible || s_coreAnchorCalibrationAttempts >= kCoreAnchorCalibrationMaxAttempts) {
+            const bool consistentWithLastPlausible =
+                s_coreAnchorConsecutivePlausible == 0 ||
+                std::fabs(candidate - s_coreAnchorLastPlausibleCandidate) <=
+                    kCoreAnchorConsecutiveTolerance;
+            if (plausible && consistentWithLastPlausible) {
+                ++s_coreAnchorConsecutivePlausible;
+                s_coreAnchorLastPlausibleCandidate = candidate;
+            } else {
+                // Either outside the plausible band, or plausible but a
+                // meaningfully different value than the last plausible
+                // sample (still settling) -- restart the consecutive-run
+                // count from this sample rather than from zero, so a
+                // transition that's still moving but always lands
+                // "plausible" doesn't get stuck never accumulating a run.
+                s_coreAnchorConsecutivePlausible = plausible ? 1 : 0;
+                s_coreAnchorLastPlausibleCandidate = candidate;
+            }
+            const bool settled =
+                s_coreAnchorConsecutivePlausible >= kCoreAnchorRequiredConsecutivePlausible;
+            if (settled || s_coreAnchorCalibrationAttempts >= kCoreAnchorCalibrationMaxAttempts) {
                 s_coreAnchorHeightOffset = candidate;
                 s_coreAnchorCalibrated = true;
             }
@@ -2547,6 +2593,7 @@ inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye) {
         detail::s_coreAnchorCalibrated = false;
         detail::s_coreAnchorActivationTickKnown = false;
         detail::s_coreAnchorCalibrationAttempts = 0;
+        detail::s_coreAnchorConsecutivePlausible = 0;
         return fallbackEye;
     }
 

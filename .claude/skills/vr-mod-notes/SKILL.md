@@ -7354,6 +7354,56 @@ just one) is the natural next lever if a slower transition than a shop
 door ever exposes the same class of bug again, per exactly
 how long the settle window needs to be.
 
+### Camera-anchor calibration — settle window widened for slower transitions (Ordon Village entry) — CONFIRMED FIXED IN-HEADSET 2026-08-14
+
+**Follow-up report, same bug class**: "the camera still sometimes goes on
+the ground in ordon village." Asked the user to narrow it down rather
+than guessing again: trigger was **walking into Ordon Village** (a
+room-transition, not a shop door, mount/dismount, or dialogue), and the
+camera **stayed stuck** rather than self-correcting — the same
+persistent-bad-calibration shape as the 2026-08-13 fix, just from a
+transition that fix's single-sample settle window didn't anticipate. This
+is exactly the "next lever" that fix's own writeup already named in
+advance (see immediately above): a bigger/slower transition than a shop
+doorway can still land the required ONE post-reactivation sample on a
+still-mid-load moment that happens to fall inside the 20-100 plausible
+band by coincidence — current.pos already at the new area's spawn point
+while the animated eye joint is still a tick or two behind (or vice
+versa) — locking in a "plausible but wrong" gap that then never gets
+re-evaluated (calibration only re-runs on the next `isFirstPerson()`
+false→true transition).
+
+**Fix** (`vr_link_visibility.hpp`'s `computeRawCoreAnchoredEye()`):
+requires `kCoreAnchorRequiredConsecutivePlausible` (3) CONSECUTIVE
+plausible samples, each within `kCoreAnchorConsecutiveTolerance` (5
+units, ~2in) of the previous plausible one, before locking in — not just
+one. A sample outside the plausible band resets the run to 0; a plausible
+sample that's meaningfully different from the last plausible one (still
+settling, just happens to stay inside the band) restarts the run at 1
+rather than continuing to accumulate, so a transition that keeps landing
+"plausible" but keeps moving can't falsely satisfy the requirement. The
+existing `kCoreAnchorCalibrationMaxAttempts` (30, ~1s) fallback is
+unchanged — past that many attempts, whatever the latest sample is gets
+accepted regardless of the consecutive-run state, same as before, so a
+genuinely slow/never-settling case still can't stall calibration forever.
+Reset alongside the other calibration state (`s_coreAnchorConsecutivePlausible`
+added to `getVrCameraEyeAnchor()`'s existing `!isFirstPerson()` reset
+block) so each new activation gets its own fresh run count.
+
+**Built successfully** (RelWithDebInfo) — only `vr_main.cpp` needed
+recompiling (transitively includes the header), clean link, no new
+warnings.
+
+**CONFIRMED FIXED IN-HEADSET** — user tested (walking into Ordon Village,
+the original repro) and reported "Fixed." Terse but unambiguous, matching
+the direct, specific repro that was confirmed before the fix. Requiring 3
+consecutive plausible-and-consistent samples instead of 1 was sufficient
+for this transition. If a still-slower transition ever exposes the same
+class of bug again, `kCoreAnchorRequiredConsecutivePlausible`/
+`kCoreAnchorConsecutiveTolerance` (`vr_link_visibility.hpp`) are the
+constants to retune next — but get a specific repro first, same as this
+round, rather than retuning blind.
+
 ### Epona dash speed-blur effect — CONFIRMED WORKING IN-HEADSET 2026-08-14
 
 **Goal** (explicit user request: "disable the epona speed effect"). User
@@ -7409,7 +7459,7 @@ recompiling, clean link, no new warnings.
 gone." No regressions to flatscreen or the other `StartBlure()` triggers
 reported.
 
-### Epona camera pulled back ~1ft + raised ~6in, was phasing through her head — built 2026-08-14, NOT yet confirmed in-headset
+### Epona camera pulled back ~1ft + raised ~6in, was phasing through her head — CONFIRMED FIXED IN-HEADSET 2026-08-14
 
 **Goal** (explicit user follow-up, same horse-riding session as the
 speed-blur fix above: "can you move the camera backwards by about a foot
@@ -7464,14 +7514,12 @@ separately-dated comment block on the same few lines.
 recompiling (transitively includes the header), clean link, no new
 warnings.
 
-**NOT yet tested in-headset** (the up-nudge specifically — the backward
-pull is separately confirmed per Round 1 above). Next step for whoever
-picks this up: mount Epona in VR and confirm the camera now sits at a
-comfortable height AND distance clear of her head/neck. If either amount
-needs retuning, `kHorseCameraBackUnits`/`kHorseCameraUpUnits` are the two
-independent constants to adjust — same "ship a named, empirically-tunable
-constant" pattern this file uses everywhere else (e.g.
-`kCoreAnchorExtraUpUnits`/`kEyeAnchorExtrapolationGain`).
+**CONFIRMED FIXED IN-HEADSET** — user tested the up-nudge and reported
+"Fixed," a terse but clear pass with no follow-up amount requested. Both
+axes (1ft back, 6in up — `kHorseCameraBackUnits`/`kHorseCameraUpUnits`)
+are done at these values; retune only on new feedback, per this file's
+usual convention for tuned-and-confirmed constants (e.g. section 23's own
+3in-up/6in-forward standing-camera nudge).
 
 ## Key lesson learned this session
 

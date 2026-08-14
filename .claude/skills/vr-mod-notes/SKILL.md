@@ -2568,7 +2568,7 @@ current state is the table below.
 | Left trigger | Analog L — unchanged |
 | Right trigger | **Y** (was analog R/raise shield) |
 | Right squeeze/grip | **X** (was Z) |
-| Left squeeze/grip | unbound — unchanged |
+| Left squeeze/grip | **Analog R / raise shield** (2026-08-13, see UPDATE below — was unbound) |
 | Right A button | A (context action) — unchanged |
 | Right B button | B (attack) — unchanged |
 | Left X button | **D-pad left** (was X) |
@@ -2577,7 +2577,6 @@ current state is the table below.
 | Right stick click | Start (pause) — unchanged |
 | Left stick click | **Z** (was D-pad right, from the update directly above — that assignment lasted less than a day) |
 | — | **D-pad right — unbound** (nothing currently maps to it, now that left stick click moved to Z) |
-| — | **Analog R / raise shield — unbound** (nothing currently maps to it, now that right trigger moved to Y) |
 
 Implementation: `vr_main.cpp`'s `tick()` — `leftXHeld`/`leftYHeld` now OR
 into `PAD_BUTTON_LEFT`/`PAD_BUTTON_UP` instead of `PAD_BUTTON_X`/
@@ -2602,6 +2601,27 @@ swing-gesture infrastructure from this same section's
 out per user request) — worth checking whether that detector (or the same
 general approach) is reusable for a shield-raise gesture too, rather than
 building physical-motion detection from scratch.
+
+**UPDATE 2026-08-13 — R bound to the left controller's squeeze/grip
+instead, superseding the gesture idea above (simpler request, no gesture
+detector needed).** Per explicit user request ("bind R to the squeeze
+button on the left controller"): `g_squeezeValueAction` already had both
+hands' subaction paths bound in `vr_xr_bootstrap.hpp` (declared "both
+hands" from the start, only the right side was ever actually read) — no
+bootstrap changes needed, just a second `getFloatAction(g_squeezeValueAction,
+g_leftHandPath)` read in `tick()`. Mirrors left trigger's existing
+analog-L pattern (continuous 0-255 value written to `padStatus.triggerRight`
+alongside the `PAD_TRIGGER_R` bit, gated on the same low `kTriggerDeadzone`)
+rather than X's binary squeeze-threshold gate — raising the shield seemed
+like the kind of thing that plausibly wants an analog feel the way L's
+aiming does, not just on/off. `wantsVirtualPad`'s OR-chain already checked
+`padStatus.triggerRight != 0` (a leftover from before the 2026-08-04 remap
+above unbound R) so no change was needed there. Built successfully
+(RelWithDebInfo, clean, only `vr_main.cpp` recompiled). **CONFIRMED WORKING
+IN-HEADSET** — user tested and reported "It works." Closes out this
+binding; the earlier "replace R with a gesture" idea stays superseded/
+unbuilt (`g_rightSwing`/`vr_swing_detector.hpp` still sit ready if a future
+request wants a gesture again).
 
 **UPDATE 2026-08-05 — left-hand swing-to-attack wired up (the deferred
 right-hand version above stays deferred/unused), built, NOT yet tested
@@ -2701,14 +2721,168 @@ hit a DIFFERENT file. Fixed the same way: restored the line, rebuilt, did
 not investigate further. Worth broadening the CLAUDE.md guidance on this
 if it recurs in a third file — it may not be specific to `common.cpp`.
 
-**NOT yet tested in-headset** with round 3's values — next step for
-whoever picks this up: repeat the neutral-movement + real-swing capture
-one more time (or just play normally) and confirm both (a) no spurious
-attack during ordinary movement/turning, and (b) real swings register
-without needing near-maximum effort. If the perceived-swing-count-vs-
-trigger-count gap from finding 2 persists, that's the point to
-investigate Link's attack-animation gating directly rather than tuning
-the detector further.
+**ROUND 4 (2026-08-13) — round 3 tested, user reported "missed swings (real
+swings don't register)". Real capture analyzed (227 samples), root cause
+found, built, NOT yet retested in-headset.**
+
+The 227-sample capture ruled out `triggerSpeed` immediately: the vast
+majority of samples with speed well above `2.2` m/s — dozens of them, many
+in the 3-7+ m/s range — simply never triggered. Cross-checked against
+`SwingDetector::update()`'s actual logic (`vr_swing_detector.hpp`) rather
+than guessing: `canFire_` only resets once speed drops to AT OR BELOW
+`resetSpeed` — a hard one-shot re-arm gate, not a decaying window. During
+real continuous swinging, hand speed rarely dips all the way down between
+individual swings, so round 3's `resetSpeed=0.7` left the detector stuck
+not-armed through most of a multi-swing flurry — directly confirmed in the
+capture (one stretch: a real trigger at 2.48 m/s, then six consecutive
+high-speed samples up to 6.4 m/s all logged `TRIGGERED=0`, before it
+finally re-armed roughly 650ms later). This is the opposite failure mode
+from round 2's "one continuous swing double-counts" concern that motivated
+raising `resetSpeed` in the first place — but `cooldownSec` (a hard TIME
+lockout, independent of velocity) already covers that same concern on its
+own, so lowering `resetSpeed` back down doesn't reopen the double-count
+problem it was raised to fix.
+
+**Fix**: `resetSpeed` 0.7 → **0.4** (matching round 1's original value,
+now re-derived from evidence rather than the original blind guess).
+`triggerSpeed`/`minSwingDistance`/`cooldownSec` left untouched — no
+evidence in this capture that any of them are currently a problem
+(neutral-movement speed stayed comfortably under ~1.1 m/s against the 2.2
+m/s trigger).
+
+**Bonus fix from the same capture**: its very last sample logged a
+one-frame `31.6` m/s spike (a tracking-glitch teleport — position jumped
+0.6m in ~19ms — roughly 4x any genuine swing peak seen across every
+capture so far) that fired a trigger under the old logic. Added
+`SwingDetector::maxPlausibleSpeed` (default `15.0f` m/s, generous headroom
+above any real swing observed) — `aboveTrigger` now also requires
+`speed <= maxPlausibleSpeed`, so an implausible teleport-speed frame can't
+fire a false attack. Generic, in the shared header, so it also protects
+`g_rightSwing` if that's ever revived.
+
+Built successfully (RelWithDebInfo) — `vr_main.cpp` and
+`vr_swing_detector.hpp` recompiled, clean link, no new warnings.
+
+**ROUND 4 RESULT**: user tested and reported "responds to the first
+swing sometimes, but if I swing it fast left and right it doesn't
+react" — a fresh 375-line `[dusk::vr::swingdiag]` capture confirmed
+round 4's fix worked as intended: triggers now fire steadily and
+frequently throughout continuous swinging (no more multi-hundred-ms
+stuck gaps), and the new `maxPlausibleSpeed` ceiling correctly rejected
+a real 21-26 m/s tracking-glitch spike. So the DETECTOR was no longer
+the bottleneck — the gap was downstream of it.
+
+**First theory (asked, REJECTED by the user with a decisive
+counter-argument)**: guessed Link's own attack-animation lock (can't
+start a new swing mid-recovery, same as mashing the real B button). User
+correctly pointed out mashing the REAL controller button DOES attack
+repeatedly, so if the animation lock were the cause, real button-mashing
+would show the same symptom — it doesn't, so this wasn't it. **Lesson**:
+when a plausible-sounding theory gets a specific, falsifiable
+counter-example from the user, that's real evidence, not just pushback —
+re-derive from the mechanics instead of defending the guess.
+
+**ACTUAL ROOT CAUSE, found by re-reading this file's own already-written
+"KNOWN LATENCY" comment (near the `wantsVirtualPad` block) with fresh
+eyes**: `mDoCPd_c::read()` — the real game-logic button read — runs on
+the ~30Hz SIM-TICK loop, BEFORE `dusk::vr::tick()` (this function) even
+runs that frame. A REAL held button stays "on" across MANY real frames
+(the physical trigger/click is genuinely held down), so some sim tick is
+guaranteed to see it during that hold. `leftSwingEvent.triggered`,
+however, is a genuine ONE-FRAME pulse by design (the detector fires it
+for exactly one `update()` call) — and was being OR'd into
+`PAD_BUTTON_B` for exactly that one real frame (~15-20ms at this
+project's typical VR framerate), which is SHORTER than the ~33ms gap
+between sim-tick reads. A one-frame pulse has a real, independent chance
+of landing entirely in the dead zone between two sim-tick samples and
+never being read at all — explaining both "sometimes the first one
+lands" (luck of frame alignment) and "repeated fast swings don't" (each
+swing's pulse separately rolls the same bad odds, and bad luck compounds
+across several in a row).
+
+**Fix** (`vr_main.cpp`): a `s_leftSwingButtonHoldRemaining` timer (real
+wall-clock seconds, decremented by `pacing.presentation_dt_seconds` each
+frame) latches `PAD_BUTTON_B` "held" for `kSwingButtonHoldSec = 0.1`
+(100ms) after `leftSwingEvent.triggered`, instead of OR'ing the raw
+one-frame edge directly. 100ms is ~3x a 30Hz sim-tick period — comfortable
+margin for at least one (usually several) sim-tick reads to catch it,
+while still reading as instantaneous to the player, the same way a real
+quick button tap already produces a many-real-frame-long physical "held"
+signal rather than a true single-frame one. The `[dusk::vr::swingdiag]`
+log still reports the raw `leftSwingEvent.triggered` edge (unchanged) —
+only the actual `PAD_BUTTON_B` feed changed.
+
+Built successfully (RelWithDebInfo) — only `vr_main.cpp` recompiled,
+clean link, no new warnings.
+
+**Round 5 tested — user report: "Seems maybe a bit better but still, if I
+spam swing it left and right it doesn't react. Like I'll swing it back
+and forth really fast and link will just stand there after one swing."**
+A hard stall after the first swing (not a probabilistic miss) — a
+different, more specific symptom than round 4's, worth its own diagnosis
+rather than another guess.
+
+**User asked specifically about the cooldown** (explained what
+`cooldownSec` does — a flat time floor between triggers, separate from
+`resetSpeed`'s speed-based hysteresis) and asked to try disabling it
+(`cooldownSec` 0.15 → 0.0). Built, tested — only marginal improvement,
+confirming `cooldownSec` was never the dominant blocker for this specific
+symptom.
+
+**Round 6 — actual root cause found by re-reading `SwingDetector::update()`
+with the "stand there after one swing" framing in mind**: `resetSpeed`'s
+re-arm condition (`canFire_` only resets `true` once scalar `speed` drops
+to or below `resetSpeed`) implicitly assumes a real pause/deceleration
+between swings. But `speed` is `dist/dt` — a scalar MAGNITUDE, not a
+directional quantity. A fast, tight, CONTINUOUS back-and-forth flick can
+keep that magnitude elevated the entire time even though the DIRECTION
+reverses at each end — the hand never actually slows down, it just
+changes which way it's going. For that motion, `canFire_` can get stuck
+`false` indefinitely after the first trigger, exactly matching "just
+stands there after one swing" (a hard stall, not bad luck) — and this is
+a structurally different, worse case than round 4's fix addressed
+(round 4's `resetSpeed=0.4` still assumed speed dips SOME amount between
+swings; a true rapid-spam motion may never dip at all).
+
+**Fix** (`vr_swing_detector.hpp`): added a SECOND, independent re-arm
+signal based on DIRECTION reversal rather than speed magnitude. Each
+trigger now records its own motion vector (`lastFireDelta_`, unnormalized
+— sign of a dot product doesn't need normalization to detect "pointing
+substantially the opposite way"). On every subsequent frame, if the
+current frame's motion delta has a NEGATIVE dot product against
+`lastFireDelta_` (moving in a substantially different/opposite direction
+than the motion that produced the last trigger), `canFire_` re-arms
+immediately — regardless of whether scalar speed ever dropped.
+`resetSpeed`'s existing speed-based re-arm is left completely intact
+(untouched code path) — the two conditions now OR together, so either a
+real speed dip (a normal, unhurried swing) OR a direction reversal (a
+fast continuous flick) can re-arm the detector. The actual trigger's own
+speed/distance/cooldown checks are unchanged and still gate whether a
+re-arm actually produces a new event, so this doesn't loosen anything
+about what counts as "fast enough" to be a swing — it only fixes when the
+detector is ALLOWED to consider firing again.
+
+Built successfully (RelWithDebInfo) — `vr_main.cpp` and
+`vr_swing_detector.hpp` recompiled, clean link, no new warnings.
+
+**CONFIRMED FIXED IN-HEADSET** — user tested and reported "Sooooooo much
+more responsive, sword works now." Closes out the whole swing-detector
+saga (rounds 1-6): the detector's own tuning (round 4's `resetSpeed`
+fix), the button-delivery timing (the 100ms `PAD_BUTTON_B` latch, same
+session), and the direction-reversal re-arm (round 6) were three genuinely
+separate, real bugs, not three guesses at the same one — each was found
+by taking a specific user-reported symptom seriously and re-deriving from
+the actual code/data rather than retuning a number blindly, including one
+case (the animation-lock theory) where the user's own counter-argument
+correctly overturned a plausible-sounding guess before it was ever coded.
+
+`cooldownSec` is currently `0.0` (round 5, disabled to rule it out as the
+round-5 blocker). Left at 0.0 for now since the user hasn't reported
+attacks firing uncomfortably often — if rapid spam ever starts feeling
+too spammy, a small nonzero value (e.g. 0.05-0.1) can be reintroduced
+without risk of reintroducing the round-6 stall, since the two fixes are
+independent (direction-reversal re-arms `canFire_`; `cooldownSec` is a
+separate, independent time gate checked alongside it).
 
 ### 14. Stereo eyes misalign at large head yaw ("left/right eyes look swapped" near 90°) — CONFIRMED FIXED IN-HEADSET 2026-08-05 (first fix attempt regressed and was reverted first — read in full before touching this again)
 
@@ -6560,6 +6734,37 @@ color as requested. Ball-and-chain has no applicable concept of an aim
 point; fishing rod's cast remains a known, explicitly-declined gap, not
 an oversight, should anyone ask about it again later.
 
+**UPDATE 2026-08-13 — Dominion Rod ("Copy Rod" internally,
+`d_a_alink_copyrod.inc`/`dItemNo_COPY_ROD_e`) CONFIRMED WORKING IN-HEADSET
+with zero new code.** User
+asked to "add a crosshair for the rod and ball" — clarified via question:
+"rod" meant the Dominion Rod specifically (not the fishing rod, which
+stays explicitly out of scope per the paragraph above), and "ball"
+(ball-and-chain) was confirmed to have no aim concept and was dropped
+from scope, same conclusion as the paragraph above already reached
+independently.
+
+Traced the Dominion Rod's own aim code before writing anything:
+`daAlink_c::procCopyRodSubject()` (`d_a_alink_copyrod.inc:281`) calls
+`setBodyAngleToCamera()` — the SAME shared aim-input function this
+session's controller-pointing-aim feature already made VR-aware, not
+item-specific — and if that returns true, calls `setCopyRodSight()`
+(line 252), which runs `checkSightLine(getCopyRodBallDisMax(), &sight_pos)`
+and writes into `mSight` via `mSight.setPos()`/`mSight.onDrawFlg()` —
+**unconditionally**, unlike bow's known flatscreen draw-flag bug that
+needed a fallback in `getAimSightVisible()`. Since the VR crosshair draw
+call (`vr_main.cpp`'s per-eye loop) is item-agnostic — it only checks
+`link->getAimSightVisible()`/`getLineTopPosP()`, never which item is
+equipped — the Dominion Rod should already show the crosshair the same
+way bow/slingshot/hookshot/boomerang do, with no code changes at all.
+
+No code was written for this — the existing item-agnostic crosshair
+mechanism just worked once `mSight` was being driven correctly, exactly
+as traced. User tested and confirmed "It works." Closes out this
+follow-up; the aim-point marker feature's scope is now bow, slingshot,
+hookshot, boomerang, and Dominion Rod — all five sharing the same
+`mSight`/`checkSightLine()` mechanism, all confirmed in-headset.
+
 ### Controller-pointing item aim ("aim with the controllers and where you point them") — CONFIRMED WORKING IN-HEADSET 2026-08-12
 
 **Goal** (explicit user request): first-person item aiming (bow, slingshot,
@@ -6726,6 +6931,428 @@ OpenXR's own aim pose) took one round once framed correctly; the final
 pitch sign flip took one more, and was safe specifically because it was
 applied on top of an already axis-clean source, not a substitute for
 fixing the source.
+
+### Lantern (Kantera) VR physics/tracking — swing physics, glow halo, AND flame particle position ALL CONFIRMED FIXED (flame particle resolved 2026-08-13, see the box after part 3 below)
+
+**User request, three parts, tackled in order**: (1) "lantern physics are
+spazzing out when I hold it" — swing-simulation instability; (2) once
+fixed, "the flame is where the original position is" — a supplementary
+glow-halo mesh not tracking; (3) still open — the ACTUAL flame particle
+VFX still doesn't track the tracked/held lantern at all. **User paused
+here for the night ("finish it tomorrow") mid-round-2 of part 3** — read
+this box before touching kantera/lantern code again.
+
+**Part 1 — CONFIRMED FIXED.** `daAlink_c::kandelaarModelCallBack()`
+(`d_a_alink_kandelaar.inc`) is a spring/lag flame-SWING simulation
+(`field_0x3618`'s `*0.9` decay term), tuned for this game's original
+~30Hz call rate. This session's earlier held-item live-refresh work
+(`refreshTrackedHeldItemMtxLive()`) made `mpKanteraModel`'s `calc()` (and
+therefore this joint callback) run at real VR framerate (72-90Hz)
+instead, fed by real, high-frequency/-amplitude controller motion instead
+of smooth capped animation — destabilizing the simulation. **Fix**: while
+`isRenderingToHeadset()`, force the computed swing angles (`var_r28`/
+`var_r27`) to zero — position/yaw tracking (`sp44`, `var_r29`) untouched,
+so the lantern still tracks correctly, it just never tilts/springs.
+User-confirmed stable in-headset.
+
+**Part 2 — CONFIRMED FIXED.** `mpKanteraGlowModel` (a supplementary soft
+light-halo mesh, separate from the lantern body) had its own base
+transform set from `mKandelaarFlamePos` ONLY inside `setItemMatrix()`'s
+once-per-sim-tick legacy block (`d_a_alink.cpp`) — never touched by the
+VR live-refresh, so it stayed visually stuck once the lantern body itself
+started tracking at real framerate. **Fix**: `refreshTrackedHeldItemMtxLive()`'s
+kantera block (`vr_link_visibility.hpp`) now also copies the (already
+correctly live-tracked, thanks to part 1's calc()-triggered callback)
+`mKandelaarFlamePos` into `glowModel`'s own base transform every real
+frame, `calc()`s it, and `markModelJointsLive()`s it — same shape as
+every other held-item live-refresh this session. New public accessors
+added for this: `daAlink_c::getKanteraGlowModel()`,
+`getKandelaarFlamePosRaw()` (`d_a_alink.h`). User-confirmed: "it's lit
+up."
+
+**Part 3 — NOT FIXED, two rounds in, real progress but not resolved.**
+The user's precise follow-up report clarified the glow-halo fix (part 2)
+was NOT what they meant by "the flame" — the actual flame VFX (what a
+player would call "the flame") is a SEPARATE JPA particle effect
+(`ID_ZI_J_KANTERA_FIRE`/`_SWINGFIRE`), spawned/kept alive by
+`daAlink_c::setLight()` (`d_a_alink.cpp`, called from the same
+once-per-sim-tick legacy update block as `setItemMatrix()`), tracked
+independently via a persistent emitter id (`field_0x31c4`, new accessor
+`getKandelaarParticleId()`).
+
+**Round 1 fix (built, tested, ZERO visible change)**: added a
+`JPABaseEmitter::setGlobalTranslation()` call to the same VR live-refresh
+block, using the (confirmed correct) live `mKandelaarFlamePos`, once per
+real frame. No effect reported at all — not "still laggy," genuinely
+stuck exactly where it was before the fix.
+
+**Diagnostic round (real capture obtained, real findings, ruled things
+IN not just out)**: added throttled `OutputDebugStringA` logging at two
+points — inside `kandelaarModelCallBack()` itself
+(`[dusk::vr::kandelaar]`) and in the VR refresh block
+(`[dusk::vr::kanteradiag]`). A real in-headset capture
+(`C:\Users\joeyw\Downloads\log.txt`) conclusively showed:
+- `attach=1 attached=1` throughout — the tracking branch is engaged.
+- `mKandelaarFlamePos` genuinely tracks `kanteraPos` (the tracked lantern
+  body) in lockstep across the whole capture, including large jumps —
+  **the position DATA is correct**, not the bug.
+- The particle id stabilizes early (`34`→`35`, then constant) with a
+  valid, non-null emitter pointer throughout.
+- So: correct position, correct live emitter, `setGlobalTranslation()`
+  called every real frame with that correct position — and the user
+  STILL sees it stuck. The bug is downstream of position data, in how
+  (or whether) the particle system's actual rendering picks up
+  `setGlobalTranslation()`'s effect.
+
+**Investigated `dPa_control_c::set()` (`d_particle.cpp:1824`, what the
+LEGACY `setLight()` path calls) directly, looking for what it does that
+our fix doesn't**: found it calls `pJVar4->playCalcEmitter()` and
+`pJVar4->playCreateParticle()` on every legacy invocation — LOOKED like
+a real "advance simulation" step our fix might be missing, and was the
+leading theory heading into round 2. **Checked the actual implementation
+in `JPAEmitter.h` before acting on this theory (correctly, this time) --
+both are trivial status-flag clears** (`playCalcEmitter()` just clears
+`JPAEmtrStts_StopCalc`; `playCreateParticle()` clears `JPAEmtrStts_StopEmit`)
+-- NOT a synchronous simulation step. **This theory was NOT acted on** --
+recognized as likely a red herring before writing another blind fix,
+given particle rendering is independently proven to work correctly at
+real VR framerate elsewhere in this project (sections 5/10's whole
+kagerou/heat-wave investigation depends on it).
+
+**Round 2 diagnostic added (built, NOT yet captured — this is where to
+resume)**: `[dusk::vr::flamediag]`, logging the emitter's own status
+flags (`StopCalc`/`StopEmit`/`StopDraw`), live `getParticleNumber()`, and
+a `getGlobalTranslation()` READBACK immediately after our
+`setGlobalTranslation()` call -- to settle, with direct evidence rather
+than more JPA-internals guessing: (a) is this emitter actually
+active/unpaused, (b) does it have any live particles to reposition at
+all (if `particleNum=0` consistently, "the flame" the user sees isn't
+this emitter, and the search needs to widen to some OTHER effect/model
+entirely), (c) does our write to translation actually stick moment-to-moment
+(rules out something else clobbering it same-frame).
+
+**Concrete next step, tomorrow**: launch under the debugger, hold the
+lit lantern, move your hand around, capture a fresh log, and grep for
+`[dusk::vr::flamediag]` (the `[dusk::vr::kandelaar]`/`[dusk::vr::kanteradiag]`
+logs from round 1 are still in the tree too, harmless, still useful for
+cross-referencing position if needed). Branch on what it shows:
+- `particleNum` consistently 0 → wrong emitter entirely; "the flame"
+  visual must be coming from somewhere else (worth re-checking the
+  `checkKandelaarSwingAnime()` swing-variant particle, or reconsidering
+  whether there's a THIRD position source not yet found -- e.g. search
+  for any other `mKandelaarFlamePos` reader, or any other
+  `dComIfGp_particle_set`/`dComIfGp_particle_getEmitter` call anywhere
+  near kantera code that wasn't caught by the earlier
+  `field_0x31c4|Kantera|KANDELAAR|mKandelaarFlamePos` grep of
+  `d_a_alink_effect.inc`).
+- Any `stop*` flag set unexpectedly → found a real pause mechanism to
+  investigate (what sets it, and whether it needs clearing from VR code
+  too).
+- Readback doesn't match what we just wrote → something else really is
+  clobbering it same-frame; check write ordering against `setLight()`'s
+  own legacy call more carefully (may need to confirm which runs LAST
+  each real frame that also happens to coincide with a sim tick).
+- Everything looks correct (unpaused, particles present, readback
+  matches) despite the user still seeing it stuck → the bug is almost
+  certainly in the actual GPU DRAW submission path for this specific
+  particle system not reading live emitter state the way it should, at
+  which point this needs the same tool section 20's saga eventually
+  reached for (a real debugger call stack on the particle draw call, or
+  a RenderDoc capture), not another log round.
+
+**Part 3 — FULLY RESOLVED 2026-08-13 (later session, resumed from the pause
+above). Read this box if picking up flame/particle VR-tracking work again;
+the rounds above are historical trail, not current status.**
+
+Picked up exactly where the pause left off: captured a fresh
+`[dusk::vr::flamediag]` log per the "concrete next step" above. Result:
+`stopCalc=0 stopEmit=0 stopDraw=0`, `particleNum` in the 3-14 range, and
+`readback` exactly matching what `setGlobalTranslation()` had just written
+— i.e. the LAST branch in the pause box's own checklist ("everything looks
+correct... the bug is almost certainly in the actual GPU draw submission
+path"). Rather than reach for a debugger/RenderDoc immediately, cross-
+referenced this capture's `[dusk::vr::jpacalc]` lines (added in an earlier,
+already-in-tree round 3 diagnostic that was never actually analyzed
+carefully before) against the `[dusk::vr::kandelaar]` per-real-frame call
+counter, and found the real root cause directly from that comparison: only
+~10-11 `calcWorkData_c()` calls occur per 30 real VR frames — a clean,
+consistent ~3:1 ratio across the whole capture, i.e. this emitter's ENTIRE
+particle simulation (`JPAResource::calc()`, including the `calc_p()` call
+that applies our tracked position via status `0x20`) runs at ~30Hz sim-tick
+rate, not real VR framerate as an earlier round's diagnostic comment had
+(wrongly) concluded.
+
+**Traced why**: `dComIfGp_particle_calc3D()` (`d_s_play.cpp`, the function
+that runs the ENTIRE particle simulation for every 3D emitter in the game)
+is called from `dScnPly_Draw()` — which, despite its name, is the exact
+same legacy call site section 20's whole hands/body/sword saga already
+root-caused for `daAlink_c::draw()`: reachable only via `fapGm_Execute()`'s
+once-per-sim-tick path, never from the real per-eye VR draw. So the
+status-`0x20` fix from an earlier round could only ever take effect once
+every ~3 real frames — and `mark_live_this_frame()` (also already in
+place) correctly stopped the draw from substituting a stale *interpolated*
+snapshot, but did nothing about the underlying `mPosition` itself only
+being recomputed at 1/3 the real rate. Net effect read as fully "stuck,"
+not just choppy, since short observation windows rarely happened to land
+on one of the ~30Hz refresh moments.
+
+**Fix**: stopped waiting for `calc_p()` to run at all. The VR code now
+writes each alive/child particle's `mOffsetPosition`/`mPosition` directly,
+every real frame — preserving whatever local wobble offset the last real
+`calc_p()` tick gave that particle (`mPosition - mOffsetPosition`, e.g.
+flicker/gravity/velocity drift) but re-rooting it at the fresh tracked
+position. This can't drift out of sync with the eventual real `calc_p()`
+tick either, since that tick computes the identical `mOffsetPosition` from
+`mGlobalTrs` via the same status-`0x20` branch. `setGlobalTranslation()`
+and status `0x20`/`mark_live_this_frame()` were all kept (harmless, still
+correct for whenever a real sim tick does land, and for newly-spawned
+particles).
+
+**CONFIRMED FIXED IN-HEADSET** — user tested and reported "Lantern is
+fixed," after already having confirmed parts 1 (swing physics) and 2 (glow
+halo) in the earlier session. All three parts of this investigation are
+now closed.
+
+**Diagnostic scaffolding removed** (per this project's normal practice, now
+that all three parts are confirmed fixed): `[dusk::vr::kandelaar]`
+(`d_a_alink_kandelaar.inc`, including its now-unneeded `#include <cstdio>`),
+`[dusk::vr::kanteradiag]`/`[dusk::vr::flamediag]` (`vr_link_visibility.hpp`),
+and `[dusk::vr::jpacalc]`/`[dusk::vr::jpadrawfunc]` plus the
+`g_duskVRKanteraFlameEmitterPtr` cross-translation-unit identifier and the
+`jpaDrawFuncName()` helper it fed (`libs/JSystem/src/JParticle/JPAResource.cpp`,
+`vr_main.cpp`, `vr_link_visibility.hpp` — including that file's now-unneeded
+`<cstdio>`/`<windows.h>` includes) have all been removed. Rebuilt clean
+(only `vr_main.cpp` needed recompiling after the JPAResource.cpp/
+d_a_alink_kandelaar.inc changes had already been picked up by an earlier
+build in the same session) — the real fixes (swing-angle zeroing, the glow
+model's per-frame copy, and the direct particle-position rewrite) are all
+still in place.
+
+**Reusable lesson**: an earlier round's diagnostic comment had concluded
+"`calcWorkData_c()` runs at real VR framerate" from a short observation
+window — that conclusion was wrong, and nobody re-checked it against a
+longer, cleaner capture until this session. When a diagnostic log's own
+inline comment asserts a conclusion, treat it as a hypothesis to re-verify
+against fresh data before building further fixes on top of it, the same
+way this project already treats any other unverified assumption — a stale
+"confirmed" comment is just as capable of misleading a future session as
+no comment at all.
+
+### Hookshot/clawshot flight + hanging — camera falls back to first-person (head-joint anchor) — CONFIRMED FIXED IN-HEADSET 2026-08-13
+
+**Goal** (explicit user request: "make the camera first person when you
+are in the air being pulled by the clawshot, and when you are hanging on
+to a clawshot target"). Same underlying gap as swimming/crawling/vine-
+climbing (section 23 and its follow-ups): `isFirstPerson()` already
+permits first-person here on its own — hookshot flight/hanging is not a
+`dEvt_control_c` event (confirmed by reading `d_a_alink_hook.inc` end to
+end: no `event_regist`/camera-mode/demo-actor call anywhere in it), so it
+falls straight through `isFirstPerson()`'s "no event — ordinary gameplay"
+branch. This was never a first/third-person GATING problem — it's the
+same comfort-anchor-CALIBRATION gap the swim/crawl/vine fixes already
+addressed: the core anchor's standing-height offset (section 23) doesn't
+mean anything while Link is horizontal mid-air on the end of a chain, or
+hanging off a wall/ceiling at an odd angle.
+
+**The states covered**: hookshot has no single `MODE_FLG` bit either (same
+situation as crawling) — a sequence of dedicated `daAlink_PROC` states
+instead (`d_a_alink.h`). New `isHookshotAirborneOrHanging()` helper
+(`vr_link_visibility.hpp`, same shape as `isCrawling()`) covers
+`PROC_HOOKSHOT_FLY` ("being pulled through the air," the user's own
+wording) and `PROC_HOOKSHOT_ROOF_WAIT`/`_WALL_WAIT` ("hanging on to a
+clawshot target" once attached), plus their `_SHOOT`/`_BOOTS` siblings
+(firing the second clawshot at another point, or standing in iron boots
+on the ceiling — still attached to the original point the whole time, so
+grouped in rather than dropping back to the core anchor mid-action).
+Deliberately EXCLUDED: `PROC_HOOKSHOT_SUBJECT` (aiming, before firing —
+Link is still standing normally) and `PROC_HOOKSHOT_MOVE` (traced via its
+call sites — this is for dragging a grabbed OBJECT toward Link, not Link
+himself flying, so his own pose never leaves the normal standing case
+either).
+
+**Fix**: `computeRawEyeAnchor()`'s existing swim/crawl/vine fallback
+condition (`vr_link_visibility.hpp`) now also falls back to the raw,
+animation-driven head-joint anchor (`getSubjectEyePos()`) — the base
+game's own eye position, correct by construction for whatever pose the
+hookshot animation puts Link in, no separate calibration needed — while
+`isHookshotAirborneOrHanging()` is true. Exactly the same fix shape as
+every other entry in this fallback list; no new mechanism invented.
+
+Built successfully (RelWithDebInfo) — only `vr_main.cpp` needed
+recompiling (transitively includes the header), clean link, no new
+warnings.
+
+**CONFIRMED FIXED IN-HEADSET** — user tested and reported "camera feels
+right." Not separately broken out by sub-case (roof vs. wall, double
+clawshot, iron boots on the ceiling) — if any specific one is ever
+reported still off, `isHookshotAirborneOrHanging()` is where to check
+first, but the general mechanism is confirmed working.
+
+### Right-hand thrust gesture → shield bash (R) — CONFIRMED WORKING IN-HEADSET 2026-08-13
+
+**Goal** (explicit user request: "if you thrust the right controller it
+should press R basically, as R is shield bash"). `g_rightSwing`
+(`vr_main.cpp`) — dormant infrastructure from a 2026-08-03 right-hand
+SWORD-swing draft that was deferred and left in the tree specifically so
+it wouldn't need re-deriving later — repurposed here for its actually-
+requested use, renamed `g_rightThrust`. Seeded with `g_leftSwing`'s own
+FINAL, six-round-tuned values (`triggerSpeed=2.2`, `resetSpeed=0.4`,
+`minSwingDistance=0.12`, `cooldownSec=0.0`) rather than the class's
+untested defaults — a thrust and a sword swing are the same character of
+gesture (a deliberate fast hand motion) on the same hardware, so reusing
+already-proven-good numbers is a much better starting point than guessing
+blind a second time. Explicitly untested for THIS gesture though — a stab
+may want different tuning (shorter `minSwingDistance`, different
+`triggerSpeed`) than a full swing; retune with real data if reported off,
+same workflow the sword gesture's six rounds already established.
+
+**Traced the actual game mechanic before writing anything** (not assumed):
+shield bash fires via `daAlink_c::spActionTrigger()` →
+`itemTriggerCheck(BTN_R)` → `mItemTrigger & BTN_R`, and that bit is only
+ever set by `mDoCPd_c::getTrigLockR(PAD_1)` — a genuine RISING-EDGE
+detector (0→1 transition only, not a hold check). This is why the fix
+shape had to be different from the sword's B-latch fix, not just a copy of
+it: raising the shield (left squeeze, added earlier this session) already
+holds `PAD_TRIGGER_R` CONTINUOUSLY the whole time it's up — and the
+natural way to actually want a shield bash is WHILE already blocking. If R
+is already sitting at 1 from the squeeze hold, a thrust asserting R again
+produces no transition at all from the game's point of view, so
+`spActionTrigger()` would never see an edge no matter how the trigger
+event itself is latched.
+
+**Fix** (`vr_main.cpp`): on a thrust trigger, force a brief RELEASE window
+first (`kThrustForceReleaseSec = 50ms`, comfortably longer than one ~33ms
+30Hz sim-tick period — guarantees a real 0 sample reaches at least one sim
+tick even if squeeze is currently holding R up), THEN force a brief HOLD
+window (`kThrustHoldSec = 100ms`, mirrors the sword fix's own latch
+directly) — producing a genuine, detectable 0→1 pulse regardless of the
+left hand's current squeeze state, which then reverts to whatever squeeze
+naturally wants. `padStatus.triggerRight`'s analog value during the forced
+hold is set to full (255) rather than reflecting `leftSqueeze` (which could
+be 0 if the player thrusts without squeezing at all).
+
+Built successfully (RelWithDebInfo) — only `vr_main.cpp` recompiled,
+clean link, no new warnings.
+
+**CONFIRMED WORKING IN-HEADSET** — user tested and reported "works good."
+The rising-edge pulse (force-release then force-hold) correctly produces
+a real shield bash both while already blocking and from a cold thrust,
+first attempt, no retuning needed. No directional/forward-only filtering
+was added — fires on any sufficiently fast right-hand motion, same "start
+simple" shape as the sword gesture's own first version — if it's ever
+reported firing on unrelated fast right-hand motion (general gestures,
+aiming), a forward-direction dot-product check against the controller's
+own aim-forward vector (`vr_link::computeControllerAimForward()`, already
+used for controller-pointing aim) is the natural next refinement, not
+needed yet.
+
+### Camera anchor going above/below Link after loads/cutscenes (Epona mount/dismount, shop exit) — CONFIRMED FIXED IN-HEADSET 2026-08-13
+
+**Symptom** (user report, "last fix before releasing the mod"): "the camera
+going above or below Link after certain loads or cutscenes. Sometimes I'll
+get off epona and the camera will be on the ground. Sometimes I'll exit a
+shop and it will be underground. Sometimes I'll get on epona and it will
+be too high."
+
+**Investigation was code-reading only** (no diagnostic build/log round this
+time — the reasoning below is strong enough on its own merits, given how
+directly it's supported by reading `setBodyPartPos()` and
+`isFirstPerson()`'s own already-documented comments, but per this
+project's own standing practice, treat it as unconfirmed until tested).
+
+**Two separate root causes found, both inside section 23's core-anchor
+comfort system** (`vr_link_visibility.hpp`'s `computeRawCoreAnchoredEye()`/
+`computeRawEyeAnchor()`):
+
+1. **Mounted gameplay (horse/canoe/board) was never added to the core-
+   anchor's fallback list**, unlike swimming/crawling/vine-climbing/
+   hookshot, which all got this exact same fix earlier. Section 11's own
+   notes explicitly flagged this as "expected to work with zero additional
+   code" but **never actually confirmed in-headset** — and it doesn't hold
+   up: `setBodyPartPos()` (`d_a_alink.cpp`) computes the animated eye
+   position for horse/canoe/board via dedicated
+   `horseLocalEyeFromRoot`/`canoeLocalEyeFromRoot`/`boardLocalEyeFromRoot`
+   offsets applied through a matrix stack rooted at `field_0x3834`
+   (`getRootPosP()`, the model's own joint-0 world position) — a
+   structurally different derivation than plain standing, not just a
+   different constant. The core anchor's calibrated
+   `s_coreAnchorHeightOffset` is captured once (almost always while
+   standing, since that's the far more common state to first enter
+   first-person in) and held fixed forever — applying it on top of
+   `current.pos.y` while mounted produces a height that means something
+   different than what it was calibrated for, explaining "too high" while
+   riding directly. It also explains dismounting going wrong WITHOUT
+   needing any recalibration mid-ride: mounting/dismounting during
+   ordinary gameplay never runs a real `dEvt_control_c` event
+   (`checkEventRun()` stays false the whole time — confirmed directly from
+   `isFirstPerson()`'s own comment: "Does NOT affect ordinary mounted
+   GAMEPLAY... only mounted cutscenes"), so nothing was ever
+   resetting/recalibrating the offset around a mount/dismount either. If a
+   player's FIRST first-person activation in a session happened to land
+   while already mounted (loading a save that starts on horseback, or a
+   cutscene ending mid-ride), the one-shot calibration would capture the
+   MOUNTED relationship between `current.pos.y` and eye height instead of
+   the standing one — and that wrong-for-standing offset would then
+   persist after dismounting too, until the next false→true
+   `isFirstPerson()` transition. **Fix**: added
+   `link->checkReinRide() || link->checkCanoeRide() || link->checkBoardRide()`
+   to `computeRawEyeAnchor()`'s existing fallback condition (same one
+   swim/crawl/vine/hookshot already use), falling back to the already
+   mount-aware `getSubjectEyePos()` instead of the core anchor — removes
+   the whole failure mode by construction rather than patching around one
+   symptom of it.
+2. **The calibration itself trusted the very first frame it ever saw**,
+   with no defense against that frame coinciding with a scene-load/door
+   transition (shops) where `current.pos`/`getSubjectEyePos()` might not
+   yet both reflect the new area. Once locked in, this offset is held
+   fixed until the next `isFirstPerson()` false→true transition — a bad
+   sample here reads as a *persistent* wrong height exactly matching "exit
+   a shop and it will be underground," not a one-frame glitch. **Fix**, in
+   the same "reject an implausible sample" spirit as
+   `vr_swing_detector.hpp`'s `maxPlausibleSpeed` (added for the analogous
+   reason — see section 13): (a) require at least one MORE real sim tick
+   to run after first-person reactivates before attempting calibration at
+   all (`s_coreAnchorActivationTickKnown`/`s_coreAnchorActivationSimTick`),
+   giving one tick for both position sources to settle post-transition;
+   (b) reject a candidate offset outside a generous plausible range
+   (20-100 units, `kCoreAnchorHeightOffsetDefault` = 55.75 is the expected
+   common case) and keep retrying on subsequent ticks instead of locking
+   it in, up to a bounded attempt count (`kCoreAnchorCalibrationMaxAttempts`
+   = 30, ~1s) so a genuinely-out-of-range case doesn't retry forever stuck
+   on the placeholder default.
+
+Both fixes live in `vr_link_visibility.hpp` only. `getVrBodyPositionOffset()`
+needed no separate change — it already calls the same shared
+`computeRawEyeAnchor()` (not `computeRawCoreAnchoredEye()` directly, per
+this file's own "one shared raw-anchor definition" pattern), so it
+automatically stays consistent with whatever `getVrCameraEyeAnchor()`
+decided this frame.
+
+**Built successfully** (RelWithDebInfo) — only `vr_main.cpp` needed
+recompiling (transitively includes the header), clean link, no new
+warnings.
+
+**CONFIRMED FIXED IN-HEADSET** — user tested and reported "It's fixed," a
+terse but unambiguous pass (both halves — Epona mount/dismount and shop
+exit — were called out together in the original report, and nothing came
+back as a partial/still-broken case). Notable since this whole
+investigation was code-reading only, with no diagnostic-log round or
+in-headset iteration before landing — the two root causes (mounted
+gameplay missing from the core-anchor fallback list, unguarded
+calibration timing) were derived directly from reading `setBodyPartPos()`
+and `isFirstPerson()`'s own already-written comments, which turned out to
+be sufficient evidence on their own this time. This was flagged by the
+user as "last fix before releasing the mod" — worth remembering if this
+area is revisited, since it may mean release prep is now unblocked on the
+VR side. If a subtler variant of this ever resurfaces (e.g. a different
+scene-load transition still going wrong, or a mount type not covered
+here), the two mechanisms above — the mount-fallback list in
+`computeRawEyeAnchor()` and the settle-window/plausibility-range gate in
+`computeRawCoreAnchoredEye()` — are exactly where to look first; widening
+the settle window (require N consecutive plausible-range ticks instead of
+just one) is the natural next lever if a slower transition than a shop
+door ever exposes the same class of bug again, per exactly
+how long the settle window needs to be.
 
 ## Key lesson learned this session
 

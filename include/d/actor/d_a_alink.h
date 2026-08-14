@@ -3708,6 +3708,24 @@ public:
     // refreshTrackedHeldItemMtxLive()).
     J3DModel* getHeldItemModel() const { return mHeldItemModel; }
     J3DModel* getKanteraModel() const { return mpKanteraModel; }
+    // The lantern's separate flame-glow sprite model, and the plain,
+    // ungated world position kandelaarModelCallBack() computes for it
+    // (mKandelaarFlamePos directly -- NOT the same as the virtual
+    // getKandelaarFlamePos() above, which returns NULL in several
+    // legitimate non-VR contexts unrelated to whether this model should
+    // be repositioned; see refreshTrackedHeldItemMtxLive()'s own comment,
+    // vr_link_visibility.hpp, for why a live per-real-frame refresh of
+    // this model specifically was needed).
+    J3DModel* getKanteraGlowModel() const { return mpKanteraGlowModel; }
+    const cXyz& getKandelaarFlamePosRaw() const { return mKandelaarFlamePos; }
+    // Persistent particle-emitter id for the lantern's actual flame VFX
+    // (ID_ZI_J_KANTERA_FIRE/_SWINGFIRE, spawned/kept alive by setLight(),
+    // d_a_alink.cpp) -- separate from mpKanteraGlowModel above (a
+    // supplementary soft glow/light halo mesh). This is the visual most
+    // players would call "the flame"; see
+    // refreshTrackedHeldItemMtxLive()'s own comment (vr_link_visibility.hpp)
+    // for why it needed its own live-refresh treatment too.
+    u32 getKandelaarParticleId() const { return field_0x31c4; }
     // The clawshot's SECOND hand-grip model -- setHookshotPos()/
     // applyTrackedHookshotGripTransforms() swap which of mHeldItemModel/
     // this one represents the left vs right hand via field_0x3020

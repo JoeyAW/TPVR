@@ -68,6 +68,14 @@ public:
     float minSwingDistance = 0.15f;  // meters - guards against fast little
                                       // wrist/tracking jitter triggering a swing
     double cooldownSec = 0.12;       // minimum seconds between triggers
+    float maxPlausibleSpeed = 15.0f; // m/s - ABOVE this, treat the sample as a
+                                      // tracking glitch/teleport rather than a
+                                      // real swing and refuse to fire (added
+                                      // 2026-08-13 after a real capture logged
+                                      // a one-frame 31+ m/s spike -- ~4x any
+                                      // genuine swing peak seen across every
+                                      // capture so far -- that would otherwise
+                                      // fire a false attack)
 
     // Call once per render frame with the controller's current pose.
     // This does NOT need to run at the game's 30Hz tick rate - sample it
@@ -105,8 +113,8 @@ public:
         const float windowDist =
             inSwingWindow_ ? (pose.position - windowStart_).length() : 0.0f;
 
-        const bool aboveTrigger =
-            speed >= triggerSpeed && windowDist >= minSwingDistance;
+        const bool aboveTrigger = speed >= triggerSpeed && speed <= maxPlausibleSpeed &&
+                                   windowDist >= minSwingDistance;
         const bool offCooldown =
             (pose.timestampSec - lastTriggerSec_) >= cooldownSec;
 
@@ -115,11 +123,38 @@ public:
             event.peakSpeed = speed;
             event.direction = classifyDirection(delta);
             lastTriggerSec_ = pose.timestampSec;
-            canFire_ = false;  // must drop back below resetSpeed to re-arm
+            canFire_ = false;  // must drop back below resetSpeed OR reverse
+                                // direction (below) to re-arm
+            lastFireDelta_ = delta;
+            hasLastFireDelta_ = true;
         }
 
         if (speed <= resetSpeed) {
             canFire_ = true;
+        }
+
+        // Direction-reversal re-arm: a fast, tight, CONTINUOUS back-and-forth
+        // swing (e.g. spamming left-right as quickly as possible) can keep
+        // scalar speed elevated the entire time -- the hand's velocity
+        // MAGNITUDE never dips, only its DIRECTION keeps flipping at each
+        // end. The resetSpeed check above alone would stay stuck un-armed
+        // through an entire such flurry after the first swing (confirmed by
+        // a real user report: "spam swing it left and right ... link will
+        // just stand there after one swing"). A direction reversal (this
+        // frame's motion pointing substantially opposite the motion that
+        // produced the LAST trigger) is what actually distinguishes "a new
+        // swing" in that case, independent of whether speed ever dropped --
+        // re-arm on that signal too. Dot product sign alone (no
+        // normalization needed) is enough to detect "opposite general
+        // direction"; the subsequent trigger's own speed/distance/cooldown
+        // checks still gate whether this re-arm actually produces a new
+        // event.
+        if (!canFire_ && hasLastFireDelta_ && dist > 0.0f) {
+            const float dot = delta.x * lastFireDelta_.x + delta.y * lastFireDelta_.y +
+                               delta.z * lastFireDelta_.z;
+            if (dot < 0.0f) {
+                canFire_ = true;
+            }
         }
 
         prev_ = pose;
@@ -141,6 +176,9 @@ private:
     bool canFire_ = true;
     Vec3 windowStart_{};
     double lastTriggerSec_ = -1000.0;
+    Vec3 lastFireDelta_{};       // motion direction (unnormalized) at the last
+                                  // trigger -- used for direction-reversal re-arm
+    bool hasLastFireDelta_ = false;
 };
 
 }  // namespace vr_combat

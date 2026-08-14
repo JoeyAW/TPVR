@@ -115,6 +115,31 @@ int daAlink_c::kandelaarModelCallBack() {
     s16 var_r28 = cLib_minMaxLimit<s16>(cM_atan2s(-sp38.z, -sp38.y), -0x1800, 0x1800);
     s16 var_r27 = cLib_minMaxLimit<s16>(cM_atan2s(sp38.x, JMAFastSqrt(SQUARE(sp38.y) + SQUARE(sp38.z))), -0x1800, 0x1800);
 
+#if TARGET_PC
+    // VR: lantern flame-swing physics disabled -- explicit user request
+    // ("spazzing out when I hold it"). Leading theory, not fully
+    // investigated: this session's earlier held-item live-refresh work
+    // (refreshTrackedHeldItemMtxLive(), "VR tracked-hand attachment
+    // extended past sword/shield" section, vr-mod-notes) now feeds this
+    // spring-like swing simulation real controller-tracking motion at
+    // real VR framerate (72-90Hz) -- far higher-frequency/-amplitude
+    // input than the smooth, capped animated hand motion it was tuned
+    // against on flatscreen. Rather than retune the physics constants
+    // (field_0x3618's *0.9 decay term above, the +/-0x1800 clamp range)
+    // against an unfamiliar simulation, just force the swing ANGLES to
+    // zero -- position and yaw alignment (var_r29, used below) are
+    // untouched, so the flame still tracks the lantern correctly, it just
+    // never tilts/lags, i.e. hangs straight down with no spring behavior.
+    // The velocity-tracking state above (field_0x3618/field_0x3624/
+    // field_0x3630) is left computed as before -- harmless, since it only
+    // ever feeds var_r28/var_r27, which are overridden here -- so there's
+    // only this one place to revert if a proper fix is attempted later.
+    if (dusk::vr::isRenderingToHeadset()) {
+        var_r28 = 0;
+        var_r27 = 0;
+    }
+#endif
+
     mDoMtx_stack_c::transS(sp44);
     if (mProcID != PROC_OPEN_TREASURE && (mProcID != PROC_GET_ITEM || mProcVar4.field_0x3010 == 0)) {
         mDoMtx_stack_c::ZXYrotM(var_r28, var_r29, var_r27);

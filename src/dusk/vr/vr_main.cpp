@@ -93,7 +93,30 @@ static aurora::Module VrLog("dusk::vr");
 
 Session* g_session = nullptr;
 std::unique_ptr<Session> g_ownedSession;  // vr_main.cpp owns the Session; g_session just points to it
-vr_combat::SwingDetector g_rightSwing;  // still deferred/unused, see its call site's comment below
+// RIGHT hand -> R (shield bash), added 2026-08-13 per explicit user request
+// ("if you thrust the right controller it should press R basically, as R
+// is shield bash"). This is the same infra originally drafted 2026-08-03
+// as a right-hand SWORD-swing attempt (deferred, never wired -- see the
+// left-hand swing gesture's own comment below for that history) --
+// repurposed here for its actually-requested use rather than left dead.
+// Started from g_leftSwing's own FINAL, six-round-tuned values (below)
+// rather than SwingDetector's untested class defaults -- a thrust and a
+// swing are physically the same character of gesture (a deliberate fast
+// hand motion) on the same hardware/runtime, so reusing already-proven-good
+// numbers is a much better starting point than guessing blind a second
+// time. Untested for THIS gesture specifically though -- a stab may turn
+// out to want a shorter minSwingDistance (less travel than a full sword
+// swing) or a different triggerSpeed; retune with real
+// [dusk::vr::swingdiag]-style data if the user reports it's off, same
+// workflow as the sword gesture's own six rounds.
+vr_combat::SwingDetector g_rightThrust = [] {
+    vr_combat::SwingDetector d;
+    d.triggerSpeed = 2.2f;
+    d.resetSpeed = 0.4f;
+    d.minSwingDistance = 0.12f;
+    d.cooldownSec = 0.0;
+    return d;
+}();
 
 // LEFT hand -> B (attack), wired below -- sword is Link's LEFT hand
 // (section 16 of vr-mod-notes), so a swing of the hand actually holding the
@@ -120,16 +143,54 @@ vr_combat::SwingDetector g_rightSwing;  // still deferred/unused, see its call s
 // positive peak with real margin) rather than trying to make it MORE
 // sensitive. resetSpeed/cooldownSec also nudged up to reduce the chance of
 // one continuous swing motion dipping-and-re-arming into a double count.
-// Tuned here rather than in the shared header so g_rightSwing (or any
+// Tuned here rather than in the shared header so g_rightThrust (or any
 // future user of SwingDetector) isn't silently affected by tuning specific
 // to this one gesture.
+//
+// ROUND 4 (2026-08-13) -- user report "missed swings (real swings don't
+// register)" after round 3 (see history above). A fresh
+// [dusk::vr::swingdiag] capture (227 samples) showed this WASN'T a
+// triggerSpeed problem -- the vast majority of samples with speed well
+// above 2.2 m/s (many in the 3-7+ m/s range, dozens of them) simply never
+// triggered. Cross-checked against SwingDetector::update()'s actual logic
+// (vr_swing_detector.hpp): canFire_ only resets once speed drops to AT OR
+// BELOW resetSpeed -- a hard one-shot re-arm gate, not a decaying window.
+// During a real multi-swing test, hand speed only briefly dips (if at all)
+// between individual swings, so round 3's resetSpeed=0.7 m/s left the
+// detector "stuck" not-armed through most of a continuous flurry --
+// directly confirmed in the capture (e.g. one stretch: a real trigger at
+// speed 2.48 m/s, then SIX consecutive high-speed samples up to 6.4 m/s
+// all logged TRIGGERED=0, before it finally re-armed ~650ms later). This
+// is the opposite failure mode from round 2's original "one continuous
+// swing double-counts" concern that motivated raising resetSpeed in the
+// first place -- but cooldownSec (a hard TIME lockout, unchanged at 0.15s)
+// already covers that same concern independently, so lowering resetSpeed
+// back down doesn't require also touching cooldownSec. triggerSpeed/
+// minSwingDistance are untouched -- no evidence in this capture that
+// either is currently a problem (neutral-movement speeds stayed
+// comfortably under ~1.1 m/s against the 2.2 m/s trigger).
 vr_combat::SwingDetector g_leftSwing = [] {
     vr_combat::SwingDetector d;
     d.triggerSpeed = 2.2f;        // round 1: 1.4 (too low -- false-fired at 1.44
                                     // during ordinary movement); default: 2.5
-    d.resetSpeed = 0.7f;          // round 1: 0.4; default: 0.8
+    d.resetSpeed = 0.4f;          // round 4: back down from round 3's 0.7,
+                                    // which was confirmed (by capture) to leave
+                                    // the detector stuck not-armed through most
+                                    // of a real multi-swing flurry; round 1: 0.4
+                                    // (same value, now re-derived from evidence
+                                    // rather than the original guess); default: 0.8
     d.minSwingDistance = 0.12f;   // round 1: 0.08; default: 0.15
-    d.cooldownSec = 0.15;         // round 1/default: 0.12
+    d.cooldownSec = 0.0;          // round 5 (2026-08-13): disabled per explicit
+                                    // user request, to test whether it's capping
+                                    // how fast real swings can chain vs. only
+                                    // ever blocking one-swing double-counts.
+                                    // resetSpeed's own hysteresis (must drop to
+                                    // 0.4 m/s before re-arming) still guards
+                                    // against a single continuous swing firing
+                                    // twice, so this isn't fully unguarded --
+                                    // just removes the additional flat time
+                                    // floor on top of that. round 1/default: 0.12;
+                                    // round 2-4: 0.15
     return d;
 }();
 
@@ -946,10 +1007,20 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     //   right squeeze    -> X (was Z)
     //   right trigger    -> Y, digital only -- no analog value written
     //                        anymore, unlike the old analog-R mapping this
-    //                        replaced (was analog R/raise shield; R is now
-    //                        UNBOUND -- user's stated plan is to eventually
-    //                        replace it with a physical movement gesture
-    //                        instead of a button, not yet implemented)
+    //                        replaced
+    //   left squeeze     -> analog R / raise shield (2026-08-13 per explicit
+    //                        user request "bind R to the squeeze button on
+    //                        the left controller") -- was UNBOUND; the
+    //                        user's earlier stated plan to eventually
+    //                        replace R with a physical movement gesture
+    //                        instead was superseded by this simpler request.
+    //                        Mirrors left trigger's own analog-L pattern
+    //                        below (continuous 0-255 value + the digital
+    //                        bit, gated on the same low deadzone) rather
+    //                        than X's binary squeeze-threshold gate, since
+    //                        raising the shield is the kind of thing that
+    //                        plausibly wants an analog feel like L's aiming
+    //                        does, not just an on/off press.
     //   left X click     -> D-pad right (was D-pad left as of the revision
     //                        above, was X before that -- changed again
     //                        same day per explicit user request "change x
@@ -987,6 +1058,7 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     const float leftTrigger = getFloatAction(g_triggerValueAction, g_leftHandPath);
     const float rightTrigger = getFloatAction(g_triggerValueAction, g_rightHandPath);
     const float rightSqueeze = getFloatAction(g_squeezeValueAction, g_rightHandPath);
+    const float leftSqueeze = getFloatAction(g_squeezeValueAction, g_leftHandPath);
     const XrVector2f leftStick = getVec2Action(g_thumbstickAction, g_leftHandPath);
     const XrVector2f rightStick = getVec2Action(g_thumbstickAction, g_rightHandPath);
     const bool rightAHeld = getBoolAction(g_primaryClickAction, g_rightHandPath);
@@ -999,13 +1071,15 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
 
     // Swing-gesture -> attack, LEFT hand: added 2026-08-05 per explicit user
     // request ("swinging your left hand in front of you acts as pressing the
-    // b button"). The right-hand version of this was drafted 2026-08-03 then
-    // explicitly deferred (see git history: fixed a dead
-    // `!pacing.is_interpolating` gate that meant g_rightSwing.update() had
-    // never actually run, then pulled the wiring back out without having
-    // tested it) -- g_rightSwing/vr_swing_detector.hpp were left in place
-    // specifically so this didn't need to be re-derived from scratch. Using
-    // the LEFT hand here rather than reviving the right-hand attempt is
+    // b button"). A right-hand SWORD-swing version of this was drafted
+    // 2026-08-03 then explicitly deferred (see git history: fixed a dead
+    // `!pacing.is_interpolating` gate that meant the detector's own
+    // `.update()` had never actually run, then pulled the wiring back out
+    // without having tested it) -- the detector/vr_swing_detector.hpp were
+    // left in place specifically so this didn't need to be re-derived from
+    // scratch, and were later repurposed as g_rightThrust (below) for the
+    // actually-requested right-hand gesture (shield bash), not sword
+    // attacks. Using the LEFT hand for the SWORD gesture specifically is
     // deliberate, not arbitrary: section 16 of vr-mod-notes established the
     // sword is Link's LEFT-hand item (mLeftItemJntNo), so swinging the hand
     // that's actually holding the sword is the physically-intuitive gesture,
@@ -1018,13 +1092,108 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     // is just for the detector's dt math, no epoch meaning is assumed
     // anywhere). `triggered` is a one-frame edge (the detector itself
     // enforces a cooldown + must-drop-below-resetSpeed-to-rearm hysteresis so
-    // one swing can't repeat-fire) -- OR'd into PAD_BUTTON_B for that single
-    // frame is sufficient, same as a real button's down-edge would look to
-    // PADRead() at this pad rate.
+    // one swing can't repeat-fire).
     const vr_combat::Pose leftSwingPose{
         {leftPose.position.x, leftPose.position.y, leftPose.position.z},
         static_cast<double>(time) * 1e-9};
     const vr_combat::SwingEvent leftSwingEvent = g_leftSwing.update(leftSwingPose);
+
+    // FIX (2026-08-13) -- user report: "swinging fast left and right
+    // repeatedly is the equivalent of pressing B repeatedly on a
+    // controller, and it did not attack repeatedly" -- ruled out (by the
+    // user, correctly) that this is Link's own attack-animation lock, since
+    // mashing the REAL button does attack repeatedly. A fresh
+    // [dusk::vr::swingdiag] capture (round 4's resetSpeed fix already
+    // landed) showed the detector itself firing frequently and reliably
+    // throughout continuous swinging, so the gap is downstream of
+    // detection. Root cause: this file's own "KNOWN LATENCY" comment
+    // (above, at the wantsVirtualPad block) already documents that
+    // mDoCPd_c::read() -- the actual game-logic button read -- runs on the
+    // ~30Hz SIM-TICK loop, BEFORE dusk::vr::tick() (this function) even
+    // runs that frame. A REAL held button stays "on" across many real
+    // frames (the physical trigger/click is genuinely held), so SOME sim
+    // tick is guaranteed to see it -- but leftSwingEvent.triggered was
+    // previously OR'd into PAD_BUTTON_B for exactly ONE real frame
+    // (~15-20ms at this project's typical VR framerate), which is SHORTER
+    // than the ~33ms gap between sim-tick reads. A one-frame pulse has a
+    // real chance of landing entirely in the dead zone between two sim
+    // ticks and never being read at all -- independently, per swing,
+    // explaining both "sometimes the first one lands" (luck of frame
+    // alignment) and "repeated fast swings don't" (each one separately
+    // rolls the same bad odds). Fix: latch the swing-triggered B press
+    // for a short WALL-CLOCK duration instead of a single frame, long
+    // enough to comfortably span at least one (with margin, several)
+    // sim-tick reads -- same effect a real held button already gets for
+    // free. 100ms is ~3x a 30Hz sim-tick period; short enough to still
+    // read as instantaneous to the player, same as how a real quick
+    // button tap already produces a many-real-frame-long "held" pulse
+    // rather than a true single-frame one.
+    constexpr double kSwingButtonHoldSec = 0.1;
+    static double s_leftSwingButtonHoldRemaining = 0.0;
+    if (leftSwingEvent.triggered) {
+        s_leftSwingButtonHoldRemaining = kSwingButtonHoldSec;
+    } else {
+        s_leftSwingButtonHoldRemaining =
+            std::max(0.0, s_leftSwingButtonHoldRemaining - static_cast<double>(pacing.presentation_dt_seconds));
+    }
+    const bool leftSwingButtonHeld = s_leftSwingButtonHoldRemaining > 0.0;
+
+    // Thrust-gesture -> shield bash, RIGHT hand: added 2026-08-13 per
+    // explicit user request ("if you thrust the right controller it should
+    // press R basically, as R is shield bash"). Same vr_combat::SwingDetector
+    // machinery as the left-hand sword gesture above, fed rightPose instead
+    // (already located earlier in tick(), same as leftPose).
+    const vr_combat::Pose rightThrustPose{
+        {rightPose.position.x, rightPose.position.y, rightPose.position.z},
+        static_cast<double>(time) * 1e-9};
+    const vr_combat::SwingEvent rightThrustEvent = g_rightThrust.update(rightThrustPose);
+
+    // Getting a shield bash to actually register is a genuinely different
+    // problem than the sword's B-latch fix above, not just a copy-paste of
+    // it. Traced the real game logic first rather than assuming (d_a_alink.cpp):
+    // shield bash fires via daAlink_c::spActionTrigger() -> itemTriggerCheck(
+    // BTN_R) -> mItemTrigger & BTN_R, and mItemTrigger's BTN_R bit is only
+    // ever set by mDoCPd_c::getTrigLockR(PAD_1) -- a genuine RISING-EDGE
+    // detector (0->1 transition only), not a hold check. Raising the shield
+    // (below, driven by left squeeze) already holds PAD_TRIGGER_R
+    // CONTINUOUSLY the whole time the shield is up -- so if the player is
+    // already blocking (very likely; that's the normal way you'd want to
+    // then bash) and just thrusts the right controller, R never actually
+    // goes 0->1 from the game's point of view (it was already 1), so a bash
+    // would never fire no matter how the trigger event itself is latched --
+    // this is a fundamentally different problem from the sword case, where B
+    // starts from a real 0 every time. Fix: on a thrust trigger, force a
+    // brief RELEASE window first (guaranteeing a real 0 sample reaches at
+    // least one sim tick even if squeeze is held), THEN force a brief HOLD
+    // window (guaranteeing a real 1 sample reaches at least one MORE sim
+    // tick right after) -- a genuine, detectable 0->1->(back to whatever
+    // squeeze wants) pulse, regardless of the left hand's current squeeze
+    // state. kThrustForceReleaseSec (50ms) is comfortably longer than one
+    // ~33ms 30Hz sim-tick period on its own, same reasoning as the sword
+    // fix's 100ms hold; kThrustHoldSec (100ms) mirrors the sword fix
+    // directly once the release window has done its job.
+    constexpr double kThrustForceReleaseSec = 0.05;
+    constexpr double kThrustHoldSec = 0.1;
+    static double s_rightThrustForceReleaseRemaining = 0.0;
+    static double s_rightThrustHoldRemaining = 0.0;
+    if (rightThrustEvent.triggered) {
+        s_rightThrustForceReleaseRemaining = kThrustForceReleaseSec;
+        s_rightThrustHoldRemaining = 0.0;  // restart the release phase even if a
+                                            // previous pulse's hold was still running
+    } else {
+        const double dtSec = static_cast<double>(pacing.presentation_dt_seconds);
+        if (s_rightThrustForceReleaseRemaining > 0.0) {
+            s_rightThrustForceReleaseRemaining = std::max(0.0, s_rightThrustForceReleaseRemaining - dtSec);
+            if (s_rightThrustForceReleaseRemaining <= 0.0) {
+                s_rightThrustHoldRemaining = kThrustHoldSec;  // release window just
+                                                                // elapsed -- start the assert window
+            }
+        } else if (s_rightThrustHoldRemaining > 0.0) {
+            s_rightThrustHoldRemaining = std::max(0.0, s_rightThrustHoldRemaining - dtSec);
+        }
+    }
+    const bool rightThrustForceRelease = s_rightThrustForceReleaseRemaining > 0.0;
+    const bool rightThrustForceHold = s_rightThrustHoldRemaining > 0.0;
 
     // DIAGNOSTIC (temporary -- added 2026-08-05 to investigate "swings when
     // I move my hand normally, doesn't trigger on a real swing"). Two
@@ -1080,7 +1249,7 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     PADStatus padStatus{};
     padStatus.err = PAD_ERR_NONE;
     if (rightAHeld) padStatus.button |= PAD_BUTTON_A;
-    if (rightBHeld || leftSwingEvent.triggered) padStatus.button |= PAD_BUTTON_B;
+    if (rightBHeld || leftSwingButtonHeld) padStatus.button |= PAD_BUTTON_B;
     if (leftXHeld) padStatus.button |= PAD_BUTTON_RIGHT;  // D-pad right (was D-pad left, was X)
     if (leftYHeld) padStatus.button |= PAD_BUTTON_UP;     // D-pad up (was Y)
     if (leftMenuHeld || rightStickClickHeld) padStatus.button |= PAD_BUTTON_START;
@@ -1094,10 +1263,26 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     constexpr float kSqueezeThreshold = 0.5f;
     constexpr float kStickDeadzone = 0.15f;
     if (rightSqueeze > kSqueezeThreshold) padStatus.button |= PAD_BUTTON_X;  // was Z
-    if (rightTrigger > kTriggerDeadzone) padStatus.button |= PAD_BUTTON_Y;   // was analog R; R is now unbound
+    if (rightTrigger > kTriggerDeadzone) padStatus.button |= PAD_BUTTON_Y;   // was analog R
     if (leftTrigger > kTriggerDeadzone) {
         padStatus.button |= PAD_TRIGGER_L;
         padStatus.triggerLeft = static_cast<u8>(std::clamp(leftTrigger, 0.f, 1.f) * 255.f);
+    }
+    // R = raise shield (held, driven by left squeeze) OR a shield-bash
+    // thrust pulse (see rightThrustForceRelease/Hold's own comment above for
+    // why a plain OR isn't enough by itself -- the force-release phase can
+    // override an existing squeeze-hold to guarantee spActionTrigger() sees
+    // a real 0->1 edge).
+    bool rWantsHeld = leftSqueeze > kTriggerDeadzone;
+    if (rightThrustForceRelease) {
+        rWantsHeld = false;
+    } else if (rightThrustForceHold) {
+        rWantsHeld = true;
+    }
+    if (rWantsHeld) {
+        padStatus.button |= PAD_TRIGGER_R;  // analog R / raise shield -- was unbound
+        const float rAnalog = rightThrustForceHold ? 1.0f : std::clamp(leftSqueeze, 0.f, 1.f);
+        padStatus.triggerRight = static_cast<u8>(rAnalog * 255.f);
     }
     if (std::abs(leftStick.x) > kStickDeadzone || std::abs(leftStick.y) > kStickDeadzone) {
         padStatus.stickX = static_cast<s8>(std::clamp(leftStick.x, -1.f, 1.f) * 127.f);

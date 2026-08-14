@@ -952,6 +952,33 @@ inline bool isCrawling(daAlink_c* link) {
     }
 }
 
+// Same reasoning/shape as isCrawling() -- hookshot flight/hanging has no
+// single MODE_FLG bit either, it's a sequence of dedicated daAlink_PROC
+// states (d_a_alink.h). PROC_HOOKSHOT_FLY is "being pulled through the
+// air" (user's own wording); PROC_HOOKSHOT_ROOF_WAIT/_WALL_WAIT is
+// "hanging on to a clawshot target" once attached, and their _SHOOT/_BOOTS
+// siblings (firing the second clawshot at another target, or standing in
+// iron boots on the ceiling) are still attached to the original point the
+// whole time, so grouped in here too rather than dropping back out of
+// first-person for those sub-actions. PROC_HOOKSHOT_SUBJECT (aiming,
+// before firing) and PROC_HOOKSHOT_MOVE (dragging a grabbed OBJECT, not
+// Link's own body, toward himself) are deliberately excluded -- neither
+// involves Link's own body leaving its normal standing pose.
+inline bool isHookshotAirborneOrHanging(daAlink_c* link) {
+    if (!link) return false;
+    switch (link->mProcID) {
+        case daAlink_c::PROC_HOOKSHOT_FLY:
+        case daAlink_c::PROC_HOOKSHOT_ROOF_WAIT:
+        case daAlink_c::PROC_HOOKSHOT_ROOF_SHOOT:
+        case daAlink_c::PROC_HOOKSHOT_ROOF_BOOTS:
+        case daAlink_c::PROC_HOOKSHOT_WALL_WAIT:
+        case daAlink_c::PROC_HOOKSHOT_WALL_SHOOT:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // Forward-declared here, defined further down (see its own comment) --
 // needed by updateFrame() below so hands anchor to the SAME point the VR
 // camera actually renders from.
@@ -1687,6 +1714,107 @@ inline void refreshTrackedHeldItemMtxLive() {
                                         detail::s_kanteraRestingPrevMtx, detail::s_kanteraRestingCurrMtx);
         }
         markModelJointsLive(kanteraModel);
+
+        // The flame glow sprite (mpKanteraGlowModel) is a SEPARATE model
+        // from kanteraModel (the lantern body) above -- its own base
+        // transform is only ever set from mKandelaarFlamePos inside
+        // setItemMatrix()'s once-per-sim-tick block (d_a_alink.cpp), which
+        // is what left it visibly stuck at "the original position" once
+        // the lantern body above started tracking at real VR framerate
+        // (explicit user report, after this session's lantern-swing-
+        // physics VR disable -- d_a_alink_kandelaar.inc's
+        // kandelaarModelCallBack()). kanteraModel->calc() just above
+        // (inside applyTrackedItemMtxIfAttached()/refreshRestingPoseSmoothed())
+        // already re-triggers kandelaarModelCallBack() -- a joint callback
+        // J3DModel::calc() invokes automatically during its joint
+        // traversal -- which recomputes mKandelaarFlamePos fresh every
+        // real frame (now swing-free per that guard), so by this point it
+        // already reflects the tracked position; this just copies it into
+        // the glow model's own transform, the same shape setItemMatrix()'s
+        // own code uses (a plain translation, no rotation).
+        J3DModel* glowModel = link->getKanteraGlowModel();
+        if (glowModel) {
+            const cXyz& flamePos = link->getKandelaarFlamePosRaw();
+            Mtx glowMtx;
+            MTXTrans(glowMtx, flamePos.x, flamePos.y, flamePos.z);
+            glowModel->setBaseTRMtx(glowMtx);
+            glowModel->calc();
+            markModelJointsLive(glowModel);
+
+            // The actual flame VFX players see -- a JPA particle effect
+            // (ID_ZI_J_KANTERA_FIRE/_SWINGFIRE), NOT glowModel above
+            // (a supplementary soft light halo -- fixing only that one
+            // is what the previous round's "it's lit up, but the flame
+            // itself is still where it would be on Link's model" report
+            // was describing). This particle is spawned/kept alive by
+            // daAlink_c::setLight() (d_a_alink.cpp), called from the
+            // actor's normal per-tick update -- same legacy sim-tick-only
+            // call pattern as setItemMatrix() above, and NOT re-anchored
+            // anywhere in d_a_alink_effect.inc's own per-tick particle
+            // position-refresh file (checked directly -- no
+            // setGlobalRTMatrix() call there references this particle's
+            // id at all), so its emitter's own global position only ever
+            // reflects wherever mKandelaarFlamePos happened to be at the
+            // last sim tick setLight() ran, same underlying bug class as
+            // the glow model just above. Re-anchored here every real VR
+            // frame via setGlobalTranslation() (a plain position setter,
+            // not a full re-spawn -- doesn't disturb the particle's own
+            // ongoing simulation/flicker/lifetime).
+            JPABaseEmitter* flameEmitter = dComIfGp_particle_getEmitter(link->getKandelaarParticleId());
+            if (flameEmitter) {
+                flameEmitter->setGlobalTranslation(flamePos.x, flamePos.y, flamePos.z);
+
+                // CONFIRMED FIXED IN-HEADSET (2026-08-13). Full investigation
+                // trail (why setGlobalTranslation() alone wasn't enough, the
+                // status-0x20/mark_live_this_frame() layer below it, and the
+                // real root cause -- this whole particle system's calc_p()
+                // only running via the legacy, sim-tick-rate-only
+                // dScnPly_Draw() path, same bug class as vr-mod-notes section
+                // 20's daAlink_c::draw() saga) is in vr-mod-notes, not
+                // reproduced here.
+                //
+                // setGlobalTranslation() above keeps mGlobalTrs/mGlobalPos
+                // correct for newly-spawned particles and for whenever the
+                // legacy ~30Hz calc_p() tick does land. status 0x20 (below)
+                // is what makes THAT eventual calc_p() re-anchor
+                // mOffsetPosition from mGlobalPos, so it can never drift out
+                // of sync with what this loop writes directly. But since that
+                // tick only lands ~1/3 as often as VR actually renders, the
+                // loop below also writes mOffsetPosition/mPosition directly,
+                // every real frame -- preserving each particle's own local
+                // wobble (mPosition - mOffsetPosition, e.g. flicker/gravity
+                // drift) but re-rooting it at the fresh tracked position --
+                // so the visible result is correct every real frame
+                // regardless of the underlying sim-tick cadence.
+                // mark_live_this_frame() stops JPADrawRotBillboard()'s own
+                // dusk::frame_interp::lookup_replacement(ptcl, ...) check
+                // from substituting a stale interpolated snapshot over what
+                // this loop just wrote -- uses the particle pointer itself as
+                // the key, the same identity that lookup keys off.
+                for (JPANode<JPABaseParticle>* node = flameEmitter->mAlivePtclBase.getFirst();
+                     node != flameEmitter->mAlivePtclBase.getEnd(); node = node->getNext()) {
+                    JPABaseParticle* p = node->getObject();
+                    const f32 localX = p->mPosition.x - p->mOffsetPosition.x;
+                    const f32 localY = p->mPosition.y - p->mOffsetPosition.y;
+                    const f32 localZ = p->mPosition.z - p->mOffsetPosition.z;
+                    p->mOffsetPosition.set(flamePos.x, flamePos.y, flamePos.z);
+                    p->mPosition.set(flamePos.x + localX, flamePos.y + localY, flamePos.z + localZ);
+                    p->setStatus(0x20);
+                    dusk::frame_interp::mark_live_this_frame(p);
+                }
+                for (JPANode<JPABaseParticle>* node = flameEmitter->mAlivePtclChld.getFirst();
+                     node != flameEmitter->mAlivePtclChld.getEnd(); node = node->getNext()) {
+                    JPABaseParticle* p = node->getObject();
+                    const f32 localX = p->mPosition.x - p->mOffsetPosition.x;
+                    const f32 localY = p->mPosition.y - p->mOffsetPosition.y;
+                    const f32 localZ = p->mPosition.z - p->mOffsetPosition.z;
+                    p->mOffsetPosition.set(flamePos.x, flamePos.y, flamePos.z);
+                    p->mPosition.set(flamePos.x + localX, flamePos.y + localY, flamePos.z + localZ);
+                    p->setStatus(0x20);
+                    dusk::frame_interp::mark_live_this_frame(p);
+                }
+            }
+        }
     }
 }
 
@@ -2043,6 +2171,43 @@ inline constexpr float kCoreAnchorHeightOffsetDefault = 55.75f;
 inline float s_coreAnchorHeightOffset = kCoreAnchorHeightOffsetDefault;
 inline bool s_coreAnchorCalibrated = false;
 
+// ADDED 2026-08-13 (user report: "camera going above or below Link after
+// certain loads or cutscenes" -- dismounting Epona puts the camera on the
+// ground, exiting a shop puts it underground, mounting Epona puts it too
+// high). Root-caused to this calibrate-once-and-hold-forever design being
+// vulnerable to capturing a bad sample on the very frame first-person
+// reactivates -- exactly the frame most likely to coincide with a scene
+// load (door/shop transition: current.pos and getSubjectEyePos() may not
+// both reflect the new area yet) or, per computeRawEyeAnchor()'s own mount
+// carve-out below, a state where current.pos's relationship to eye height
+// is genuinely different than the standing case this offset assumes.
+//
+// Two independent defenses, both cheap and matching this project's own
+// established "reject an implausible sample rather than trust it blindly"
+// pattern (see vr_swing_detector.hpp's maxPlausibleSpeed, added for the
+// analogous reason -- a single implausible sample that would otherwise get
+// baked in and held for the rest of a session/swing):
+// (1) require at least one MORE real sim tick to run after first-person
+//     reactivates before trusting a sample (s_coreAnchorActivationTickKnown/
+//     s_coreAnchorActivationSimTick below) -- gives current.pos/
+//     getSubjectEyePos() a chance to both settle to the same, new area
+//     instead of calibrating off whatever the exact reactivation frame
+//     happened to catch mid-transition;
+// (2) reject a candidate offset outside a generous plausible range for a
+//     standing/crouching human-form eye height (kCoreAnchorHeightOffsetDefault
+//     = 55.75 is the expected common case) and keep retrying on subsequent
+//     ticks instead, up to a bounded attempt count so a genuinely
+//     out-of-range case (unexpected rig/scale) doesn't retry forever stuck
+//     on the placeholder default -- past that many attempts, accept
+//     whatever the latest sample is rather than never calibrating at all.
+inline bool s_coreAnchorActivationTickKnown = false;
+inline uint64_t s_coreAnchorActivationSimTick = 0;
+inline uint64_t s_coreAnchorLastAttemptSimTick = 0;
+inline int s_coreAnchorCalibrationAttempts = 0;
+inline constexpr float kCoreAnchorHeightOffsetPlausibleMin = 20.0f;
+inline constexpr float kCoreAnchorHeightOffsetPlausibleMax = 100.0f;
+inline constexpr int kCoreAnchorCalibrationMaxAttempts = 30;  // ~1s at 30Hz sim tick
+
 // ADDED 2026-08-09 (user report, after testing the core-anchor change
 // in-headset: "Link hunches forward when hes running and you can see your
 // neck and back in the way"). A fixed nudge applied ON TOP of the
@@ -2069,8 +2234,29 @@ inline constexpr float kCoreAnchorExtraForwardUnits = 15.24f; // 6 real inches
 inline cXyz computeRawCoreAnchoredEye(daAlink_c* link) {
     const cXyz realEye = *link->getSubjectEyePos();
     if (!s_coreAnchorCalibrated) {
-        s_coreAnchorHeightOffset = realEye.y - link->current.pos.y;
-        s_coreAnchorCalibrated = true;
+        const uint64_t simTick = dusk::frame_interp::sim_tick_seq();
+        if (!s_coreAnchorActivationTickKnown) {
+            // First frame this activation has been observed -- don't
+            // calibrate off it directly, just remember which tick it was.
+            // See this block's own header comment (above
+            // kCoreAnchorHeightOffsetDefault) for why.
+            s_coreAnchorActivationSimTick = simTick;
+            s_coreAnchorActivationTickKnown = true;
+        } else if (simTick != s_coreAnchorActivationSimTick &&
+                   simTick != s_coreAnchorLastAttemptSimTick) {
+            // A real sim tick has run since activation (and since our last
+            // attempt, if any) -- current.pos/getSubjectEyePos() have had a
+            // chance to settle post-transition. Try calibrating from it.
+            s_coreAnchorLastAttemptSimTick = simTick;
+            ++s_coreAnchorCalibrationAttempts;
+            const float candidate = realEye.y - link->current.pos.y;
+            const bool plausible = candidate >= kCoreAnchorHeightOffsetPlausibleMin &&
+                                    candidate <= kCoreAnchorHeightOffsetPlausibleMax;
+            if (plausible || s_coreAnchorCalibrationAttempts >= kCoreAnchorCalibrationMaxAttempts) {
+                s_coreAnchorHeightOffset = candidate;
+                s_coreAnchorCalibrated = true;
+            }
+        }
     }
 
     // Forward offset direction comes from Link's actual BODY-facing yaw
@@ -2155,9 +2341,60 @@ inline cXyz computeRawCoreAnchoredEye(daAlink_c* link) {
 // calibration doesn't hold up in a stance this different, and vine
 // climbing already has its own animated eye/body pose the base game
 // drives directly, same as swimming/crawling do.
+//
+// HOOKSHOT/CLAWSHOT (user request 2026-08-13, "make the camera first
+// person when you are in the air being pulled by the clawshot, and when
+// you are hanging on to a clawshot target"): same reasoning again --
+// isFirstPerson() already permits first-person here (hookshot flight/
+// hanging isn't a dEvt_control_c event, so it falls straight through
+// isFirstPerson()'s "no event -- ordinary gameplay" branch), so this was
+// never actually a first/third-person GATING problem. It's the same
+// comfort-anchor-calibration gap as swimming/crawling/vine-climbing:
+// the core anchor's standing-height offset doesn't mean anything while
+// Link is horizontal mid-air on the end of a chain, or hanging off a
+// wall/ceiling at an odd angle. See isHookshotAirborneOrHanging()'s own
+// comment for exactly which PROC states this covers.
+//
+// MOUNTED (horse/canoe/board) GAMEPLAY (fix 2026-08-13, user report:
+// "the camera going above or below Link after certain loads or cutscenes
+// ... get on epona and it will be too high"): same underlying gap as
+// swimming/crawling/vine-climbing/hookshot above, just never previously
+// added to this list -- section 11/23's own notes explicitly flagged
+// mounted gameplay as "expected to work with zero additional code" but
+// NEVER actually confirmed in-headset. It doesn't hold up: setBodyPartPos()
+// (d_a_alink.cpp) computes the animated eye position for these three modes
+// via dedicated horseLocalEyeFromRoot/canoeLocalEyeFromRoot/
+// boardLocalEyeFromRoot offsets applied through a matrix stack rooted at
+// field_0x3834 (getRootPosP(), the model's own joint-0 world position) --
+// a structurally different derivation than plain standing, not just a
+// different constant. The core anchor's calibrated s_coreAnchorHeightOffset
+// is captured once (almost always while standing, since that's the far
+// more common state to first enter first-person in) and held fixed
+// forever, so applying it on top of current.pos.y while mounted produces a
+// height that means something different than what it was calibrated
+// for -- explaining "too high" while riding. Falling back to the same
+// already-mount-aware getSubjectEyePos() used for cutscenes/dialogue above
+// (which is what this whole codepath used before section 23 introduced the
+// core anchor) fixes this by construction, the same way it already did for
+// swim/crawl/vine/hookshot. This ALSO explains "get off epona and the
+// camera will be on the ground" even without touching the core-anchor
+// domain: since mounting/dismounting during ordinary gameplay never runs a
+// dEvt_control_c event (checkEventRun() stays false the whole time, per
+// isFirstPerson()'s own comment on this exact point), nothing was ever
+// resetting/recalibrating s_coreAnchorHeightOffset around a mount/dismount
+// either -- if a player's FIRST first-person activation in a session
+// happened to land while already mounted (e.g. loading a save that starts
+// on horseback, or a cutscene ending mid-ride), the one-shot calibration
+// would capture the MOUNTED relationship between current.pos.y and eye
+// height instead of the standing one, and that wrong-for-standing offset
+// would then persist after dismounting too, until the next
+// isFirstPerson() false->true transition (a later cutscene/dialogue).
+// Excluding mounted gameplay from this domain entirely removes that whole
+// failure mode, not just the in-the-moment "too high while riding" case.
 inline cXyz computeRawEyeAnchor(daAlink_c* link) {
     if (link->checkModeFlg(daAlink_c::MODE_SWIMMING | daAlink_c::MODE_VINE_CLIMB) ||
-        isCrawling(link))
+        isCrawling(link) || isHookshotAirborneOrHanging(link) ||
+        link->checkReinRide() || link->checkCanoeRide() || link->checkBoardRide())
     {
         return *link->getSubjectEyePos();
     }
@@ -2276,8 +2513,13 @@ inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye) {
         // stance's height happened to be calibrated before this fallback
         // (e.g. don't keep a crouching offset after a cutscene ends and
         // gameplay resumes standing) -- see detail::s_coreAnchorCalibrated's
-        // own comment above.
+        // own comment above. Also reset the delayed/plausibility-gated
+        // calibration state (2026-08-13 fix, same comment) so the NEXT
+        // activation gets its own fresh one-tick settle window and attempt
+        // budget instead of inheriting whatever this one left behind.
         detail::s_coreAnchorCalibrated = false;
+        detail::s_coreAnchorActivationTickKnown = false;
+        detail::s_coreAnchorCalibrationAttempts = 0;
         return fallbackEye;
     }
 

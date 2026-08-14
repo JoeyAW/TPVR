@@ -2033,6 +2033,49 @@ inline void refreshTrackedFishingRodMtxLive() {
     if (rod->rod_modelMorf) markLive(rod->rod_modelMorf->getModel());
 }
 
+// ADDED 2026-08-14 (user report: "the fish bite and when I pull they just
+// let go" -- traced the real minigame code, not guessed: hook-setting reads
+// dmg_rod_class::rod_stick_y < -0.5f (d_a_mg_rod.cpp), i.e. the MAIN/left
+// stick pulled sharply back -- not the C-stick, which is only used for
+// casting power/direction. VR's left thumbstick already correctly feeds
+// rod_stick_y (unchanged since section 13's original mapping), so the
+// mechanic was never actually broken -- but "pull the left thumbstick down
+// with your thumb at the exact moment a fish bites" isn't an intuitive VR
+// gesture, unlike physically yanking the rod-holding hand back. This gate
+// lets vr_main.cpp's tick() reuse the existing g_rightThrust gesture
+// detector (any fast right-hand motion, already wired to shield-bash) to
+// ALSO force a stick-down pulse while fishing -- reusing rather than adding
+// a second tuned detector, since overloading is harmless: forcing R while
+// fishing does nothing (no shield equipped), and forcing a stick-down pulse
+// outside an active fish bite does nothing either (the game's own
+// mRemainingHookTime check, not duplicated here, gates whether the pulse
+// has any effect). Scoped to "hook actually in the water" (not just "rod
+// equipped") so the forced pulse can't nudge movement during ordinary
+// casting/idle rod-holding -- dmg_rod_class::is_hook_in_water is already a
+// public field (d_a_mg_rod.h), no new accessor needed on that class.
+inline bool isFishingHookInWater() {
+    fopAc_ac_c* rodActor = fopAcM_SearchByName(fpcNm_MG_ROD_e);
+    if (!rodActor) return false;
+    dmg_rod_class* rod = reinterpret_cast<dmg_rod_class*>(rodActor);
+    return rod->is_hook_in_water != 0;
+}
+
+// ADDED 2026-08-14 (follow-up user report: "Moving the rod still unhooks
+// the fish" -- the yank gesture above didn't fix it; user explicitly asked
+// to "bind C stick to the right stick, but only while you are fishing"
+// instead). Broader than isFishingHookInWater() above -- true whenever the
+// fishing-rod actor exists at all (casting, waiting, hook in water,
+// reeling), since the ORIGINAL flatscreen C-stick controls this is meant
+// to restore aren't limited to the hook-in-water window: rod_substick_x/y
+// (d_a_mg_rod.cpp) also drive cast pull-back/power (lines ~1243-1272) and
+// lure/rod-tip steering (lines ~3773-3780), both usable before a fish ever
+// bites. Simple existence check, same fopAcM_SearchByName(fpcNm_MG_ROD_e)
+// pattern already used by isFishingHookInWater()/
+// refreshTrackedFishingRodMtxLive() -- no new plumbing needed.
+inline bool isFishingRodActive() {
+    return fopAcM_SearchByName(fpcNm_MG_ROD_e) != nullptr;
+}
+
 // VR fix (2026-08-12): the clawshot's hand-grip tracking -- deliberately
 // scoped to JUST the two grip models (mHeldItemModel/getHookshotSecondaryModel()),
 // same "simple joint attach" category already fixed for every other held

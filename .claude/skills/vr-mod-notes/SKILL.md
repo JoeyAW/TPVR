@@ -7521,6 +7521,138 @@ are done at these values; retune only on new feedback, per this file's
 usual convention for tuned-and-confirmed constants (e.g. section 23's own
 3in-up/6in-forward standing-camera nudge).
 
+### Fishing hookset — right-hand yank gesture, reusing the shield-bash thrust detector — built 2026-08-14, NOT yet confirmed in-headset
+
+**Symptom** (user report): "I can move the hook with the rod (it's attached
+to the line) however the fish bite and when I pull they just let go. Is
+this fixable or do I need to bind the C stick to use the original fishing
+controls?"
+
+**Traced the real minigame code before answering** (`d_a_mg_rod.cpp`):
+hook-setting checks `rod_stick_y < -0.5f` — the MAIN/left stick pulled
+sharply back, NOT the C-stick (which only drives casting power/direction,
+already superseded by the controller-pointing-aim feature). VR's left
+thumbstick already correctly feeds `rod_stick_y` (`padStatus.stickY`,
+unchanged since section 13) — the mechanic was never actually broken, and
+binding the C-stick would not have helped (it isn't read for this). The
+real problem is UX: the game wants a thumbstick flick at the exact moment
+a fish bites, which isn't the natural VR motion a player reaches for
+(physically yanking the rod-holding hand, mimicking a real hookset).
+
+**Fix, per user's explicit choice (asked first)**: right hand, reusing
+`g_rightThrust` — the SAME `vr_combat::SwingDetector` instance already
+driving the shield-bash thrust (a dedicated second tuned detector was
+deliberately NOT added; overloading is harmless, since forcing R while
+fishing does nothing with no shield equipped, and this fix's stick pulse
+does nothing unless the game's own `mRemainingHookTime` bite window is
+open). New `vr_link::isFishingHookInWater()` (`vr_link_visibility.hpp`)
+gates the pulse to only apply while `dmg_rod_class::is_hook_in_water` is
+true (a public field already, no new accessor needed on that class) —
+scoped narrower than "rod equipped" so the forced pulse can't nudge
+movement during ordinary casting/idle rod-holding. Thin-forwarded via
+`dusk::vr::isFishingHookInWater()` (`vr_main.hpp`/`.cpp`), same pattern
+as every other function in this file.
+
+`vr_main.cpp`'s `tick()`: on `rightThrustEvent.triggered &&
+isFishingHookInWater()`, latches `padStatus.stickY = -127` for
+`kRodYankStickHoldSec = 0.15s` (a plain level-hold, not the R-button
+fix's release-then-assert pattern — `rod_stick_y` is read as a continuous
+value every sim tick, not an edge, so holding it low for a few sim-tick
+periods is sufficient on its own). Applied as an override right after the
+normal left-stick write, so a real stick deflection is only overridden
+during the brief pulse window.
+
+**Built successfully** (RelWithDebInfo, full rebuild since `vr_main.hpp`
+changed) — `vr_link_visibility.hpp`, `vr_main.hpp`/`.cpp` all recompiled,
+clean link, no new warnings.
+
+**NOT yet tested in-headset.** Next step for whoever picks this up: cast
+the rod, wait for a bite, and yank the right hand back sharply during the
+bite window — confirm the fish gets hooked instead of letting go. If it's
+unresponsive, check whether `g_rightThrust`'s existing tuning (from the
+shield-bash gesture) is well-suited to a "pull back" motion specifically
+(it doesn't distinguish direction, so any fast right-hand motion should
+still trigger it) before adding direction filtering. If it over-triggers
+(fires from casting motions, not just the intended yank), the
+`isFishingHookInWater()` gate should already prevent any effect outside
+an active cast — if that's not holding, `is_hook_in_water`'s real
+lifecycle (when exactly it flips) is the next thing to verify with a log,
+not assumed from a partial reading of `d_a_mg_rod.cpp`.
+
+### Fishing hookset, round 2 — C-stick rebound to the right thumbstick while fishing (yank gesture didn't work) — built 2026-08-14, NOT yet confirmed in-headset
+
+**User report on the yank-gesture fix (previous section)**: "That didn't
+seem to do it. Moving the rod still unhooks the fish." Explicit follow-up
+request, asked directly rather than guessing why the gesture failed:
+"Can you bind C stick to the right stick, but only while you are
+fishing?"
+
+**Implemented literally as asked, rather than debugging the gesture
+further** — the user's request is itself a complete, well-scoped
+alternative fix, and section 15's own original unbinding of the C-stick
+(replaced by VR smooth-turn) is exactly what stood between the fishing
+minigame and its real analog controls; reverting that specifically while
+fishing restores the ORIGINAL flatscreen mechanic rather than trying to
+paper over the yank gesture with more tuning.
+
+**New gate, broader than the yank fix's `isFishingHookInWater()`**:
+`vr_link::isFishingRodActive()` (`vr_link_visibility.hpp`) — true
+whenever the fishing-rod actor merely exists (casting, waiting, hook in
+water, reeling), not just while a fish is on the line. Needed to be
+broader because the REAL C-stick-driven mechanics this restores —
+`rod_substick_x/y` in `d_a_mg_rod.cpp` — cover cast pull-back/power
+(~line 1243-1272) and rod-tip/lure steering (~line 3773-3780) too, both
+usable before any bite happens, not just the hookset moment the yank fix
+targeted. Same `fopAcM_SearchByName(fpcNm_MG_ROD_e)` existence check
+already used by `isFishingHookInWater()`/`refreshTrackedFishingRodMtxLive()`
+— no new lookup mechanism.
+
+**`vr_main.cpp`'s `tick()`**: the right-thumbstick block (previously
+unconditional `updateSmoothTurn(rightStick.x, ...)`, since section 15)
+now branches on `isFishingRodActive()`:
+- **Fishing**: writes `padStatus.substickX/Y` from the right stick (same
+  clamp-to-127 pattern the left stick's write already uses), restoring
+  real C-stick input to the minigame. `updateSmoothTurn()` is
+  deliberately SKIPPED for these frames (not fed zero) — the stick is
+  doing fishing input instead, matching how the original flatscreen
+  controls never used the C-stick for camera turn while fishing either.
+- **Not fishing**: unchanged — smooth-turn as before, no substick write.
+
+The yank-gesture fix from the previous round (`g_rightThrust` +
+`rodYankForceStickDown` forcing `padStatus.stickY`) is left in place, not
+reverted — an additional/alternative control, not a replacement; harmless
+to keep since it only ever fires while `isFishingHookInWater()` is true
+and does nothing if the real C-stick already sets the hook first.
+
+**`wantsVirtualPad`'s OR-chain updated** — section 15 had dropped the
+`substickX`/`substickY` checks entirely, reasoning they were "always
+zero" once the C-stick was fully unbound. That's no longer true now that
+fishing can write real nonzero values there again; added both back so a
+frame with ONLY C-stick input (e.g. casting while the rest of the
+controller is idle) still reaches `PADSetVirtualStatus()` instead of
+being silently dropped.
+
+**Built successfully** (RelWithDebInfo, full rebuild since `vr_main.hpp`
+changed) — `vr_link_visibility.hpp`, `vr_main.hpp`/`.cpp` all recompiled,
+clean link, no new warnings.
+
+**NOT yet tested in-headset.** Next step for whoever picks this up:
+equip the fishing rod, confirm the right thumbstick now visibly casts/
+steers the line the same way the original flatscreen C-stick did, wait
+for a bite, and pull the stick back sharply to confirm the hook actually
+sets. Also worth confirming smooth-turn correctly RESUMES the instant the
+rod is put away (`isFishingRodActive()` should flip false the moment the
+rod actor despawns) — no expected gap, but not separately verified. If
+the hookset still doesn't register even with real C-stick input reaching
+`rod_stick_y`... wait, correction: hookset reads `rod_stick_y` (the MAIN/
+left stick), not the C-stick at all (see the previous section) — this
+fix does NOT change how hookset itself is triggered, only restores
+casting/steering. If hookset is STILL the specific complaint after this,
+the yank gesture (or a plain left-thumbstick flick, which was always
+theoretically sufficient per the previous section's analysis) is still
+the only path to it — don't assume this round fixes hookset specifically
+without a fresh, explicit report.
+
 ## Key lesson learned this session
 
 Don't infer that an uncommitted fix supersedes a nearby disable guard just

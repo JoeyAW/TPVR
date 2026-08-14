@@ -212,6 +212,20 @@ void refreshTrackedBoomerangMtxLive();
 // frame from tick(), same as the other refresh*Live() functions.
 void refreshTrackedFishingRodMtxLive();
 
+// VR fix (2026-08-14): true while the fishing rod's hook is actually cast
+// in the water -- see vr_link::isFishingHookInWater()'s own comment
+// (vr_link_visibility.hpp) for why this gates the right-hand-yank
+// hookset gesture. Cheap (a single actor lookup + field read); safe to
+// call every frame.
+bool isFishingHookInWater();
+
+// VR fix (2026-08-14): true whenever the fishing-rod actor exists at all
+// (broader than isFishingHookInWater() above) -- see
+// vr_link::isFishingRodActive()'s own comment (vr_link_visibility.hpp)
+// for why this gates rebinding the right thumbstick to the C-stick while
+// fishing. Cheap (a single actor lookup); safe to call every frame.
+bool isFishingRodActive();
+
 // VR fix (2026-08-12): the clawshot's hand-grip tracking (deliberately
 // scoped to the two grip models only, not the chain itself -- see
 // vr_link::refreshTrackedHookshotMtxLive()'s own comment,

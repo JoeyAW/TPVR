@@ -502,6 +502,14 @@ void refreshTrackedFishingRodMtxLive() {
     vr_link::refreshTrackedFishingRodMtxLive();
 }
 
+bool isFishingHookInWater() {
+    return vr_link::isFishingHookInWater();
+}
+
+bool isFishingRodActive() {
+    return vr_link::isFishingRodActive();
+}
+
 void refreshTrackedHookshotMtxLive() {
     vr_link::refreshTrackedHookshotMtxLive();
 }
@@ -1195,6 +1203,35 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     const bool rightThrustForceRelease = s_rightThrustForceReleaseRemaining > 0.0;
     const bool rightThrustForceHold = s_rightThrustHoldRemaining > 0.0;
 
+    // FISHING HOOKSET (2026-08-14) -- user report: "the fish bite and when
+    // I pull they just let go." Traced the real minigame code first (see
+    // vr_link::isFishingHookInWater()'s own comment, vr_link_visibility.hpp,
+    // for the full reasoning): hook-setting reads dmg_rod_class's
+    // rod_stick_y < -0.5f -- the MAIN/left stick pulled sharply back, not
+    // the C-stick -- and VR's left thumbstick already correctly feeds that
+    // value, so nothing was actually broken. The fix is a UX one: reuse the
+    // SAME right-hand fast-motion detector already driving the shield-bash
+    // thrust (g_rightThrust, above) to ALSO force a stick-down pulse while
+    // the rod's hook is in the water, so a physical yank of the rod hand
+    // sets the hook instead of requiring a thumbstick flick. Deliberately
+    // NOT a second tuned SwingDetector instance -- overloading g_rightThrust
+    // is harmless: forcing R while fishing does nothing (no shield
+    // equipped), and this stick pulse does nothing unless the game's own
+    // (untouched) mRemainingHookTime bite window is currently open.
+    // A plain level-hold (no release-then-assert phase, unlike the R-button
+    // fix above) is sufficient here -- rod_stick_y is read as a continuous
+    // value every sim tick, not an edge, so just holding it low for a few
+    // sim-tick periods guarantees at least one real read catches it.
+    constexpr double kRodYankStickHoldSec = 0.15;
+    static double s_rodYankStickHoldRemaining = 0.0;
+    if (rightThrustEvent.triggered && dusk::vr::isFishingHookInWater()) {
+        s_rodYankStickHoldRemaining = kRodYankStickHoldSec;
+    } else {
+        s_rodYankStickHoldRemaining =
+            std::max(0.0, s_rodYankStickHoldRemaining - static_cast<double>(pacing.presentation_dt_seconds));
+    }
+    const bool rodYankForceStickDown = s_rodYankStickHoldRemaining > 0.0;
+
     // DIAGNOSTIC (temporary -- added 2026-08-05 to investigate "swings when
     // I move my hand normally, doesn't trigger on a real swing"). Two
     // things to check with real data instead of guessing again: (1) is the
@@ -1288,11 +1325,41 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
         padStatus.stickX = static_cast<s8>(std::clamp(leftStick.x, -1.f, 1.f) * 127.f);
         padStatus.stickY = static_cast<s8>(std::clamp(leftStick.y, -1.f, 1.f) * 127.f);
     }
+    // Fishing hookset yank -- see rodYankForceStickDown's own comment above.
+    // Overrides whatever the real left stick reported this frame (harmless:
+    // only active for a brief pulse, only while the rod's hook is actually
+    // in the water).
+    if (rodYankForceStickDown) {
+        padStatus.stickY = -127;
+    }
     // Right thumbstick: UNBOUND from the C-stick/substick as of 2026-08-05
     // (see the mapping comment above) -- deliberately does NOT write
     // padStatus.substickX/Y anymore. Drives VR smooth-turn instead; see
     // updateSmoothTurn() below.
-    dusk::vr::updateSmoothTurn(rightStick.x, pacing.presentation_dt_seconds);
+    //
+    // EXCEPTION (2026-08-14) -- user report: the right-hand-yank hookset
+    // gesture (rodYankForceStickDown, above) didn't fix "moving the rod
+    // still unhooks the fish"; explicit follow-up request: "bind C stick
+    // to the right stick, but only while you are fishing." While
+    // isFishingRodActive() (vr_link_visibility.hpp) is true, the right
+    // stick reverts to its ORIGINAL flatscreen role -- writes
+    // padStatus.substickX/Y (same clamp/scale as the left stick's write
+    // above) instead of driving smooth-turn, restoring real C-stick input
+    // to d_a_mg_rod.cpp's cast-power/direction and rod-tip-steering logic
+    // (rod_substick_x/y). Smooth-turn is deliberately SKIPPED (not just
+    // fed zero) for these frames -- the physical stick is doing fishing
+    // input instead, and the original flatscreen controls never used the
+    // C-stick for camera turn while fishing either. The yank-gesture fix
+    // from earlier this session is left in place, not reverted -- this is
+    // an additional/alternative control, not a replacement.
+    if (dusk::vr::isFishingRodActive()) {
+        if (std::abs(rightStick.x) > kStickDeadzone || std::abs(rightStick.y) > kStickDeadzone) {
+            padStatus.substickX = static_cast<s8>(std::clamp(rightStick.x, -1.f, 1.f) * 127.f);
+            padStatus.substickY = static_cast<s8>(std::clamp(rightStick.y, -1.f, 1.f) * 127.f);
+        }
+    } else {
+        dusk::vr::updateSmoothTurn(rightStick.x, pacing.presentation_dt_seconds);
+    }
 
     // See g_headMoveAngleS's declaration comment for the bug this fixes.
     // Computed here (once per frame, not per eye) rather than lazily in
@@ -1350,9 +1417,16 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     }
 
     constexpr u32 kVrPadPort = PAD_CHAN0;
+    // substickX/Y checks re-added 2026-08-14 -- section 15 dropped them as
+    // "always zero" when the C-stick was fully unbound from padStatus; the
+    // fishing-only C-stick rebind above (isFishingRodActive()) can now
+    // write real nonzero values here again, and those need to reach
+    // PADSetVirtualStatus() even when every other field is zero (e.g. pure
+    // C-stick casting input with the rest of the controller idle).
     const bool wantsVirtualPad = padStatus.button != 0 || padStatus.stickX != 0 ||
                                   padStatus.stickY != 0 || padStatus.triggerLeft != 0 ||
-                                  padStatus.triggerRight != 0;
+                                  padStatus.triggerRight != 0 || padStatus.substickX != 0 ||
+                                  padStatus.substickY != 0;
     if (wantsVirtualPad) {
         PADSetVirtualStatus(kVrPadPort, &padStatus);
     } else {

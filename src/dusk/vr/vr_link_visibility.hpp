@@ -2391,10 +2391,37 @@ inline cXyz computeRawCoreAnchoredEye(daAlink_c* link) {
 // isFirstPerson() false->true transition (a later cutscene/dialogue).
 // Excluding mounted gameplay from this domain entirely removes that whole
 // failure mode, not just the in-the-moment "too high while riding" case.
+//
+// HORSE (Epona) BACKWARD/UP NUDGE (fix 2026-08-14, user report, after
+// confirming the height fix above: "the camera phases through her head
+// and it's way too far ahead of link's body"). getSubjectEyePos()'s
+// horseLocalEyeFromRoot offset ({1.75, 55.0, 25.5}, setBodyPartPos(),
+// d_a_alink.cpp) was authored for the flatscreen third-person camera's own
+// needs -- a first-person VR headset sitting directly at that same point
+// sits far enough forward (and, per a same-day follow-up report, too low)
+// to clip through Epona's own head/neck geometry. Pulls the anchor BACK
+// along Link's body-facing direction (current.angle.y, the same field/
+// convention computeRawCoreAnchoredEye() already uses for its own
+// forward-offset nudge, just negated here) and UP, both by fixed
+// real-world distances. Scoped to horse riding only (checkReinRide()) --
+// canoe/board weren't reported and use their own separate offsets
+// (canoeLocalEyeFromRoot/boardLocalEyeFromRoot); don't assume they have
+// the same problem without separate confirmation.
+inline constexpr float kHorseCameraBackUnits = 30.48f;  // 1 real foot (100 units/metre, see kCoreAnchorExtraForwardUnits's own comment)
+inline constexpr float kHorseCameraUpUnits = 15.24f;    // 6 real inches, same conversion
+
 inline cXyz computeRawEyeAnchor(daAlink_c* link) {
+    if (link->checkReinRide()) {
+        cXyz eye = *link->getSubjectEyePos();
+        const float yawRad = static_cast<float>(link->current.angle.y) * (3.14159265f / 32768.0f);
+        eye.x -= kHorseCameraBackUnits * std::sin(yawRad);
+        eye.z -= kHorseCameraBackUnits * std::cos(yawRad);
+        eye.y += kHorseCameraUpUnits;
+        return eye;
+    }
     if (link->checkModeFlg(daAlink_c::MODE_SWIMMING | daAlink_c::MODE_VINE_CLIMB) ||
         isCrawling(link) || isHookshotAirborneOrHanging(link) ||
-        link->checkReinRide() || link->checkCanoeRide() || link->checkBoardRide())
+        link->checkCanoeRide() || link->checkBoardRide())
     {
         return *link->getSubjectEyePos();
     }

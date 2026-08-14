@@ -35,6 +35,7 @@
 #include "dusk/mouse.h"
 #include "dusk/settings.h"
 #include "dusk/touch_camera.h"
+#include "dusk/vr/vr_main.hpp"
 #include "imgui.h"
 #endif
 
@@ -11067,7 +11068,31 @@ void dCamera_c::onHorseDush() {
         int var_r30 = 55;
         f32 alpha = 0.75f;
         f32 scale = 1.0f;
-        StartBlure(var_r30, mpPlayerActor, alpha, scale);
+        // DISABLED IN VR 2026-08-14 (user request: "disable the epona speed
+        // effect"). StartBlure() drives motionBlure() (m_Do_graphic.cpp) --
+        // a screen-space radial zoom-blur post-process that samples the
+        // shared captured-framebuffer texture (mDoGph_gInf_c::
+        // getFrameBufferTexObj(), the SAME shared screen-capture texture
+        // documented at length in CLAUDE.md section 3 for water's fake
+        // reflection and section 5's heat-wave kagerou particles) through a
+        // texture matrix that pulls the whole screen toward the target
+        // actor's on-screen position, blended over several frames for a
+        // streak look. Every other VR-disabled effect that reads this same
+        // shared capture texture was disabled specifically because a VR
+        // headset's free head rotation and per-eye stereo separation break
+        // the "smooth, bounded flatscreen camera motion" assumption this
+        // whole screen-capture-as-effect technique depends on -- this is
+        // the same mechanism, same assumption, same class of bug, just
+        // triggered by Epona's dash-start instead of water/heat-shimmer.
+        // Scoped to only THIS call site (Epona dash), not StartBlure()/
+        // motionBlure() globally -- the same function also drives unrelated
+        // effects (underwater motion blur, enemy charge attacks, cutscene
+        // possession shots, Golden Wolf) that weren't reported and aren't
+        // touched here, matching this project's established "disable only
+        // the reported call site" pattern (see section 5's kagerou fixes).
+        if (!dusk::vr::isRenderingToHeadset()) {
+            StartBlure(var_r30, mpPlayerActor, alpha, scale);
+        }
     }
 }
 

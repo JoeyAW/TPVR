@@ -7354,6 +7354,125 @@ just one) is the natural next lever if a slower transition than a shop
 door ever exposes the same class of bug again, per exactly
 how long the settle window needs to be.
 
+### Epona dash speed-blur effect — CONFIRMED WORKING IN-HEADSET 2026-08-14
+
+**Goal** (explicit user request: "disable the epona speed effect"). User
+also pointed at `C:\Users\joeyw\dusklight-mods`'s `effect_remover` mod on
+the chance it already covered this — checked directly: that mod only
+covers three unrelated "fake shading" removers (projected/moya cloud
+shade, terrain shadow wash-out — the same TevKColor mechanism already used
+for this project's own cloud-shadow fix — and unbaked vertex lighting).
+Nothing in that repo (any of its 6 mods) mentions Epona, horses, dash, or
+speed effects at all — a clean grep across the whole repo came back empty.
+No reusable fix there; root-caused directly in this codebase instead.
+
+**Root cause**: `dCamera_c::onHorseDush()` (`d_camera.cpp`), called from
+two sites in `d_camera.cpp` whenever Epona's lash-dash starts
+(`horse->getLashDashStart()`), calls `StartBlure(55, mpPlayerActor, 0.75f,
+1.0f)`. `StartBlure()` sets `mBlure` state that drives `motionBlure()`
+(`m_Do_graphic.cpp`) — a screen-space radial zoom-blur post-process:
+samples the shared captured-framebuffer texture
+(`mDoGph_gInf_c::getFrameBufferTexObj()`) through a texture matrix that
+pulls the screen toward the target actor's on-screen position, blended
+over several frames for a streak look. **This is the exact same shared
+screen-capture texture already documented at length in CLAUDE.md section 3
+for water's fake reflection and section 5's heat-wave kagerou particles**
+— every one of those needed VR-specific handling because a headset's free
+head rotation and per-eye stereo separation break the "smooth, bounded
+flatscreen camera motion" assumption this whole screen-capture-as-effect
+technique depends on. Same mechanism, same assumption, same class of bug,
+just triggered by Epona's dash instead of water/heat-shimmer — a strong,
+direct match for "speed effect" without needing a diagnostic-log round.
+
+**Fix**: gated the single `StartBlure()` call inside `onHorseDush()` on
+`!dusk::vr::isRenderingToHeadset()` — needed a new
+`#include "dusk/vr/vr_main.hpp"` in `d_camera.cpp` (removed during the
+2026-08-09 flatscreen-camera-sync revert, per that section's own writeup —
+re-added here for this unrelated purpose). **Deliberately scoped to only
+this one call site**, not `StartBlure()`/`motionBlure()` globally —
+`StartBlure()` is a general-purpose effect also used for several unrelated
+things (underwater motion blur, enemy charge attacks in
+`d_a_e_po.cpp`/`d_a_e_pz.cpp`/`d_a_e_zh.cpp`, cutscene possession shots in
+`d_ev_camera.cpp`/`d_event_data.cpp`, Golden Wolf in
+`d_a_npc_gwolf.cpp`), none of which were reported and none of which are
+touched here — matching this project's established "disable only the
+reported call site" pattern (section 5's kagerou fixes: "touching only
+that one call, leaving every other particle/effect at that call site
+alone"). Since `onHorseDush()` is a single shared function with exactly
+two call sites (both just call it, no per-site logic), gating inside the
+function itself covers both without needing to touch either call site.
+
+**Built successfully** (RelWithDebInfo) — only `d_camera.cpp` needed
+recompiling, clean link, no new warnings.
+
+**CONFIRMED WORKING IN-HEADSET** — user tested and reported "The effect is
+gone." No regressions to flatscreen or the other `StartBlure()` triggers
+reported.
+
+### Epona camera pulled back ~1ft + raised ~6in, was phasing through her head — built 2026-08-14, NOT yet confirmed in-headset
+
+**Goal** (explicit user follow-up, same horse-riding session as the
+speed-blur fix above: "can you move the camera backwards by about a foot
+when on epona? The camera phases through her head and it's way too far
+ahead of link's body"). Direct continuation of the 2026-08-13 mounted-
+gameplay fix (`computeRawEyeAnchor()`'s horse/canoe/board fallback to
+`getSubjectEyePos()`) — that fix corrected the VERTICAL height (was "too
+high"), and this fix addresses a separate, FORWARD/BACK problem in the
+same underlying value: `setBodyPartPos()`'s `horseLocalEyeFromRoot`
+offset ({1.75, 55.0, 25.5}, `d_a_alink.cpp`) was authored for the
+flatscreen third-person camera's own needs (that camera sits well behind
+Link even at its closest, so a forward-biased reference point is
+invisible to it) — a first-person VR camera sitting directly at that same
+point is far enough forward to clip through Epona's own head/neck
+geometry, matching the report exactly.
+
+**Fix** (`vr_link_visibility.hpp`'s `computeRawEyeAnchor()`): split the
+horse case (`checkReinRide()`) out of the shared swim/crawl/vine/
+hookshot/canoe/board fallback branch into its own branch, and pull the
+raw head-joint anchor BACK along Link's body-facing direction
+(`current.angle.y`, the same field/convention
+`computeRawCoreAnchoredEye()` already uses for its own forward-offset
+nudge — see section 23 — just negated here) by a new
+`kHorseCameraBackUnits = 30.48f` (1 real foot, same 100-units/metre
+conversion this file already establishes). **Scoped to horse riding
+only** — canoe/board weren't reported and keep their own separate offsets
+(`canoeLocalEyeFromRoot`/`boardLocalEyeFromRoot`) untouched; don't assume
+they have the same problem without separate confirmation, same reasoning
+this project always applies before widening a fix's scope.
+
+**Built successfully** (RelWithDebInfo) — only `vr_main.cpp` needed
+recompiling (transitively includes the header), clean link, no new
+warnings.
+
+**ROUND 1 RESULT**: user tested the backward pull alone and confirmed
+"It moved back" (no complaint about the amount), then immediately
+requested a second, independent nudge: "can you also move it up by about
+6 inches" — same underlying `horseLocalEyeFromRoot` reference point being
+too low for a first-person VR seat, not a correction to the backward
+amount.
+
+**ROUND 2 fix** (same function, same day): added `eye.y +=
+kHorseCameraUpUnits` (`15.24f`, 6 real inches, same 100-units/metre
+conversion) right alongside the existing backward pull in the
+`checkReinRide()` branch — a plain vertical addition, no yaw/direction
+math needed since up is up regardless of facing. Rewrote the block
+comment above the branch to cover both axes together (was
+"BACKWARD NUDGE," now "BACKWARD/UP NUDGE") rather than stacking a second,
+separately-dated comment block on the same few lines.
+
+**Built successfully** (RelWithDebInfo) — only `vr_main.cpp` needed
+recompiling (transitively includes the header), clean link, no new
+warnings.
+
+**NOT yet tested in-headset** (the up-nudge specifically — the backward
+pull is separately confirmed per Round 1 above). Next step for whoever
+picks this up: mount Epona in VR and confirm the camera now sits at a
+comfortable height AND distance clear of her head/neck. If either amount
+needs retuning, `kHorseCameraBackUnits`/`kHorseCameraUpUnits` are the two
+independent constants to adjust — same "ship a named, empirically-tunable
+constant" pattern this file uses everywhere else (e.g.
+`kCoreAnchorExtraUpUnits`/`kEyeAnchorExtrapolationGain`).
+
 ## Key lesson learned this session
 
 Don't infer that an uncommitted fix supersedes a nearby disable guard just

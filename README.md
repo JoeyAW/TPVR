@@ -10,7 +10,7 @@
 
 # Overview
 
-Dusklight VR is an (unfortunately) vibecoded VR port of Twilight Princess.
+Dusklight VR is a vibecoded VR port of Twilight Princess.
 
 It aims to be as accurate as possible to the original game while allowing you to experience the gameplay from a VR perspective.
 

@@ -10,7 +10,7 @@
 
 # Overview
 
-Dusklight VR is an (unfortunately) vibecoded VR port of Twilight Princess.
+Dusklight VR is a vibecoded VR port of Twilight Princess.
 
 It aims to be as accurate as possible to the original game while allowing you to experience the gameplay from a VR perspective.
 
@@ -54,7 +54,7 @@ And yes—I used an em-dash there. You can type it with on your keyboard with Al
 
 # Credits
 
-Special thanks to the [Dusklight](https://twilitrealm.dev/) team, [TP decompilation](https://github.com/zeldaret/tp) team, the GC/Wii decompilation community, the [Aurora](https://github.com/encounter/aurora) developers, the [TP speedrunning community](https://zsrtp.link), and all [contributors](https://github.com/TwilitRealm/dusklight/graphs/contributors).
+Special thanks to the [Dusklight](https://twilitrealm.dev/) team, [TP decompilation](https://github.com/zeldaret/tp) team, the GC/Wii decompilation community, the [Aurora](https://github.com/encounter/aurora) developers, [Automata](https://github.com/automata-rtx/dusklight-mods), the [TP speedrunning community](https://zsrtp.link), and all [contributors](https://github.com/TwilitRealm/dusklight/graphs/contributors).
 
 
 

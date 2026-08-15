@@ -7701,6 +7701,77 @@ again, section 3's writeup above still has the full technique/reasoning
 to rebuild it from — it's a genuinely reusable pattern, just not worth
 keeping resident in the tree indefinitely.
 
+### Flat 2D aiming reticle disabled in VR; smooth-turn rate increased 1.5x — both CONFIRMED WORKING IN-HEADSET 2026-08-14
+
+**Reticle**: `daAlink_sight_c::draw()` (`d_a_alink_effect.inc`) — the flat
+2D crosshair sprite shown while aiming bow/slingshot/hookshot/boomerang
+(both the normal `daPy_sightPacket_c::draw()` case and the lock-on
+`mLockCursor` case) — now early-returns while
+`dusk::vr::isRenderingToHeadset()`. Per explicit user request, scoped to
+VR only (flatscreen unaffected). Redundant now that the world-space
+physical aim-point marker exists (`drawAimCrosshair()`, see the section
+above) — the 2D reticle would otherwise still bake into the head-locked
+HUD billboard, fixed center-screen regardless of where the player is
+actually looking. `d_a_alink_effect.inc` is textually included into
+`d_a_alink.cpp` (which already includes `vr_main.hpp`), so no new include
+was needed. Built clean, confirmed fixed.
+
+**Smooth-turn rate**: `kSmoothTurnDegPerSec` (`vr_smooth_turn.hpp`)
+raised from 90°/s to 135°/s (1.5x, exact user-requested multiplier) at
+full right-stick deflection. Deadzone and everything else about the
+feature (section 15) unchanged. Built clean, confirmed working.
+
+### Crash on changing armor/clothes in the menu — FIXED, CONFIRMED IN-HEADSET 2026-08-14
+
+**Symptom** (user-reported crash, with a real call stack): access
+violation reading `0xFFFFFFFFFFFFFFFF` inside `J3DShape::offFlag()`,
+called from `J3DShapeTable::show()`, called from
+`vr_link::showModel(mpLinkHatModel)` inside `vr_link::updateFrame()` —
+i.e. a crash in this project's own VR code, not base-game code, triggered
+specifically by changing armor/clothes on the menu screen.
+
+**Root cause**: `updateFrame()` calls `showModel()`/`hideModel()` on
+`mpLinkFaceModel`/`mpLinkHatModel` (plus `hideArmsAndEars()`/
+`showArmsAndEars()`, which touch `mpLinkModel`'s own shape table)
+**unconditionally every real VR frame**, per section 18's "runs every
+frame either way" reasoning. But `d_a_alink.cpp` already has its own,
+pre-existing precedent for exactly this hazard: several base-game
+show()/hide() calls on these SAME body-related shape tables are wrapped
+in `if (mClothesChangeWaitTimer == 0) { ... }` — meaning the underlying
+`J3DModelData`/shape tables are apparently in a transient, unsafe state
+for a few frames while a clothes change (Hero's Clothes ↔ Ordon Clothes,
+or Magic Armor) is actually swapping model resources. This VR code never
+checked that flag, so it could land mid-swap and dereference a stale/
+freed shape-table pointer — matching the `-1`-pattern access violation
+exactly.
+
+**Fix** (`vr_link_visibility.hpp`'s `updateFrame()`): wrapped the whole
+face/hat/arms/ears show/hide block in
+`if (link->getClothesChangeWaitTimer() == 0) { ... }` — a public accessor
+that already existed (`d_a_alink.h`), same guard shape the base game
+already uses at its own call sites on these shapes. Deliberately scoped
+to just this block, not an early-return out of the whole function — the
+tracked-hand-matrix computation later in `updateFrame()` is unrelated to
+this hazard and shouldn't stall too, even though in practice the player
+is looking at a menu during this brief (~4-tick) window either way. Since
+this function already runs every real frame regardless, skipping a
+handful of frames during the wait window costs nothing — the hide/show
+decision just resumes correctly once the timer clears, same reasoning
+section 18 already established for why this block is safe to run
+unconditionally in the first place.
+
+Built successfully (RelWithDebInfo) — only `vr_main.cpp` (transitively
+includes the header) recompiled, clean link, no new warnings.
+
+**CONFIRMED FIXED IN-HEADSET** — user tested (changing armor on the menu
+screen, the exact repro from the crash report) and reported "Fixed."
+**Reusable lesson**: `mClothesChangeWaitTimer`/`getClothesChangeWaitTimer()`
+is the general-purpose signal for "don't touch Link's face/hat/arm/body
+shape tables right now, a clothes/armor swap is mid-flight" — worth
+checking for at any FUTURE VR call site that shows/hides shapes on
+`mpLinkModel`/`mpLinkFaceModel`/`mpLinkHatModel`/`mpLinkHandModel`,
+not just the ones this fix touched.
+
 ## Key lesson learned this session
 
 Don't infer that an uncommitted fix supersedes a nearby disable guard just

@@ -1049,17 +1049,43 @@ inline void updateFrame(const FrameInput& input) {
     // menu's own backdrop is a frozen capture -- see dDlst_MENU_CAPTURE_c
     // in d_menu_window.cpp), so touching the shared isFirstPerson()
     // would risk an untested side effect on the camera for no benefit.
-    const bool firstPerson = isFirstPerson(link) && !dComIfGp_isPauseFlag();
-    if (firstPerson) {
-        // Hide face and hat — these are separate J3DModel objects so hiding
-        // their shape tables has no effect on the body or hand models.
-        hideModel(link->mpLinkFaceModel);
-        hideModel(link->mpLinkHatModel);
-        hideArmsAndEars(link);
-    } else {
-        showModel(link->mpLinkFaceModel);
-        showModel(link->mpLinkHatModel);
-        showArmsAndEars(link);
+    // FIXED 2026-08-14 (crash report: access violation reading 0xFFFF...FFFF
+    // inside J3DShape::offFlag(), from showModel(mpLinkHatModel) here, while
+    // changing armor/clothes on the menu screen). mClothesChangeWaitTimer
+    // (d_a_alink.h, public getClothesChangeWaitTimer()) is the base game's
+    // OWN guard for exactly this class of hazard -- a real handful of
+    // existing show()/hide() call sites on these same body-related shape
+    // tables in d_a_alink.cpp are already wrapped in
+    // "if (mClothesChangeWaitTimer == 0) { ... }", because the underlying
+    // J3DModelData/shape tables are apparently in a transient, unsafe-to-
+    // touch state while a clothes change is in flight (the swap between
+    // Hero's Clothes/Ordon Clothes model resources takes a few frames).
+    // This VR code was calling showModel()/hideModel() on the SAME shapes
+    // every real frame with no such guard, and could land mid-swap and
+    // dereference a stale/freed shape-table pointer. Skipping entirely
+    // during the wait window is safe and matches this function's own
+    // existing "runs every frame either way, so a skipped frame just picks
+    // back up correctly on the next one" reasoning above -- no state is
+    // lost, the hide/show decision just resumes once the timer clears.
+    // Deliberately scoped to just this block (not an early-return out of
+    // the whole function) -- the tracked-hand-matrix computation below is
+    // unrelated to the clothes-change hazard and shouldn't stall too, even
+    // though in practice the player is looking at a menu during this brief
+    // window either way.
+    if (link->getClothesChangeWaitTimer() == 0) {
+        const bool firstPerson = isFirstPerson(link) && !dComIfGp_isPauseFlag();
+        if (firstPerson) {
+            // Hide face and hat — these are separate J3DModel objects so
+            // hiding their shape tables has no effect on the body or hand
+            // models.
+            hideModel(link->mpLinkFaceModel);
+            hideModel(link->mpLinkHatModel);
+            hideArmsAndEars(link);
+        } else {
+            showModel(link->mpLinkFaceModel);
+            showModel(link->mpLinkHatModel);
+            showArmsAndEars(link);
+        }
     }
 
     // Compute (but do not yet apply -- see applyTrackedHandMtx() below)

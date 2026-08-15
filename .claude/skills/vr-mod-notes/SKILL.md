@@ -7579,7 +7579,7 @@ an active cast — if that's not holding, `is_hook_in_water`'s real
 lifecycle (when exactly it flips) is the next thing to verify with a log,
 not assumed from a partial reading of `d_a_mg_rod.cpp`.
 
-### Fishing hookset, round 2 — C-stick rebound to the right thumbstick while fishing (yank gesture didn't work) — built 2026-08-14, NOT yet confirmed in-headset
+### Fishing hookset, round 2 — C-stick rebound to the right thumbstick while fishing (yank gesture didn't work) — CONFIRMED FIXED IN-HEADSET 2026-08-14
 
 **User report on the yank-gesture fix (previous section)**: "That didn't
 seem to do it. Moving the rod still unhooks the fish." Explicit follow-up
@@ -7636,22 +7636,70 @@ being silently dropped.
 changed) — `vr_link_visibility.hpp`, `vr_main.hpp`/`.cpp` all recompiled,
 clean link, no new warnings.
 
-**NOT yet tested in-headset.** Next step for whoever picks this up:
-equip the fishing rod, confirm the right thumbstick now visibly casts/
-steers the line the same way the original flatscreen C-stick did, wait
-for a bite, and pull the stick back sharply to confirm the hook actually
-sets. Also worth confirming smooth-turn correctly RESUMES the instant the
-rod is put away (`isFishingRodActive()` should flip false the moment the
-rod actor despawns) — no expected gap, but not separately verified. If
-the hookset still doesn't register even with real C-stick input reaching
-`rod_stick_y`... wait, correction: hookset reads `rod_stick_y` (the MAIN/
-left stick), not the C-stick at all (see the previous section) — this
-fix does NOT change how hookset itself is triggered, only restores
-casting/steering. If hookset is STILL the specific complaint after this,
-the yank gesture (or a plain left-thumbstick flick, which was always
-theoretically sufficient per the previous section's analysis) is still
-the only path to it — don't assume this round fixes hookset specifically
-without a fresh, explicit report.
+**CONFIRMED FIXED IN-HEADSET** — user tested and reported: "Fixed, I have
+to hold the right stick down to hook the fish then I can physically wave
+the rod left and right to get the fis[h]." Real working control scheme,
+for reference: hold the right thumbstick (C-stick) down to set the hook,
+then physically move the tracked hand (controller-pointing steers the rod
+tip, per the earlier controller-aim feature) to reel/fight the fish —
+matches the original flatscreen game's own C-stick-driven hookset/fight
+controls, now genuinely restored.
+
+**Worth flagging, not re-investigated**: this contradicts the previous
+section's code trace, which found hookset gated on `rod_stick_y < -0.5f`
+— the MAIN/left stick, not the C-stick/substick — and concluded this
+round's C-stick rebind "does NOT change how hookset itself is triggered."
+The user's actual result says otherwise: holding the RIGHT stick down is
+what works. Two explanations, neither confirmed: (a) `d_a_mg_rod.cpp` has
+another, unread hookset-adjacent check on `rod_substick_y` somewhere this
+session's partial reading missed (the file is large, ~6000 lines, and
+was never read end-to-end — only the specific regions this investigation
+happened to grep into), or (b) holding the C-stick down while reeling
+satisfies some other real game-logic gate (e.g. `checkFishingRodUseAccept()`'s
+own `rod_substick_y < -0.9f` condition, glimpsed but not traced fully in
+the previous section at `d_a_mg_rod.cpp:3664`) that's a prerequisite for
+the hookset check to even run. Since the fix works and the user has a
+clear, repeatable control scheme now, this discrepancy isn't worth
+chasing further unless a future report contradicts the working behavior
+above — if it does, start by actually reading `rod_substick_y`'s full
+set of consumers in `d_a_mg_rod.cpp` rather than re-trusting this
+session's partial trace.
+
+**This closes out the fishing minigame VR-control investigation** — cast/
+steer via the right stick (this round), hookset via holding the right
+stick down (same rebind, mechanism not fully explained but confirmed
+working), reel/fight via physically moving the tracked hand. The
+earlier-suspected left-stick/yank-gesture path for hookset was not what
+actually ended up mattering in practice.
+
+### Eye-buffer BMP/PNG debug dump tooling removed — 2026-08-14
+
+**User request**: "remove the debug bmp and png screenshots and their
+function." The eye-buffer BMP dump tooling (`dumpEyeBufferToBmp()`,
+`vr_xr_submit.hpp`, built 2026-07-29 — see section 3's water-black
+investigation, where it was the load-bearing tool that found the real
+root cause) was hooked into `readbackEyeCopy()` to re-dump each eye's
+rendered buffer to `vr_debug_eye0.bmp`/`vr_debug_eye1.bmp` every 90
+frames. Per this project's normal practice, diagnostic scaffolding is
+removed once no longer needed — this tool hasn't been reached for since
+the water investigation closed out, and the four dump files
+(`vr_debug_eye{0,1}.bmp`/`.png`, the PNGs being one-off manual
+conversions from an earlier session) had been sitting **checked into git**
+this whole time, at several MB each.
+
+**Removed**: `dumpEyeBufferToBmp()` itself and its call site (the
+`frameCounter[eyeIndex]++ % 90` gate) in `readbackEyeCopy()`
+(`vr_xr_submit.hpp`), plus `git rm`'d all four tracked files
+(`vr_debug_eye0.bmp`, `vr_debug_eye0.png`, `vr_debug_eye1.bmp`,
+`vr_debug_eye1.png`) from the repo.
+
+**Built successfully** (RelWithDebInfo) — only `vr_main.cpp` (which
+transitively includes `vr_xr_submit.hpp`) needed recompiling, clean link,
+no new warnings, no other call sites found by grep. If a future VR
+rendering investigation needs this kind of raw-pixel-dump capability
+again, section 3's writeup above still has the full technique/reasoning
+to rebuild it from — it's a genuinely reusable pattern, just not worth
+keeping resident in the tree indefinitely.
 
 ## Key lesson learned this session
 

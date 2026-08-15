@@ -2263,6 +2263,16 @@ BOOL daAlink_sight_c::create() {
 }
 
 void daAlink_sight_c::draw() {
+    // Flat 2D aiming reticle -- skipped in VR per explicit user request
+    // (2026-08-14): redundant now that the world-space physical aim-point
+    // marker exists (drawAimCrosshair(), vr_stereo_render.hpp/vr_main.cpp,
+    // see vr-mod-notes) and would otherwise still show up center-screen in
+    // the head-locked HUD billboard regardless of where the player is
+    // actually looking. Flatscreen (non-VR) play is unaffected.
+    if (dusk::vr::isRenderingToHeadset()) {
+        return;
+    }
+
     if (mLockFlag) {
         mLockCursor.setPos(mProjMtx[0][3], mProjMtx[1][3]);
         mLockCursor.draw();

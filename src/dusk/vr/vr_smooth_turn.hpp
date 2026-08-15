@@ -48,7 +48,7 @@ inline float g_smoothTurnYawRad = 0.f;
 
 // Turn rate at full stick deflection, and a deadzone to avoid drift from
 // controller noise while the stick is resting near center.
-inline constexpr float kSmoothTurnDegPerSec = 90.f;
+inline constexpr float kSmoothTurnDegPerSec = 135.f;  // 90 * 1.5, per explicit user request 2026-08-14
 inline constexpr float kSmoothTurnStickDeadzone = 0.15f;
 
 // Advances g_smoothTurnYawRad from the right stick's raw X axis (-1..1)

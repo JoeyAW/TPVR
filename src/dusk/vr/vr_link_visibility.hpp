@@ -27,6 +27,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <windows.h>  // TEMP DIAGNOSTIC: OutputDebugStringA for [dusk::vr::coreanchor] logging below
 
 namespace vr_link {
 
@@ -978,6 +979,58 @@ inline bool isHookshotAirborneOrHanging(daAlink_c* link) {
             return false;
     }
 }
+
+// ADDED 2026-08-15 (user request: "make it so iron boots are using the
+// first person anchor that swimming, climbing, cutscenes, etc use" --
+// clarified the actual symptom is the camera feeling wrong while stuck to
+// a wall/ceiling via Iron Boots' magnetism, not ordinary walking with them
+// equipped -- isFirstPerson() already permits first-person for plain
+// Iron-Boots gameplay same as everything else with no event running).
+// Same underlying gap as every other entry in this list: the core anchor
+// (section 23) assumes Link is standing upright on flat ground with
+// world-up as up, and adds its calibrated height offset straight onto
+// current.pos.y -- but magnetized Iron Boots can have his whole body
+// pitched sideways on a wall or upside-down on a ceiling
+// (setMagneBootsMtx(), d_a_alink_hvyboots.inc, rotates shape_angle/
+// current.angle directly to match the magnetic surface's normal), so a
+// fixed vertical-only offset from a standing calibration means nothing
+// there. checkMagneBootsOn() (d_a_player.h, already public) covers
+// "actually stuck," and PROC_MAGNE_BOOTS_FLY (d_a_alink_hvyboots.inc's
+// procMagneBootsFlyInit()/procMagneBootsFly()) covers the brief
+// being-pulled-toward-the-surface flight beforehand -- both leave Link's
+// body away from a normal standing pose the same way
+// isHookshotAirborneOrHanging()'s states do, so grouped the same way.
+inline bool isMagnetized(daAlink_c* link) {
+    if (!link) return false;
+    return link->checkMagneBootsOn() || link->mProcID == daAlink_c::PROC_MAGNE_BOOTS_FLY;
+}
+
+// SAME DAY follow-up (user: "It's also an underwater issue" -- i.e. use
+// the same raw-anchor treatment for this too). Iron Boots' other
+// well-known use is sinking to walk along a submerged lake/river bed
+// instead of floating. That state is NOT covered by MODE_SWIMMING: once
+// Link actually lands on the underwater floor he transitions into an
+// ordinary walking daAlink_PROC (confirmed via checkSwimUpAction(),
+// d_a_alink_swim.inc -- calls the same procLandInit() used for normal
+// dry-land landings), and mModeFlg gets fully REPLACED from that new
+// proc's own entry in m_procInitTable (commonProcInit(), d_a_alink.cpp)
+// rather than incrementally OR'd, so MODE_SWIMMING doesn't survive the
+// transition even though he's still fully submerged -- confirmed
+// separately from isMagnetized() above, not the same mechanism. The
+// engine's own signal for "underwater and using Iron Boots to stay down,"
+// independent of which proc state that lands him in, is
+// FLG0_WATER_IN_MOVE (checkWaterInMove(), d_a_player.h -- already public,
+// set in checkSwimUpAction()'s heavy-boots landing branch and cleared in
+// swimOutAfter()). Note this is a DIFFERENT justification than
+// isMagnetized()'s: setBodyPartPos()'s own eye branch (d_a_alink.cpp,
+// line ~5581) actually takes the SAME root+local-offset path here as
+// ordinary standing (its gate is MODE_SWIMMING-based, which is off by
+// this point) -- so unlike the magnetized case, this isn't fixing an
+// orientation mismatch the engine already solved elsewhere. It's the same
+// "core anchor's standing-calibrated height doesn't necessarily transfer"
+// risk as every other entry in this list (different sink/walk posture
+// underwater is plausible, not confirmed) -- folded in per direct user
+// request rather than a proven-first root cause.
 
 // Forward-declared here, defined further down (see its own comment) --
 // needed by updateFrame() below so hands anchor to the SAME point the VR
@@ -2233,10 +2286,21 @@ inline cXyz lerpXyz(const cXyz& a, const cXyz& b, float t) {
 // getSubjectEyePos() is the animated value. kCoreAnchorHeightOffsetDefault
 // is only a placeholder used for the handful of frames before the first
 // real calibration ever runs (isFirstPerson() true before setBodyPartPos()
-// has executed even once) -- taken from localEyeFromRoot's own vertical
-// component above as a reasonable standing-height guess, immediately
-// overwritten by the real calibration on the very first activation.
-inline constexpr float kCoreAnchorHeightOffsetDefault = 55.75f;
+// has executed even once), immediately overwritten by the real calibration
+// on the very first activation.
+//
+// CORRECTED 2026-08-15 (see kCoreAnchorHeightOffsetPlausibleMin/Max's own
+// comment below for the full story): this used to be 55.75, copied
+// verbatim from setBodyPartPos()'s `localEyeFromRoot = {0, 55.75, 15}` --
+// but that constant is a LOCAL offset run through
+// `mDoMtx_stack_c::multVec()` against the model's own joint-matrix stack
+// (rotation/scale included, and very possibly a different root reference
+// than current.pos), not a plain world-space Y delta against current.pos.y
+// the way this file's `realEye.y - current.pos.y` is. The two were never
+// actually the same quantity -- a real in-headset capture (see below)
+// showed the genuine, stable value here is ~157-158, not ~56. Updated to
+// match the real measured value instead of the mismatched borrowed one.
+inline constexpr float kCoreAnchorHeightOffsetDefault = 158.0f;
 inline float s_coreAnchorHeightOffset = kCoreAnchorHeightOffsetDefault;
 inline bool s_coreAnchorCalibrated = false;
 
@@ -2292,8 +2356,27 @@ inline uint64_t s_coreAnchorLastAttemptSimTick = 0;
 inline int s_coreAnchorCalibrationAttempts = 0;
 inline int s_coreAnchorConsecutivePlausible = 0;
 inline float s_coreAnchorLastPlausibleCandidate = 0.0f;
-inline constexpr float kCoreAnchorHeightOffsetPlausibleMin = 20.0f;
-inline constexpr float kCoreAnchorHeightOffsetPlausibleMax = 100.0f;
+// CORRECTED 2026-08-15 (user report: ground bug "took about 5 seconds to
+// fix", every time -- not intermittent). A real [dusk::vr::coreanchor]
+// capture found the actual bug: this 20-100 band was based on
+// kCoreAnchorHeightOffsetDefault's OLD, mismatched-reference 55.75 value
+// (see that constant's own corrected comment) -- the real, legitimate,
+// rock-stable candidate in the capture was ~157-158 the entire time
+// (drifting under 1 unit across 150 consecutive attempts, i.e. genuinely
+// settled data, not noise), which this old band rejected on literally
+// EVERY attempt (`plausible=0` for all 150), so it could never reach
+// `settled` and always fell through to the MAX_ATTEMPTS_FALLBACK -- not
+// because settling was slow, but because the correct value was never
+// even eligible to be accepted. This is why the "5 second" wait was
+// consistent/every-time rather than occasional: it wasn't really a
+// timing race being sometimes won and sometimes lost, it was hitting the
+// same guaranteed-to-fail check every single time and just waiting out
+// the clock. Raised the ceiling well above the real measured value
+// (158) while keeping real garbage samples seen in the same capture
+// (299, 18687.98 -- both from transient pre-settle frames, already
+// harmless since they're rejected either way) safely excluded.
+inline constexpr float kCoreAnchorHeightOffsetPlausibleMin = 80.0f;
+inline constexpr float kCoreAnchorHeightOffsetPlausibleMax = 220.0f;
 // How much a new plausible sample is allowed to differ from the previous
 // plausible one and still count as part of the same consecutive run --
 // distinguishes "still settling, jumping around within the plausible
@@ -2302,7 +2385,44 @@ inline constexpr float kCoreAnchorHeightOffsetPlausibleMax = 100.0f;
 // enough not to reject legitimate small posture drift between ticks.
 inline constexpr float kCoreAnchorConsecutiveTolerance = 5.0f;
 inline constexpr int kCoreAnchorRequiredConsecutivePlausible = 3;
-inline constexpr int kCoreAnchorCalibrationMaxAttempts = 30;  // ~1s at 30Hz sim tick
+// WIDENED 2026-08-15 (user report: ground bug "stays stuck, especially if
+// you move too much or trigger first person as soon as it loads, but
+// other times it corrects itself if you stand completely still"). At the
+// old cap (30, ~1s), moving right after a load kept breaking the
+// consecutive-plausible streak until the cap forced a commit to whatever
+// the LAST sample happened to be -- possibly taken mid-stride/mid-slope,
+// i.e. exactly the wrong kind of sample to lock in for the rest of the
+// session. Standing still let it converge before hitting the cap, which
+// is the "self-corrects" case. While NOT yet calibrated,
+// s_coreAnchorHeightOffset keeps whatever its previous value was (the
+// last known-good calibration, or the plausible default on a session's
+// very first activation) -- so waiting longer for a real 3-consistent-
+// sample settle costs nothing but time; there's no reason to rush a
+// forced accept. 150 (~5s) gives a load that's still settling, or a
+// player who doesn't stand still immediately, real room to converge
+// properly before the old escape hatch would have kicked in.
+inline constexpr int kCoreAnchorCalibrationMaxAttempts = 150;  // ~5s at 30Hz sim tick
+
+// ADDED 2026-08-15 (same report, other half: "trigger first person as
+// soon as it loads"). The isFirstPerson()-false reset in
+// getVrCameraEyeAnchor() can only re-arm calibration around a
+// cutscene/Wolf-form transition -- it has no way to notice a load/warp
+// that never dips isFirstPerson() false at all (e.g. loading a save
+// while already standing in first-person gameplay, or an Owl Statue/
+// overworld warp with no event wrapper this file's isFirstPerson()
+// recognizes) -- so the pre-load offset just gets reused verbatim at the
+// new location with zero re-validation. Rather than hunt for and hook
+// every possible load/warp call site individually, detect the ONE thing
+// they all have in common from here: current.pos jumping by an amount no
+// real per-tick movement (walking, running, even galloping on Epona) can
+// produce. kCoreAnchorTeleportDistanceUnits is picked well above the
+// fastest real in-game per-tick displacement (Epona at full gallop is
+// still well under 100 units/tick at this project's ~100-units/metre
+// scale) so it can't misfire on ordinary fast movement.
+inline cXyz s_coreAnchorLastTickPos{0.0f, 0.0f, 0.0f};
+inline bool s_coreAnchorLastTickPosValid = false;
+inline uint64_t s_coreAnchorLastTickPosSimTick = 0;
+inline constexpr float kCoreAnchorTeleportDistanceUnits = 300.0f;  // ~3m/tick
 
 // ADDED 2026-08-09 (user report, after testing the core-anchor change
 // in-headset: "Link hunches forward when hes running and you can see your
@@ -2329,6 +2449,45 @@ inline constexpr float kCoreAnchorExtraForwardUnits = 15.24f; // 6 real inches
 // know isFirstPerson(link) is true.
 inline cXyz computeRawCoreAnchoredEye(daAlink_c* link) {
     const cXyz realEye = *link->getSubjectEyePos();
+
+    // Teleport/warp detection -- see kCoreAnchorTeleportDistanceUnits' own
+    // comment above for why this exists. Gated on a real new sim tick
+    // (current.pos only actually changes once per tick) so this can't
+    // misfire by comparing two reads of the same tick's position.
+    {
+        const uint64_t posSimTick = dusk::frame_interp::sim_tick_seq();
+        if (!s_coreAnchorLastTickPosValid) {
+            s_coreAnchorLastTickPos = link->current.pos;
+            s_coreAnchorLastTickPosValid = true;
+            s_coreAnchorLastTickPosSimTick = posSimTick;
+        } else if (posSimTick != s_coreAnchorLastTickPosSimTick) {
+            const float dx = link->current.pos.x - s_coreAnchorLastTickPos.x;
+            const float dy = link->current.pos.y - s_coreAnchorLastTickPos.y;
+            const float dz = link->current.pos.z - s_coreAnchorLastTickPos.z;
+            const float distSq = dx * dx + dy * dy + dz * dz;
+            if (distSq > kCoreAnchorTeleportDistanceUnits * kCoreAnchorTeleportDistanceUnits) {
+                // A jump this big in one tick can't be real movement --
+                // force a fresh calibration, same reset shape as
+                // getVrCameraEyeAnchor()'s own isFirstPerson()-false case.
+                s_coreAnchorCalibrated = false;
+                s_coreAnchorActivationTickKnown = false;
+                s_coreAnchorCalibrationAttempts = 0;
+                s_coreAnchorConsecutivePlausible = 0;
+                // TEMP DIAGNOSTIC 2026-08-15 -- remove once the "5s to
+                // self-correct" report is root-caused. See kCoreAnchor*
+                // constants' own comments for context.
+                char buf[192];
+                std::snprintf(buf, sizeof(buf),
+                              "[dusk::vr::coreanchor] TELEPORT DETECTED dist=%.1f "
+                              "(threshold=%.1f) -- forcing recalibration\n",
+                              std::sqrt(distSq), kCoreAnchorTeleportDistanceUnits);
+                OutputDebugStringA(buf);
+            }
+            s_coreAnchorLastTickPos = link->current.pos;
+            s_coreAnchorLastTickPosSimTick = posSimTick;
+        }
+    }
+
     if (!s_coreAnchorCalibrated) {
         const uint64_t simTick = dusk::frame_interp::sim_tick_seq();
         if (!s_coreAnchorActivationTickKnown) {
@@ -2367,9 +2526,35 @@ inline cXyz computeRawCoreAnchoredEye(daAlink_c* link) {
             }
             const bool settled =
                 s_coreAnchorConsecutivePlausible >= kCoreAnchorRequiredConsecutivePlausible;
-            if (settled || s_coreAnchorCalibrationAttempts >= kCoreAnchorCalibrationMaxAttempts) {
+            const bool forcedByMaxAttempts =
+                !settled && s_coreAnchorCalibrationAttempts >= kCoreAnchorCalibrationMaxAttempts;
+
+            // TEMP DIAGNOSTIC 2026-08-15 -- remove once the "5s to
+            // self-correct" report is root-caused. Logs every attempt (not
+            // throttled) since a single activation caps at
+            // kCoreAnchorCalibrationMaxAttempts (150) attempts -- fine for
+            // a short-lived capture.
+            {
+                char buf[256];
+                std::snprintf(
+                    buf, sizeof(buf),
+                    "[dusk::vr::coreanchor] attempt=%d candidate=%.2f plausible=%d "
+                    "consecutivePlausible=%d realEye.y=%.2f current.pos.y=%.2f\n",
+                    s_coreAnchorCalibrationAttempts, candidate, plausible ? 1 : 0,
+                    s_coreAnchorConsecutivePlausible, realEye.y, link->current.pos.y);
+                OutputDebugStringA(buf);
+            }
+
+            if (settled || forcedByMaxAttempts) {
                 s_coreAnchorHeightOffset = candidate;
                 s_coreAnchorCalibrated = true;
+                char buf[192];
+                std::snprintf(buf, sizeof(buf),
+                              "[dusk::vr::coreanchor] COMMITTED offset=%.2f via=%s "
+                              "afterAttempts=%d\n",
+                              candidate, settled ? "SETTLED" : "MAX_ATTEMPTS_FALLBACK",
+                              s_coreAnchorCalibrationAttempts);
+                OutputDebugStringA(buf);
             }
         }
     }
@@ -2535,8 +2720,8 @@ inline cXyz computeRawEyeAnchor(daAlink_c* link) {
         return eye;
     }
     if (link->checkModeFlg(daAlink_c::MODE_SWIMMING | daAlink_c::MODE_VINE_CLIMB) ||
-        isCrawling(link) || isHookshotAirborneOrHanging(link) ||
-        link->checkCanoeRide() || link->checkBoardRide())
+        isCrawling(link) || isHookshotAirborneOrHanging(link) || isMagnetized(link) ||
+        link->checkWaterInMove() || link->checkCanoeRide() || link->checkBoardRide())
     {
         return *link->getSubjectEyePos();
     }
@@ -2663,6 +2848,7 @@ inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye) {
         detail::s_coreAnchorActivationTickKnown = false;
         detail::s_coreAnchorCalibrationAttempts = 0;
         detail::s_coreAnchorConsecutivePlausible = 0;
+        detail::s_coreAnchorLastTickPosValid = false;
         return fallbackEye;
     }
 

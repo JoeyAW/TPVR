@@ -7772,6 +7772,138 @@ checking for at any FUTURE VR call site that shows/hides shapes on
 `mpLinkModel`/`mpLinkFaceModel`/`mpLinkHatModel`/`mpLinkHandModel`,
 not just the ones this fix touched.
 
+### Camera-ground bug on load — ACTUAL root cause found and fixed 2026-08-15 (two earlier attempts on the same report were real but insufficient)
+
+**User report, precise repro data**: "the camera in the ground bug is still
+there sometimes when loading" — later narrowed via follow-up to: ordinary
+loading zones, fast travel (Owl Statue/overworld), and loading a save all
+trigger it; behavior is "sometimes it stays stuck, especially if you move
+too much or trigger first person as soon as it loads, but other times it
+corrects itself if you stand completely still."
+
+**Two earlier fixes this same round, both real but NOT the actual cause**
+(kept, harmless, just insufficient on their own):
+1. Teleport-jump detection (`vr_link_visibility.hpp`'s
+   `computeRawCoreAnchoredEye()`) — any single-tick `current.pos` jump
+   bigger than real movement can produce (300 units) now force-resets
+   calibration, catching loads/warps that never trip `isFirstPerson()`
+   false→true. Real, addresses a genuine gap, but wasn't what was
+   observed firing in the actual capture below (the false→true edge was
+   already covering this particular repro).
+2. Widened `kCoreAnchorCalibrationMaxAttempts` from 30 (~1s) to 150
+   (~5s) — user called this out directly ("did you actually attempt to
+   fix it or did you just increase how long until the check?") and was
+   right to: a real `[dusk::vr::coreanchor]` capture (below) proved this
+   just delayed hitting the same guaranteed-to-fail path, not fixed it.
+
+**ACTUAL root cause, found via real diagnostic capture** (temporary
+`[dusk::vr::coreanchor]` `OutputDebugStringA` logging added to log every
+calibration attempt's candidate value/plausibility/consecutive-count,
+plus the final commit reason): the calibration's plausibility band
+(`kCoreAnchorHeightOffsetPlausibleMin/Max`) was `20–100`, copied from
+`kCoreAnchorHeightOffsetDefault = 55.75` — itself copied verbatim from
+`setBodyPartPos()`'s `localEyeFromRoot = {0, 55.75, 15}` (`d_a_alink.cpp`).
+That constant is a LOCAL offset run through `mDoMtx_stack_c::multVec()`
+against the model's own joint-matrix stack — not a plain world-space Y
+delta against `current.pos.y` the way this calibration's own
+`realEye.y - current.pos.y` is. The two were never actually the same
+quantity. The real capture showed the genuine, rock-stable candidate
+value was **~157–158** (drifting under 1 unit across a full 150-attempt/
+5-second window — clearly settled, real data) — comfortably OUTSIDE the
+old 20–100 band, so `plausible=0` fired on literally every single attempt,
+every time, guaranteeing it could never reach `settled` and always fell
+through to the `MAX_ATTEMPTS_FALLBACK` — explaining why the bug was
+consistent/every-time rather than occasional, and why round 2's timeout
+widening just moved the wait from ~1s to ~5s without fixing anything.
+
+**Fix**: raised the plausible band to `80–220` (comfortably bracketing the
+real ~158 while still excluding real garbage samples seen in the same
+capture — 299 and 18687.98, both harmless transient pre-settle-window
+frames) and updated `kCoreAnchorHeightOffsetDefault` from 55.75 → 158 to
+match the real measured value instead of the mismatched borrowed one.
+With the band no longer rejecting the correct value outright, calibration
+should now converge in ~3 ticks (~100ms) via the real `settled` path
+instead of every time hitting the 5-second fallback.
+
+Built successfully (RelWithDebInfo) — only `vr_main.cpp` (transitively
+includes the header) recompiled, clean link, no new warnings.
+
+**Diagnostic logging (`[dusk::vr::coreanchor]`, `computeRawCoreAnchoredEye()`
+and the teleport-detection block) is still in the tree** — this specific
+fix (the plausibility band correction) has not been independently
+re-confirmed in-headset yet (the user's next message moved on to a
+separate Iron Boots request before circling back). Per this project's
+normal practice, remove the logging once a fresh capture/report confirms
+it now commits via `SETTLED` quickly instead of `MAX_ATTEMPTS_FALLBACK`.
+
+**Reusable lesson**: when a user directly challenges whether a change was
+a real fix or just a bigger timeout, take that literally and check — in
+this case they were exactly right, and the honest answer led straight to
+finding the actual bug via a real capture instead of shipping a third
+guess.
+
+### Iron Boots — magnetized (wall/ceiling) AND submerged (underwater floor-walking) camera anchor — CONFIRMED FIXED IN-HEADSET 2026-08-15
+
+**Goal** (user request: "make the camera first person for when the iron
+boots are equipped", clarified via follow-up to specifically mean "the
+camera feels wrong while stuck to a wall/ceiling" — not ordinary walking
+with them equipped, which was already first-person under the existing
+rules since `isFirstPerson()` never gated on Iron Boots at all).
+
+**Two separate mechanisms, same fix shape, added to `computeRawEyeAnchor()`'s
+existing raw-head-joint-anchor fallback list** (the same list swimming,
+crawling, vine climbing, hookshot, and mounted gameplay already use — see
+section 23's various follow-ups above):
+
+1. **Magnetized** (`isMagnetized()`, new helper, same shape as
+   `isCrawling()`/`isHookshotAirborneOrHanging()`): true when
+   `checkMagneBootsOn()` (actually stuck to a magnetic surface) or
+   `mProcID == PROC_MAGNE_BOOTS_FLY` (mid-flight being pulled toward one,
+   `d_a_alink_hvyboots.inc`). The core anchor (section 23) assumes
+   standing upright on flat ground with world-up as up and adds its
+   calibrated height offset straight onto `current.pos.y` — but
+   `setMagneBootsMtx()` (`d_a_alink_hvyboots.inc`) rotates
+   `shape_angle`/`current.angle` directly to match the magnetic surface's
+   normal, so Link's whole body can be pitched sideways on a wall or
+   upside-down on a ceiling, where a fixed vertical-only offset means
+   nothing. Confirmed the fallback (`getSubjectEyePos()`) actually
+   handles this correctly by reading `setBodyPartPos()` itself
+   (`d_a_alink.cpp` ~line 5581): its root+local-offset eye branch calls
+   `concatMagneBootMtx()` before applying the local offset, i.e. the
+   engine's own animated eye position already accounts for magnetic
+   surface rotation — this fix just routes VR to use that existing,
+   correct computation instead of the orientation-blind core anchor.
+2. **Submerged/underwater floor-walking** (added after user follow-up:
+   "It's also an underwater issue" — same requested treatment, not a
+   separately root-caused bug): `link->checkWaterInMove()`
+   (`FLG0_WATER_IN_MOVE`, `d_a_player.h` — already public). A genuinely
+   different mechanism than the magnetized case, not just the same bug in
+   two places: `MODE_SWIMMING` — which the raw-anchor fallback list
+   already checked — does NOT stay set while Link walks along a
+   submerged lake/river bed with Iron Boots on. Once he actually lands on
+   the underwater floor (`checkSwimUpAction()`, `d_a_alink_swim.inc`,
+   calls the same `procLandInit()` used for ordinary dry-land landings),
+   the new proc state's `mModeFlg` gets fully REPLACED from
+   `m_procInitTable` (not incrementally OR'd), so `MODE_SWIMMING` doesn't
+   survive the transition even though he's still fully submerged — this
+   is why the pre-existing `MODE_SWIMMING` check in the fallback list
+   wasn't catching this case at all. Worth noting for anyone revisiting
+   this: unlike the magnetized case, `setBodyPartPos()`'s own eye branch
+   does NOT have bespoke math for this state (its gate is
+   `MODE_SWIMMING`-based, which is off by this point, so it takes the
+   same root+offset path as ordinary standing) — this fix isn't routing
+   around a proven orientation bug the way the magnetized fix is, it's
+   applying the same "core anchor's standing-calibrated height may not
+   transfer to a different posture" precaution as every other entry in
+   this list, per direct user request rather than an independently
+   confirmed root cause.
+
+Built successfully (RelWithDebInfo) — only `vr_main.cpp` (transitively
+includes the header) recompiled, clean link, no new warnings.
+
+**CONFIRMED FIXED IN-HEADSET** — user tested both (magnetized wall/ceiling
+and submerged floor-walking) and reported "Fixed."
+
 ## Key lesson learned this session
 
 Don't infer that an uncommitted fix supersedes a nearby disable guard just

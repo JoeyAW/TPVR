@@ -22,6 +22,12 @@ More on why it uses AI generated code below.
 - Physical sword swinging, shield bashing and aiming (aim with the right hand)
 - Quest 2/3 controller bindings; other headsets are untested
 - The ability to play the game in flatscreen for parts you want to skip in VR
+# Quest 2/3 Controller binds
+<div align="center">
+<img src="Controller binding.png" alt="Logo" width="400">
+  
+(I'm going to replace this with a graphic soon)
+</div>
 
 # Setup
 

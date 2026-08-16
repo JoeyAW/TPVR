@@ -8126,6 +8126,26 @@ constant in this file as permanently settled, especially ones tuned by
 comparison to another runtime rather than to a known-correct baseline
 (the desktop mirror, once it existed, was what finally exposed this).
 
+**CONFIRMED FIXED IN-HEADSET, all three runtimes — closes out the whole
+2026-08-16 "too bright" investigation.** User: "yup they all look right"
+— covering the previously-untested Meta Link (sharing the VD/Meta Link
+`2.0` default, now confirmed for both, not just VD) alongside the already
+-confirmed VD (`2.0`) and SteamVR (`1.0`). No further code changes needed
+-- both compiled defaults (`settings.cpp`) already match what's confirmed,
+and both remain live-adjustable via their own independent Debug > Graphics
+Settings sliders if a future compositor update on any runtime ever changes
+its color handling again (the original constant's own comment always
+carried this exact caveat). Started from an external tester's #1
+complaint about the released mod; root-caused via a runtime-agnostic
+"desktop mirror vs. headset" comparison none of this project's prior
+gamma work had made before (the mirror feature itself, built 2026-08-10
+for an unrelated reason, is what made this diagnosis possible at all);
+ended up finding and correcting a second, independent bug (SteamVR's own
+multi-session-old "confirmed" baseline was actually tuned against a wrong
+reference) along the way that nobody had reason to suspect until real
+user data forced a second look. This section is done; no known remaining
+gaps.
+
 ## Key lesson learned this session
 
 Don't infer that an uncommitted fix supersedes a nearby disable guard just

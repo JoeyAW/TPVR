@@ -455,19 +455,6 @@ inline aurora::gfx::ResolvedTargets beginEye(const EyeParams& eye) {
         g_eyeSymmetricFovyDeg = clipperFovyDeg;
         g_eyeSymmetricAspect = clipperAspect;
 
-        // TEMP DIAGNOSTIC (culling investigation): confirm the actual
-        // computed values once, to rule out a units/formula bug producing
-        // something degenerate instead of the intended wide-but-sane frustum.
-        static bool loggedClipper = false;
-        if (!loggedClipper) {
-            loggedClipper = true;
-            char msg[256];
-            _snprintf_s(msg, _TRUNCATE,
-                        "[dusk::vr::beginEye] clipper fov L%f R%f U%f D%f -> fovyDeg=%f aspect=%f near=%f far=%f\n",
-                        eye.fov.angleLeft, eye.fov.angleRight, eye.fov.angleUp, eye.fov.angleDown, clipperFovyDeg,
-                        clipperAspect, view->near_, view->far_);
-            OutputDebugStringA(msg);
-        }
     }
 
     // 2. Open the offscreen pass for this eye at its native HMD resolution.

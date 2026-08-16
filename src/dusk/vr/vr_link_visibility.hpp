@@ -1186,29 +1186,6 @@ inline void updateFrame(const FrameInput& input) {
 // draw. No-op before the first updateFrame() call this session (e.g. the
 // very first VR frame) rather than writing uninitialized matrices.
 inline void applyTrackedHandMtx(J3DModel* handModel) {
-    // TEMP DIAGNOSTIC (tracked-hands still not visibly moving, remove once
-    // confirmed fixed): confirms this call site is actually being reached
-    // at all (proves isRenderingToHeadset() was true and setDrawHand() ran
-    // for this eye), and prints the actual translation this frame's
-    // buildHandMtx() computed, once every 90 calls (~45 real frames, since
-    // this runs twice per frame -- one per eye). If this never appears in
-    // the Output window, the call site itself isn't being reached; if it
-    // appears with sane, moving values but hands still look static
-    // in-headset, the bug is downstream of here (e.g. calc()/draw() using
-    // a different matrix source than setAnmMtx(), or a scale/parenting
-    // issue in how joints 1/2 compose under mpLinkHandModel's base
-    // transform).
-    static int callCounter = 0;
-    if ((callCounter++ % 90) == 0) {
-        char line[256];
-        _snprintf_s(line, _TRUNCATE,
-                    "[dusk::vr::applyhand] handModel=%p valid=%d right=(%.1f,%.1f,%.1f) left=(%.1f,%.1f,%.1f)\n",
-                    static_cast<void*>(handModel), detail::s_handMtxValid,
-                    detail::s_rightHandMtx[0][3], detail::s_rightHandMtx[1][3], detail::s_rightHandMtx[2][3],
-                    detail::s_leftHandMtx[0][3], detail::s_leftHandMtx[1][3], detail::s_leftHandMtx[2][3]);
-        OutputDebugStringA(line);
-    }
-
     if (!handModel || !detail::s_handMtxValid) return;
     handModel->setAnmMtx(RIGHT_HAND_JOINT, detail::s_rightHandMtx);
     handModel->setAnmMtx(LEFT_HAND_JOINT, detail::s_leftHandMtx);
@@ -2883,39 +2860,6 @@ inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye) {
     // of just smoothing between two already-stale samples.
     const cXyz extrapolated = detail::lerpXyz(detail::s_eyeAnchorPrev, detail::s_eyeAnchorCurr,
                                                step + detail::kEyeAnchorExtrapolationGain);
-
-    // TEMP DIAGNOSTIC (2026-08-08 -- user report: "hands still lag behind"
-    // even with the extrapolation fix above applied, specifically while
-    // walking/running in-game). Confirmed via a direct follow-up question
-    // this is genuinely about in-game locomotion speed, not just swinging
-    // the controller while standing still -- so this anchor IS the right
-    // place to keep looking, not a wrong-target theory. Logs the plain
-    // interpolated value (what this function used to always return)
-    // alongside the new extrapolated one and the distance between them,
-    // every 20 frames, so we can see directly: (a) whether extrapolation
-    // is actually moving the anchor by a meaningful amount during real
-    // running (rules an outright no-op/bug in the fix above in or out),
-    // and (b) the raw magnitude of that correction, to judge whether
-    // residual lag from something else entirely (getSubjectEyePos()'s own
-    // upstream animation-driven value, OpenXR frame timing, etc.) is the
-    // actually-dominant remaining factor. Remove once the real cause is
-    // confirmed and fixed.
-    static int s_diagFrame = 0;
-    if ((s_diagFrame++ % 20) == 0) {
-        const cXyz plainInterp =
-            detail::lerpXyz(detail::s_eyeAnchorPrev, detail::s_eyeAnchorCurr, step);
-        const float ddx = extrapolated.x - plainInterp.x;
-        const float ddy = extrapolated.y - plainInterp.y;
-        const float ddz = extrapolated.z - plainInterp.z;
-        const float correctionDist = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
-        char msg[256];
-        _snprintf_s(msg, _TRUNCATE,
-            "[dusk::vr::anchordiag] step=%.3f plainInterp=(%.1f,%.1f,%.1f) "
-            "extrapolated=(%.1f,%.1f,%.1f) correction=%.2f\n",
-            step, plainInterp.x, plainInterp.y, plainInterp.z,
-            extrapolated.x, extrapolated.y, extrapolated.z, correctionDist);
-        OutputDebugStringA(msg);
-    }
 
     return extrapolated;
 }

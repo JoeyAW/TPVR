@@ -213,6 +213,32 @@ struct UserSettings {
         // set_present_source_mirror()) -- no extra render pass, no CPU
         // readback, near-zero cost.
         ConfigVar<bool> vrDesktopMirror;
+        // Live-adjustable VR gamma-compensation exponent for every runtime
+        // EXCEPT SteamVR (which keeps its own separate, independently-tuned,
+        // decoupled baseline -- see vr_xr_submit.hpp's
+        // Session::effectiveGammaExponent()) -- added 2026-08-16 after
+        // "washed out / too bright in headset, fine on the desktop mirror"
+        // feedback reproduced on all three runtimes, meaning the pre-
+        // existing SteamVR-only compensation couldn't be the whole story.
+        // Live-adjustable via the Debug > Graphics Settings ImGui slider
+        // (ImGuiMenuTools.cpp) so it can be dialed in per-headset without a
+        // rebuild each guess. 2.0 confirmed correct on Virtual Desktop;
+        // not yet tested on Meta Link.
+        ConfigVar<float> vrGammaCompensation;
+        // Live-adjustable VR gamma-compensation exponent for SteamVR
+        // specifically, decoupled from vrGammaCompensation above (see its
+        // sibling comment) -- SteamVR's own compositor needs a
+        // structurally different correction than VD/Meta Link's zero-
+        // baseline case, so the two must stay independently tunable.
+        // Originally defaulted to the section-6 tuned brightening value
+        // (~0.4545 = 1.0/2.2), tuned back then by matching SteamVR's
+        // appearance to VD/Meta Link's -- but VD/Meta Link turned out to
+        // ALSO be too bright the whole time (this whole investigation's
+        // premise), so that reference was itself wrong. CONFIRMED
+        // 2026-08-16: 1.0 (no compensation at all) is correct instead --
+        // the old brightening curve was actively making SteamVR look
+        // undersaturated.
+        ConfigVar<float> vrGammaCompensationSteamVr;
 
         // Audio
         ConfigVar<bool> noLowHpSound;

@@ -76,6 +76,18 @@ UserSettings g_userSettings = {
         .enableMapBackground {"game.enableMapBackground", true},
         .disableCutscenePillarboxing {"game.disableCutscenePillarboxing", false},
         .vrDesktopMirror {"game.vrDesktopMirror", true},
+        // 2.0 confirmed correct on Virtual Desktop 2026-08-16 -- applies to
+        // VD/Meta Link/etc. only, NOT SteamVR (which keeps its own
+        // independently-tuned, decoupled baseline -- see vr_xr_submit.hpp's
+        // effectiveGammaExponent()). Not yet tested on Meta Link itself.
+        .vrGammaCompensation {"game.vrGammaCompensation", 2.0f},
+        // CONFIRMED 2026-08-16: user reported the original 1.0/2.2
+        // (~0.4545) brightening baseline made SteamVR look undersaturated
+        // -- 1.0 (no compensation at all) confirmed correct instead. See
+        // settings.h's comment for the full reasoning (SteamVR's old fix
+        // was tuned to match VD/Meta Link's own brightness, which turned
+        // out to be wrong the whole time).
+        .vrGammaCompensationSteamVr {"game.vrGammaCompensationSteamVr", 1.0f},
 
         // Audio
         .noLowHpSound {"game.noLowHpSound", false},
@@ -283,6 +295,8 @@ void registerSettings() {
     Register(g_userSettings.game.enableMapBackground);
     Register(g_userSettings.game.disableCutscenePillarboxing);
     Register(g_userSettings.game.vrDesktopMirror);
+    Register(g_userSettings.game.vrGammaCompensation);
+    Register(g_userSettings.game.vrGammaCompensationSteamVr);
     Register(g_userSettings.game.enableFastIronBoots);
     Register(g_userSettings.game.canTransformAnywhere);
     Register(g_userSettings.game.fastRoll);

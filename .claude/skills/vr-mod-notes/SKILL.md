@@ -7904,6 +7904,228 @@ includes the header) recompiled, clean link, no new warnings.
 **CONFIRMED FIXED IN-HEADSET** — user tested both (magnetized wall/ceiling
 and submerged floor-walking) and reported "Fixed."
 
+### VR "too bright" (external tester feedback) — universal live-tunable gamma compensation added 2026-08-16, NOT yet confirmed in-headset
+
+**Goal** (external mod feedback relayed by the user, not a first-hand
+in-headset report this time: "the number one complaint... it is too
+bright"). Narrowed via direct questions before touching anything (per this
+file's own standing "verify before guessing" discipline): VR-only (the
+flatscreen/desktop-mirror window looks correct), described as overall
+exposure too high, and — critically — reproduced across **all three
+runtimes** (SteamVR, Virtual Desktop, Meta Link).
+
+**Why that last point changes the diagnosis**: the ONLY existing gamma
+modification anywhere in the VR submission path was
+`kSteamVrGammaCompensationExponent` (`vr_xr_submit.hpp`, section 6) — a
+GPU compute pass applying `pow(color, 1/2.2)` (a brightening curve),
+gated entirely on `Session::swapchainIsSrgb_`. Per createSwapchain()'s own
+candidate-preference order, VD and Meta Link always pick the plain native
+(non-sRGB) format as their first successful candidate — `swapchainIsSrgb_`
+is only ever true for SteamVR (the one runtime that requires an sRGB
+format to actually composite a projection layer at all, confirmed back in
+section 6). So VD/Meta Link were getting a **byte-for-byte passthrough
+with zero gamma modification** the whole time. Since all three runtimes
+show the identical "correct on the desktop mirror, washed out in the
+headset" symptom, the existing SteamVR-only constant cannot be the (whole)
+explanation — whatever's making the image too bright has to be something
+that hits every runtime's compositor path uniformly, which this codebase
+had never actually applied any correction for on the non-SteamVR runtimes
+at all. (This also means the desktop-mirror feature from
+2026-08-10 — which grabs eye 0's resolved texture *before* any of this
+submission-path processing — was itself the tool that made this
+comparison possible in the first place: "fine in the window, wrong in the
+headset" is only diagnostic because the mirror bypasses the XR submission
+path entirely.)
+
+**Fix, asked-and-confirmed approach (user chose a live ImGui slider over
+the usual hardcode-and-rebuild loop, specifically to make iterating on the
+correct value faster than a rebuild+headset round-trip per guess)**:
+- `Session::useGammaComputePath_` (`vr_xr_submit.hpp`) — new flag,
+  generalizing what used to be a `swapchainIsSrgb_`-only gate. True for
+  every swapchain format candidate the GPU compute shader can actually
+  produce output for (i.e. every real candidate EXCEPT the rare
+  `DXGI_FORMAT_R10G10B10A2_UNORM` last-resort fallback, which the shader
+  was never written to pack into 10bpc — that one keeps the old plain CPU
+  path with zero compensation, unchanged). Now gates both
+  `ensureCpuCopyBuffers()`'s resource creation and `encoderTaskCallback()`'s
+  compute-vs-plain-copy branch — previously both were gated on
+  `swapchainIsSrgb_` directly, meaning VD/Meta Link never even allocated
+  the compute pipeline.
+- `Session::effectiveGammaExponent()` — the real per-dispatch exponent is
+  now `baseline * gammaCompensationMultiplier_`, where `baseline` is
+  exactly what was hardcoded before (`kSteamVrGammaCompensationExponent`
+  for SteamVR's sRGB case, `1.0` — no-op — for everyone else), and
+  `gammaCompensationMultiplier_` is the new live-adjustable piece.
+  `pow(pow(x,a),b) == pow(x,a*b)`, so multiplying the two exponents
+  together is mathematically exactly equivalent to applying both curves
+  in sequence — no second compute dispatch needed, and SteamVR's already-
+  tuned baseline is preserved exactly when the new multiplier is left at
+  1.0.
+- `dusk::getSettings().game.vrGammaCompensation` (`settings.h`/`.cpp`) —
+  new `ConfigVar<float>`, default `1.0` (no additional change vs. what
+  already existed), registered the same way as every other settings float
+  in this file.
+- **"VR Gamma Compensation" slider** (`ImGuiMenuTools.cpp`, Debug >
+  Graphics Settings, right next to the existing "Disable Water
+  Refraction"/"Enable LOD Bias" toggles), range `0.3`–`3.0`, using the
+  existing `dusk::config::ImGuiSliderFloat` helper (same one-line
+  set-and-persist pattern already used for other float settings in this
+  codebase). `>1.0` darkens further, `<1.0` brightens further.
+- `vr_main.cpp`'s `tick()`: `g_session->setGammaCompensationMultiplier(
+  dusk::getSettings().game.vrGammaCompensation.getValue())` called once
+  per frame, read on the main thread, right after `setFrameState()` —
+  well before that frame's `encodeEyeCopy()`/encoder-task dispatch.
+  `effectiveGammaExponent()` itself is consulted later, on the render
+  worker thread, from a plain (non-atomic) float member — deliberately not
+  synchronized, since it's only ever written once per frame from the main
+  thread before that frame's task runs; same informal single-word-read
+  pattern this codebase already relies on for other per-frame settings
+  reads, not a new risk class.
+
+**Built successfully** (RelWithDebInfo) — `settings.h`/`.cpp`,
+`ImGuiMenuTools.cpp`, `vr_xr_submit.hpp`, `vr_main.cpp` all recompiled,
+clean link, no new warnings.
+
+**NOT yet tested in-headset.** Next step for whoever picks this up: launch
+in VR (any runtime — the slider now does something on all three, not just
+SteamVR), open Debug > Graphics Settings, and slide "VR Gamma
+Compensation" up from 1.0 until the headset's brightness matches the
+desktop mirror's. Report back the value that looks right, and on which
+runtime(s) it was tested — since testers are apparently spread across all
+three, it's plausible (not yet confirmed either way) that different
+runtimes need different corrected values, in which case a single global
+multiplier isn't quite the final shape of this fix and it may need
+splitting per-runtime the way `kSteamVrGammaCompensationExponent` already
+implicitly is. If the slider turns out to do nothing at all on VD/Meta
+Link specifically, `useGammaComputePath_` not actually being true for
+their chosen candidate format would be the first thing to check (add a
+temporary `OutputDebugStringA` log of `useGammaComputePath_`/
+`swapchainDxgiFormat_` right after `createSwapchain()` returns, per this
+file's usual diagnostic-logging workflow) rather than assuming the shader
+math itself is wrong.
+
+**UPDATE (same day) — `2.0` CONFIRMED correct on Virtual Desktop; SteamVR
+and Meta Link not yet tested. Decoupled SteamVR's baseline from the new
+slider before setting a default, built, NOT yet re-tested in-headset.**
+User: "Setting the slider to 2.000 looks best" — asked which runtime(s)
+this was tested on before doing anything with the number, since the
+original design multiplied the slider onto EVERY runtime's baseline
+uniformly, including SteamVR's own already-tuned
+`kSteamVrGammaCompensationExponent` (~0.4545, confirmed correct back in
+section 6). **Answer: Virtual Desktop only.** Blindly setting the
+compiled default to `2.0` would have pushed SteamVR's effective exponent
+to `~0.4545 * 2.0 ≈ 0.909` — nearly cancelling a correction that was
+independently confirmed correct four sessions ago, on pure untested
+speculation that the same multiplier applies there too. Exactly the kind
+of "don't infer a nearby fix supersedes something without evidence"
+mistake this file's own closing lesson warns about, just in a new spot.
+
+**Fix**: `Session::effectiveGammaExponent()` (`vr_xr_submit.hpp`) no
+longer multiplies the slider onto a per-runtime baseline uniformly —
+SteamVR now returns its own `kSteamVrGammaCompensationExponent` completely
+untouched by the slider; every other runtime (VD, Meta Link, anything else
+that lands on a non-sRGB candidate format) uses the slider value directly
+as its exponent (mathematically identical to "multiplied onto a baseline
+of 1.0", just no longer coupled to SteamVR's separate baseline by
+construction). With that decoupling in place, `vrGammaCompensation`'s
+compiled default (`settings.cpp`) was updated `1.0` → `2.0` — now safe,
+since it can no longer touch SteamVR at all. Comments updated throughout
+(`vr_xr_submit.hpp`, `settings.h`, `ImGuiMenuTools.cpp`) to record that
+`2.0` is confirmed for VD specifically, not yet tested on SteamVR/Meta
+Link, and that the slider is deliberately scoped to exclude SteamVR going
+forward unless SteamVR itself is separately tested and found to need
+adjustment too.
+
+Built successfully (RelWithDebInfo) — `vr_xr_submit.hpp`, `settings.h`/
+`.cpp`, `ImGuiMenuTools.cpp` recompiled, clean link, no new warnings.
+
+**NOT yet independently re-tested in-headset** — the user's own running
+session already had `2.0` live-set and persisted via `config::save()`
+before this change, so their own experience shouldn't change at all (VD
+was never touched by the SteamVR-decoupling edit). What's unverified is
+whether `2.0` is *also* right for Meta Link (same zero-baseline
+architecture as VD, so plausible but unconfirmed) and whether SteamVR
+needs its own adjustment on top of its existing baseline now that a real
+"too bright" report exists for it too. Next step: test on Meta Link and/or
+SteamVR if convenient, and report back per-runtime findings the same way
+VD's was — don't assume one number covers all three without checking.
+
+**UPDATE (same day) — user tested SteamVR: "steamvr is undersaturated
+now." Gave SteamVR its OWN independent live-adjustable slider instead of
+guessing a new constant, built, NOT yet re-tested in-headset.** This is
+consistent with, and arguably confirms, a risk flagged internally at the
+very start of this whole investigation but never written into the user
+-facing response: `kSteamVrGammaCompensationExponent` (~0.4545) was
+originally tuned back in section 6 by comparing SteamVR's own appearance
+against VD/Meta Link's — i.e. tuned to visually MATCH them, not
+independently verified as objectively correct. This session's entire
+"too bright" investigation started because VD/Meta Link were ALSO
+reported too bright (same original 3-runtime answer) — meaning the
+reference SteamVR was tuned to match may itself have been wrong the whole
+time. Since VD/Meta needed DARKENING (the `2.0` exponent) while SteamVR's
+existing fix is a BRIGHTENING curve, SteamVR plausibly needs to move in
+the opposite direction (toward `1.0`, i.e. less brightening) — consistent
+with "undersaturated" (over-brightening flattens contrast/vividness).
+
+**Fix**: new `Session::steamVrGammaExponent_` (`vr_xr_submit.hpp`,
+default = the original `kSteamVrGammaCompensationExponent` so nothing
+changes until retested), its own setter
+(`setSteamVrGammaCompensationExponent()`), its own `ConfigVar<float>
+vrGammaCompensationSteamVr` (`settings.h`/`.cpp`, same default), and its
+own **independent** "VR Gamma Compensation (SteamVR)" ImGui slider
+(`ImGuiMenuTools.cpp`, range `0.3`–`2.2` — covers both directions already
+tested historically: the original `~0.4545` brighten fix, `2.2`'s
+previously-found-too-dark darken extreme, and everything up toward `1.0`/
+no-correction-at-all in between). `effectiveGammaExponent()` now returns
+`steamVrGammaExponent_` for the SteamVR branch instead of the hardcoded
+constant. **Deliberately kept fully decoupled from the VD/Meta slider
+added earlier the same day** — the whole point of today's second fix was
+exactly this kind of cross-runtime coupling accident; adding a second
+independent slider avoids repeating it a second time.
+
+Built successfully (RelWithDebInfo) — `vr_xr_submit.hpp`, `settings.h`/
+`.cpp`, `ImGuiMenuTools.cpp`, `vr_main.cpp` recompiled, clean link, no new
+warnings.
+
+**NOT yet tested in-headset.** Next step: launch on SteamVR, open Debug >
+Graphics Settings, and slide "VR Gamma Compensation (SteamVR)" toward 1.0
+(less brightening) from its current default (~0.4545) until saturation
+looks right, independent of whatever the VD/Meta Link slider is set to.
+Report the value that looks correct the same way VD's `2.0` was reported.
+
+**UPDATE (same day) — CONFIRMED: SteamVR should be 1.0 (no compensation
+at all), default updated, built.** User: "Steamvr should be set back to
+1.0." `Session::steamVrGammaExponent_`'s compiled seed
+(`kSteamVrGammaCompensationExponent`, ~0.4545) is now purely historical —
+`ConfigVar<float> vrGammaCompensationSteamVr`'s compiled default
+(`settings.cpp`) changed `1.0f/2.2f` → `1.0f`. Updated every comment that
+called `kSteamVrGammaCompensationExponent` "already-correct"/"already-
+tuned" (the top-of-file block, the field comment, the ImGui slider
+comment) with a "CORRECTED, SAME DAY" note recording that it was never
+actually independently verified — only tuned to visually match VD/Meta
+Link, which turned out to be wrong too. **This closes out the whole
+2026-08-16 "too bright" investigation for now**: VD/Meta Link confirmed
+at `2.0`, SteamVR confirmed at `1.0` (i.e. the GPU gamma-compensation
+compute pass still runs for SteamVR — still needed for its sRGB
+format's channel handling — but with an exponent of 1.0 it's now a
+color-value no-op, equivalent to the plain passthrough VD/Meta Link
+always had). Built successfully (RelWithDebInfo) — `settings.cpp`,
+`vr_xr_submit.hpp`, `ImGuiMenuTools.cpp` recompiled, clean link, no new
+warnings. Both sliders remain live-adjustable in Debug > Graphics
+Settings for either value ever needing revisiting (e.g. a future runtime
+update changing compositor color handling, same "adjust and rebuild if
+this ever needs revisiting" caveat the original constant's comment always
+carried).
+
+**Reusable lesson for this whole thread**: a "confirmed correct" tuning
+from an earlier session (SteamVR's original ~0.4545, confirmed back in
+section 6) turned out to have been confirmed against the wrong reference
+(VD/Meta Link's own, also-wrong brightness) rather than an objective
+standard — worth remembering before trusting ANY empirically-tuned
+constant in this file as permanently settled, especially ones tuned by
+comparison to another runtime rather than to a known-correct baseline
+(the desktop mirror, once it existed, was what finally exposed this).
+
 ## Key lesson learned this session
 
 Don't infer that an uncommitted fix supersedes a nearby disable guard just

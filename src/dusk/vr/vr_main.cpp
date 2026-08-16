@@ -880,6 +880,16 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
         return;
     }
     g_session->setFrameState(frameState);
+    // Live-adjustable universal VR gamma compensation (see vr_xr_submit.hpp's
+    // kSteamVrGammaCompensationExponent comment, 2026-08-16) -- read here
+    // once per frame on the main thread and cached on Session, since
+    // encoderTaskCallback() consults it later from the render worker thread.
+    g_session->setGammaCompensationMultiplier(dusk::getSettings().game.vrGammaCompensation.getValue());
+    // Independent SteamVR-only exponent (2026-08-16 follow-up, see
+    // vr_xr_submit.hpp's steamVrGammaExponent_ comment) -- deliberately a
+    // separate call/separate ConfigVar from the one above, never coupled.
+    g_session->setSteamVrGammaCompensationExponent(
+        dusk::getSettings().game.vrGammaCompensationSteamVr.getValue());
 
     XrFrameBeginInfo beginInfo{XR_TYPE_FRAME_BEGIN_INFO};
     if (XR_FAILED(xrBeginFrame(g_session->session(), &beginInfo))) {

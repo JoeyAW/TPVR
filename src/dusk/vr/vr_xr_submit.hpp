@@ -180,6 +180,47 @@ enum class SwapchainPixelConversion {
 // rebuild if this ever needs revisiting (e.g. a SteamVR update changes its
 // compositor's color handling) -- 1.0 disables compensation entirely.
 //
+// STILL JUST A PER-RUNTIME BASELINE, NOT THE WHOLE STORY (2026-08-16):
+// external tester feedback ("the mod is too bright" -- washed out in the
+// headset specifically, desktop mirror looks correct) reproduced on ALL
+// THREE runtimes, including VD/Meta Link, which never touch this constant
+// at all (they always pick the plain non-SRGB native format -- see
+// createSwapchain()'s candidate order -- and previously got a byte-for-byte
+// passthrough with zero gamma modification). That rules this constant out
+// as the sole cause. Fix: generalized the GPU compute pass (below) to run
+// for every runtime, gave VD/Meta Link a real, live-adjustable exponent of
+// their own (Session::gammaCompensationMultiplier_/effectiveGammaExponent()),
+// exposed via the "VR Gamma Compensation" ImGui slider (ImGuiMenuTools.cpp,
+// dusk::getSettings().game.vrGammaCompensation) so it can be dialed in
+// per-headset without a rebuild each guess -- CONFIRMED 2.0 looks correct
+// on Virtual Desktop. **Deliberately does NOT touch THIS constant or
+// SteamVR's exponent at all** -- effectiveGammaExponent() keeps SteamVR on
+// its own already-tuned, independently-confirmed baseline, decoupled from
+// the new slider, specifically because 2.0 was only ever tested on VD;
+// blindly multiplying it onto SteamVR's already-correct ~0.4545 (giving
+// ~0.909, nearly cancelling the original fix) would have been pure
+// speculation. If SteamVR is ever tested against the new slider and found
+// to need adjustment too, that's a deliberate separate step, not a given.
+//
+// CORRECTED, SAME DAY: SteamVR WAS tested, and this constant's "already-
+// correct" status above turned out to be wrong -- user report:
+// "steamvr is undersaturated now." In hindsight, this constant was never
+// independently verified as objectively correct back in section 6 -- it
+// was tuned by visual comparison AGAINST VD/Meta Link's own appearance,
+// and this entire 2026-08-16 investigation exists because VD/Meta Link
+// were ALSO too bright the whole time. So SteamVR was tuned to match a
+// reference that was itself wrong. CONFIRMED FIX: 1.0 (no compensation at
+// all) is correct, not this constant's ~0.4545 brightening curve. This
+// constant is now ONLY the seed value for `Session::steamVrGammaExponent_`
+// (immediately overwritten every real frame from `dusk::getSettings()
+// .game.vrGammaCompensationSteamVr`, whose own compiled default is now
+// 1.0, not this constant) -- kept only as a comment/history anchor and as
+// the field's harmless pre-first-frame initializer, not as the actual
+// runtime value anymore. Do not reintroduce this as the effective
+// SteamVR exponent without new evidence -- see the "Key lesson" this
+// project keeps repeating about not trusting a "previously confirmed"
+// tuning indefinitely.
+//
 // PERFORMANCE (confirmed 2026-07-30): originally applied via a per-pixel
 // CPU LUT lookup in readbackEyeCopy() -- this measurably halved SteamVR's
 // framerate (a scalar loop over ~9.7M texels/frame, on top of the
@@ -188,10 +229,11 @@ enum class SwapchainPixelConversion {
 // ensureGammaComputeResources() below) specifically to eliminate that cost
 // -- GPUs are built for exactly this kind of massively parallel per-pixel
 // work, and this way it runs as part of the existing render pipeline
-// rather than adding a new CPU stage. Only ever created/dispatched when
-// Session::swapchainIsSrgb_ is true, so VD/Meta Link (which never pick an
-// SRGB format) don't pay for any of this -- they keep the original plain
-// CopyTextureToBuffer path untouched.
+// rather than adding a new CPU stage. Now created/dispatched whenever
+// Session::useGammaComputePath_ is true -- i.e. for every runtime/format
+// EXCEPT the rare DXGI_FORMAT_R10G10B10A2_UNORM last-resort fallback (the
+// compute shader only packs 8bpc output; that one rare candidate still
+// takes the old plain CPU-repack path with no gamma applied).
 constexpr float kSteamVrGammaCompensationExponent = 1.0f / 2.2f;
 
 // Uniform buffer layout consumed by kGammaComputeShaderSource's `Params`
@@ -405,6 +447,12 @@ public:
         swapchainPixelConversion_ = conversion;
         swapchainIsSrgb_ = chosenFormat == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB ||
                            chosenFormat == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+        // Generalized 2026-08-16 (see kSteamVrGammaCompensationExponent's
+        // comment): the GPU gamma-compensation compute pass now runs for
+        // every candidate EXCEPT PackR10G10B10A2 -- the shader only ever
+        // packs 8bpc output, so that one rare last-resort format keeps the
+        // old plain CPU repack path with no gamma applied at all.
+        useGammaComputePath_ = conversion != SwapchainPixelConversion::PackR10G10B10A2;
 
         uint32_t imageCount = 0;
         xrEnumerateSwapchainImages(swapchain_, 0, &imageCount, nullptr);
@@ -725,14 +773,18 @@ public:
         // the runtime's actually-accepted format requires we do to the
         // bytes before upload -- otherwise this would silently corrupt
         // colors (channel swap) or fail validation (wrong format) in the
-        // headset. NOT consulted when swapchainIsSrgb_ is true: in that
+        // headset. NOT consulted when useGammaComputePath_ is true: in that
         // case encoderTaskCallback()'s GPU compute pass already applied
         // gamma compensation AND any needed channel reorder before this
         // buffer was populated (see kGammaComputeShaderSource's comment) --
         // `mapped` here is already the final byte layout, so just memcpy.
+        // Generalized 2026-08-16 -- this used to be gated on swapchainIsSrgb_
+        // (SteamVR only); now covers every format the compute path handles
+        // (see useGammaComputePath_'s own comment), which is everything
+        // except the rare PackR10G10B10A2 last-resort fallback below.
         const bool srcIsBgra = format == wgpu::TextureFormat::BGRA8Unorm ||
                                 format == wgpu::TextureFormat::BGRA8UnormSrgb;
-        if (swapchainIsSrgb_) {
+        if (useGammaComputePath_) {
             for (uint32_t y = 0; y < eyeHeight; ++y) {
                 std::memcpy(static_cast<uint8_t*>(uploadMapped) + y * res.uploadRowPitch,
                             mapped + y * res.bytesPerRow, rowBytes);
@@ -869,7 +921,7 @@ private:
 
         wgpu::CommandEncoder mutableCmd = cmd; // several calls below are non-const on CommandEncoder
 
-        if (self->swapchainIsSrgb_) {
+        if (self->useGammaComputePath_) {
             // GPU gamma-compensation path (see kGammaComputeShaderSource's
             // comment) -- replaces the plain CopyTextureToBuffer below with
             // a compute dispatch that applies the correction curve directly,
@@ -884,7 +936,7 @@ private:
                 p.eyeHeight,
                 res.bytesPerRow / 4,
                 self->swapchainPixelConversion_ == SwapchainPixelConversion::ChannelSwap ? 1u : 0u,
-                kSteamVrGammaCompensationExponent,
+                self->effectiveGammaExponent(),
             };
             ctx.queue.WriteBuffer(res.gammaUniform, 0, &params, sizeof(params));
 
@@ -986,18 +1038,96 @@ private:
     int64_t swapchainDxgiFormat_ = 0;
     SwapchainPixelConversion swapchainPixelConversion_ = SwapchainPixelConversion::None;
     // True when chosenFormat is B8G8R8A8_UNORM_SRGB/R8G8B8A8_UNORM_SRGB --
-    // tells encoderTaskCallback() to run the GPU gamma-compensation compute
-    // pass (see kGammaComputeShaderSource's comment) INSTEAD of a plain
-    // CopyTextureToBuffer, and tells readbackEyeCopy() the resulting bytes
-    // are already final (plain memcpy, no further CPU-side conversion --
-    // the compute shader already handles both gamma AND any channel
-    // reorder swapchainPixelConversion_ would otherwise call for).
+    // used only to pick effectiveGammaExponent()'s per-runtime baseline
+    // (kSteamVrGammaCompensationExponent vs. 1.0) now that the compute pass
+    // itself runs for every runtime -- see useGammaComputePath_ below for
+    // the flag that actually gates the compute-vs-plain-copy choice.
     bool swapchainIsSrgb_ = false;
 
+    // True for every format the GPU gamma-compensation compute pass can
+    // handle -- i.e. everything except the rare PackR10G10B10A2 last-resort
+    // fallback (see createSwapchain()'s comment). Tells encoderTaskCallback()
+    // to run the compute pass INSTEAD of a plain CopyTextureToBuffer, and
+    // tells readbackEyeCopy() the resulting bytes are already final (plain
+    // memcpy, no further CPU-side conversion -- the compute shader already
+    // handles both gamma AND any channel reorder swapchainPixelConversion_
+    // would otherwise call for). Generalized 2026-08-16 from a
+    // swapchainIsSrgb_-only gate (SteamVR only) -- see
+    // kSteamVrGammaCompensationExponent's comment for why.
+    bool useGammaComputePath_ = false;
+
+    // Live-adjustable gamma exponent for every NON-SteamVR runtime (see
+    // effectiveGammaExponent()'s comment for why SteamVR is decoupled from
+    // this as of 2026-08-16 -- despite the name, this is no longer a
+    // multiplier on top of a hidden baseline, it directly IS the exponent
+    // for those runtimes now). Set once per frame from vr_main.cpp's
+    // tick() via setGammaCompensationMultiplier(), sourced from
+    // dusk::getSettings().game.vrGammaCompensation (the "VR Gamma
+    // Compensation" ImGui slider, ImGuiMenuTools.cpp). Read on the render
+    // worker thread inside encoderTaskCallback() via effectiveGammaExponent()
+    // -- a plain float member, not atomic, but only ever written once per
+    // frame from the main thread before that frame's encoder task runs, so
+    // there's no genuine concurrent-write hazard, just the same informal
+    // single-word-read/write pattern this codebase already relies on
+    // elsewhere for per-frame settings reads.
+    float gammaCompensationMultiplier_ = 1.0f;
+
+    // Live-adjustable exponent for SteamVR specifically -- added 2026-08-16
+    // after the user reported SteamVR looked UNDERSATURATED with the old
+    // compiled kSteamVrGammaCompensationExponent baseline. That baseline
+    // was tuned back in section 6 by comparing SteamVR's own appearance
+    // against VD/Meta Link's -- but THIS session's "too bright"
+    // investigation started because VD/Meta Link were ALSO reported too
+    // bright, meaning the thing SteamVR was tuned to visually MATCH was
+    // itself wrong. **CONFIRMED same day**: 1.0 (no compensation at all)
+    // is correct, not the old ~0.4545 brightening curve -- see the
+    // kSteamVrGammaCompensationExponent comment's "CORRECTED, SAME DAY"
+    // note above for the full trail. The compiled default here
+    // (kSteamVrGammaCompensationExponent) is now only a harmless pre-
+    // first-frame seed -- the real value comes from `dusk::getSettings()
+    // .game.vrGammaCompensationSteamVr`, whose own default is 1.0.
+    float steamVrGammaExponent_ = kSteamVrGammaCompensationExponent;
+
+public:
+    void setGammaCompensationMultiplier(float multiplier) {
+        gammaCompensationMultiplier_ = multiplier;
+    }
+
+    void setSteamVrGammaCompensationExponent(float exponent) {
+        steamVrGammaExponent_ = exponent;
+    }
+
+private:
+    // The actual gammaExponent fed to kGammaComputeShaderSource's Params
+    // each dispatch.
+    //
+    // DECOUPLED 2026-08-16 (was a single `baseline * multiplier` formula
+    // applied uniformly to every runtime -- see the comment above this
+    // class for the original design): once real testing came back
+    // (`2.0` confirmed good on Virtual Desktop, NOT yet tested on SteamVR
+    // or Meta Link), multiplying that same `2.0` onto SteamVR's own
+    // ALREADY-TUNED `kSteamVrGammaCompensationExponent` (~0.4545) would
+    // have pushed it to ~0.909 -- nearly cancelling a correction that was
+    // independently confirmed correct back in section 6, on pure
+    // untested speculation that the same multiplier applies there too.
+    // So SteamVR was decoupled from this slider entirely -- but SteamVR's
+    // own baseline turned out to need retuning anyway (user report:
+    // "steamvr is undersaturated now" -- see steamVrGammaExponent_'s own
+    // comment for why), so it now gets its own INDEPENDENT live-adjustable
+    // exponent instead of the original hardcoded constant. The two sliders
+    // are deliberately still fully decoupled from each other -- adjusting
+    // one must never move the other.
+    float effectiveGammaExponent() const {
+        if (swapchainIsSrgb_) {
+            return steamVrGammaExponent_;
+        }
+        return gammaCompensationMultiplier_;
+    }
+
     // GPU gamma-compensation compute pipeline -- created lazily by
-    // ensureGammaComputeResources(), only when swapchainIsSrgb_ is true, so
-    // VD/Meta Link (which never pick an SRGB format) never pay to create
-    // or use any of this.
+    // ensureGammaComputeResources(), only when useGammaComputePath_ is true
+    // (effectively always now -- see its own comment for the one rare
+    // exception).
     wgpu::ComputePipeline gammaPipeline_;
     wgpu::BindGroupLayout gammaBindGroupLayout_;
 
@@ -1021,7 +1151,7 @@ private:
         uint32_t width = 0, height = 0;
         Microsoft::WRL::ComPtr<ID3D12Resource> uploadHeap;   // XR side, D3D12_HEAP_TYPE_UPLOAD
         uint32_t uploadRowPitch = 0;                         // D3D12-side row pitch (256-aligned)
-        // Only created/used when swapchainIsSrgb_ is true (see
+        // Only created/used when useGammaComputePath_ is true (see
         // ensureGammaComputeResources()). gammaStorage is written by the
         // compute pass, then CopyBufferToBuffer'd into `readback` (the same
         // CPU-mappable buffer used by the non-gamma path) -- WebGPU doesn't
@@ -1101,7 +1231,7 @@ private:
                                             D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
                                             IID_PPV_ARGS(&res.uploadHeap));
 
-        if (swapchainIsSrgb_) {
+        if (useGammaComputePath_) {
             ensureGammaComputeResources();
 
             wgpu::BufferDescriptor storageDesc{};
@@ -1117,9 +1247,9 @@ private:
     }
 
     // Lazily creates the gamma-compensation compute pipeline (once per
-    // session, the first time an SRGB swapchain format is in use). See
-    // kGammaComputeShaderSource's comment for why this exists and why it's
-    // gated on swapchainIsSrgb_ rather than always created.
+    // session, the first time useGammaComputePath_ is true -- effectively
+    // every session now, see that flag's own comment). See
+    // kGammaComputeShaderSource's comment for why this exists.
     void ensureGammaComputeResources() {
         if (gammaPipeline_) {
             return;

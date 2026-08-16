@@ -77,6 +77,27 @@ namespace dusk {
                     config::save();
                 }
                 ImGui::Checkbox("Enable LOD Bias", &aurora::gx::enableLodBias);
+                // Live-adjustable VR gamma darkening -- see settings.h's
+                // vrGammaCompensation comment for why this exists (all 3 VR
+                // runtimes reported "washed out" in-headset vs. a correct
+                // desktop mirror, 2026-08-16). Applies to every runtime
+                // EXCEPT SteamVR, which keeps its own separate, already-
+                // tuned exponent untouched (vr_xr_submit.hpp's
+                // effectiveGammaExponent()). >1.0 darkens further, <1.0
+                // brightens. 2.0 confirmed correct on Virtual Desktop.
+                dusk::config::ImGuiSliderFloat("VR Gamma Compensation",
+                    getSettings().game.vrGammaCompensation, 0.3f, 3.0f, "%.3f");
+                // Independent SteamVR-only slider (2026-08-16 follow-up) --
+                // see settings.h's vrGammaCompensationSteamVr comment for
+                // why SteamVR can't share the slider above. Range covers
+                // both directions already tested historically: 1.0/2.2
+                // (~0.4545, the original brightening fix -- since found to
+                // undersaturate) up through 2.2 (darkening, previously
+                // found "too dark"). CONFIRMED 2026-08-16: 1.0 (no
+                // compensation at all, now the default) is what actually
+                // looks correct.
+                dusk::config::ImGuiSliderFloat("VR Gamma Compensation (SteamVR)",
+                    getSettings().game.vrGammaCompensationSteamVr, 0.3f, 2.2f, "%.3f");
                 ImGui::EndMenu();
             }
 

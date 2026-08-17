@@ -64,6 +64,12 @@ window > close {
     font-size: 24dp;
     color: rgba(224, 219, 200, 70%);
     backdrop-filter: blur(2dp);
+    /* Compensates for the blur being forced off behind VR's menu billboard
+       (aurora::rmlui::set_force_no_backdrop()) -- without this the close
+       button was a fully see-through hotspot with no visual grounding
+       against the real game HUD behind it. Same pattern already used by
+       touch_controls.rcss's own commented-out backdrop-filters. */
+    background-color: rgba(10, 9, 6, 40%);
     border-radius: 6dp;
     decorator: text("&#xe5cd;" center center);
     transition: color background-color 0.12s linear-in-out;

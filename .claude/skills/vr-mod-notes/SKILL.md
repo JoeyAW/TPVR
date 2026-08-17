@@ -8146,6 +8146,648 @@ reference) along the way that nobody had reason to suspect until real
 user data forced a second look. This section is done; no known remaining
 gaps.
 
+### VR controller opens + navigates the Dusklight menu — Phase 1 (input only), step 1 landed 2026-08-16, NOT yet tested in-headset
+
+**Goal** (explicit user request, planned via a full Plan Mode session — see
+`C:\Users\joeyw\.claude\plans\fizzy-finding-minsky.md` for the approved
+plan in full): bind a VR controller button/gesture to open the Dusklight
+menu (the RmlUi settings/mods overlay, normally F1 or a real gamepad's
+configured button), and make VR controllers navigate it once open.
+
+**Architecture, user-confirmed after research**: the menu's open/navigate
+logic is driven entirely by real SDL `Gamepad` events flowing through
+`dusk::ui::input::handle_event()` (`src/dusk/ui/input.cpp`) — completely
+separate from both mechanisms VR input already uses
+(`PADSetVirtualStatus` for gameplay, `ActionBinds` virtual binds for touch
+shortcuts). Rather than duplicate that pipeline's chord detection, hold-
+repeat navigation, and rebinding UI by hand, this registers a **real SDL3
+virtual gamepad** (`SDL_AttachVirtualJoystick`) and drives it from VR
+controller state every frame — SDL synthesizes genuine
+`SDL_EVENT_GAMEPAD_*` events, flowing through the existing, UNMODIFIED
+menu pipeline for free, including the existing Controller Config rebinding
+screen. First use of this SDL3 API anywhere in this codebase (confirmed
+via a full-repo grep before choosing this approach) — SDL's own header
+comment literally names this exact use case: "This has been used to make
+unusual devices, like VR headset controllers, look like normal
+joysticks."
+
+**Key verified facts** (see the plan file for full reasoning/citations):
+- `dusk::ui::input::sync_input_block()` already calls
+  `PADBlockInput(any_document_visible())` — gameplay input is zeroed on
+  every port while any UI document (including this menu) is open, the
+  same mechanism real gamepad players already rely on to safely navigate
+  this menu today.
+- Port choice: **`PAD_CHAN1`** (Port 2), not `PAD_CHAN0` (VR gameplay's
+  own port) — stronger than "safe because blocked while menu open": in a
+  normal (non-`DEBUG`) build, `mDoCPd_c::create()` never even allocates a
+  `JUTGamePad` for ports 1-3, so gameplay never reads that port at all.
+- RmlUi always composites onto the **desktop window's own surface**
+  (`extern/aurora/lib/aurora.cpp`'s `end_frame()`), never into a VR eye or
+  the existing HUD billboard — confirmed directly. So this whole feature,
+  once fully wired, will open/navigate the menu but the **headset stays
+  blank**; only the desktop monitor shows it. Making it visible IN the
+  headset is a deliberately separate, not-yet-attempted follow-up (a new
+  VR billboard capturing RmlUi's own render target, similar in kind to
+  the existing desktop-mirror feature) — **user explicitly chose to scope
+  this pass to input-only, phase-2 visibility deferred.**
+
+**Menu-open input, reusing an existing mechanism with zero new UX
+design**: `src/dusk/ui/input.cpp`'s existing chord (hold
+`PAD_TRIGGER_R` + `PAD_BUTTON_START` together) already opens the menu for
+any gamepad without a custom-bound `OPEN_DUSKLIGHT_MENU`. Once wired
+(step 2, not yet done), will feed `leftMenuHeld || rightStickClickHeld` →
+virtual `SDL_GAMEPAD_BUTTON_START` and `rightTrigger` → virtual
+`SDL_GAMEPAD_AXIS_RIGHT_TRIGGER`. Since this is a real SDL gamepad on
+Port 2, the player will also be able to rebind `OPEN_DUSKLIGHT_MENU` to
+any single button via the existing Controller Config screen, for free.
+
+**In-menu navigation** (step 3, not yet done): left thumbstick →
+`SDL_GAMEPAD_AXIS_LEFTX/LEFTY` (up/down/left/right), right A click →
+`SDL_GAMEPAD_BUTTON_SOUTH` (confirm), right B click →
+`SDL_GAMEPAD_BUTTON_EAST` (back/cancel). All three already computed once
+per frame for gameplay — no new OpenXR action reads needed.
+
+**New file: `src/dusk/vr/vr_menu_gamepad.hpp`** (header-only, matching
+this module's convention — `vr_smooth_turn.hpp`/`vr_swing_detector.hpp`
+etc. are all header-only too). `ensureVrMenuGamepadAttached()` (idempotent,
+builds an `SDL_VirtualJoystickDesc` via `SDL_INIT_INTERFACE`, advertises
+only SOUTH/EAST/START/LEFTX/LEFTY/RIGHT_TRIGGER as valid via
+`button_mask`/`axis_mask` but uses the FULL `SDL_GAMEPAD_BUTTON_COUNT`/
+`SDL_GAMEPAD_AXIS_COUNT` for `nbuttons`/`naxes` — sidesteps guessing
+whether a sparse minimal count is safe, since `START`'s enum value is
+higher than a sparse 3-button count would cover), `updateVrMenuGamepadPlayerIndex()`
+(re-asserts Port 2 every frame — `apply_port_preferences()` can reset a
+virtual device's player index later, so this can't be a one-shot claim),
+`updateVrMenuGamepadState(...)` (plain-parameter, no duplicate action
+reads — SDL's own ranges, not `PADStatus`'s `s8` scale: sticks are signed
+`Sint16`, the trigger axis is `0..SDL_JOYSTICK_AXIS_MAX` per
+`SDL_gamepad.h`'s own documented convention, confirmed by reading the
+vendored header directly, not assumed), `neutralizeVrMenuGamepadState()`
+(called unconditionally from every early-return path in `tick()`'s
+"reset up front" block, same reasoning as that block's existing
+`g_duskVREyePassOpen`/desktop-mirror resets — nothing can get stuck
+held across a dropped frame), `detachVrMenuGamepad()` (genuine teardown
+only, called from `tick()`'s EXITING/LOSS_PENDING branch — deliberately
+**not** called on STOPPING, matching this file's existing "STOPPING is
+resumable, EXITING/LOSS_PENDING is not" distinction for the XR session
+itself).
+
+**Step 1 landed this round** (per the plan's incremental test order —
+small step, build, ask the user to test in-headset before continuing):
+attach + Port 2 player-index claim + a temporary one-shot round-trip
+diagnostic (`[dusk::vr::menugamepad]` `OutputDebugStringA` logging) that
+sets the virtual joystick's SOUTH button true via the joystick-level
+setter and reads it back via the gamepad-level getter, to empirically
+confirm SDL3's documented "virtual gamepad raw indices map 1:1 to
+`SDL_GamepadButton`/`SDL_GamepadAxis` enum values" claim — genuinely
+unverified in THIS codebase until tested, since nothing here has ever
+used this API before. **`updateVrMenuGamepadState()` is NOT yet wired to
+real VR controller input** — deliberately still always-neutral this
+round, per the plan's "don't land the whole feature in one untested
+shot" step order.
+
+**Built successfully** (RelWithDebInfo) — `vr_menu_gamepad.hpp` (new),
+`vr_main.cpp` recompiled, clean link, no new warnings.
+
+**UPDATE (same day) — step 1 result came back "WRONG," but it was a false
+negative in the diagnostic itself, not a real mapping problem. Root cause
+found and fixed; step 2 (menu-open chord) wired in the same round.** User
+tested: Port 2 correctly showed the device, but the round-trip log said
+`identity mapping assumption WRONG -- investigate`, and the user
+separately reported "it doesn't control the menu" (expected at this
+stage regardless — real input wasn't wired yet, only the diagnostic was).
+
+**Real root cause**: every `SDL_SetJoystickVirtual*` function
+(`SDL_joystick.h`) is explicitly documented — on all of them, not a
+one-off — "values set here will not be applied until the next call to
+`SDL_UpdateJoysticks`, which can either be called directly, or can be
+called indirectly through various other SDL APIs... `SDL_PollEvent`,
+`SDL_PumpEvents`, ..." The original round-trip test set the button then
+read it back in the SAME function call with nothing in between —
+reading stale, pre-write cached state every time, regardless of whether
+the underlying identity-mapping assumption was actually correct. Not
+something guessable from the struct-level docs alone; only found by
+reading the *function-level* doc comment on `SDL_SetJoystickVirtualButton`
+itself, repeated verbatim on every sibling setter.
+
+**Fix, two places**: (1) the round-trip diagnostic now calls
+`SDL_UpdateJoysticks()` between the write and the read (and again after
+resetting), so it actually tests what it claims to; (2)
+`updateVrMenuGamepadState()` — the REAL per-frame state feed, not just
+the diagnostic — now also calls `SDL_UpdateJoysticks()` after every
+frame's writes, so the resulting `SDL_EVENT_GAMEPAD_*` events are already
+queued by the time aurora's `poll_events()` next runs, rather than
+leaving a potential frame of lag to chance. This second fix matters more
+than the diagnostic itself — without it, the real feature would have had
+the exact same stale-state problem once wired, chord or no chord.
+
+**Step 2 wired in the same round** (menu-open chord only, per the plan):
+`updateVrMenuGamepadState(0.f, 0.f, false, false, leftMenuHeld ||
+rightStickClickHeld, rightTrigger)` called once per frame alongside
+`updateVrMenuGamepadPlayerIndex()` — feeds the virtual gamepad's
+START button and RIGHT_TRIGGER axis from VR's existing left-menu-click
+and right-trigger inputs, reusing `dusk::ui::input.cpp`'s existing
+"hold both together" chord with zero new UX design. Navigation (left
+stick + A/B, step 3) is still NOT wired — those four parameters stay
+`0.f`/`false` this round.
+
+**Built successfully** (RelWithDebInfo) — only `vr_main.cpp` (transitively
+includes the header) recompiled, clean link, no new warnings.
+
+**NOT yet tested in-headset.** Next step for whoever picks this up:
+launch in VR, hold the left menu-click button (or right stick click) +
+right trigger together, and check (a) the `[dusk::vr::menugamepad]`
+round-trip log now says "identity mapping confirmed," and (b) whether the
+**desktop window** (not the headset — see this section's scope note
+above) shows the Dusklight menu actually open. If (a) still fails, the
+mapping assumption itself needs rederiving, not just the timing. If (a)
+passes but (b) doesn't, the chord logic itself
+(`is_menu_chord()`/`is_menu_chord_part()` in `dusk/ui/input.cpp`) or the
+port-0-vs-port-1 button-mapping lookup (`find_mapped_pad_button()`) is
+the next thing to check with real data, not another guess. If both pass,
+proceed to step 3 (navigation), same one-small-step-at-a-time discipline.
+
+**UPDATE (same day) — (a) confirmed ("identity mapping confirmed", button
+round-trip passes), but (b) still fails: holding the chord for real never
+opened the menu on the desktop window. Traced the real dolphin-PAD mapping
+chain `dusk::ui::input.cpp` actually depends on (button round-trip alone
+never tested this), found a real gap in the diagnostic coverage, and
+added two new diagnostic rounds rather than guess again.**
+
+**Traced the mapping chain directly** (`extern/aurora/lib/dolphin/pad/pad.cpp`):
+`PADGetButtonMappings()`/`PADGetAxisMappings()` lazily call
+`EnsureMappingLoaded()` → `__PADLoadMapping()`, which falls back to
+`__PADSetDefaultMapping()` (keyed on `SDL_GetGamepadType()`, `default:`
+case → `g_defaultButtonsStandard`) for any controller with no saved
+mapping file — self-healing if called before the player index is set
+(`__PADLoadMapping` early-returns without marking itself loaded when
+`SDL_GetGamepadPlayerIndex() == -1`, so it just retries next call).
+Confirmed `g_defaultButtonsStandard`/`g_defaultAxes` both correctly map
+`SDL_GAMEPAD_BUTTON_START → PAD_BUTTON_START` and
+`SDL_GAMEPAD_AXIS_RIGHT_TRIGGER → PAD_AXIS_TRIGGER_R →` (via
+`pad_button_from_axis()`, `dusk/ui/input.cpp`) `PAD_TRIGGER_R` — exactly
+what `is_menu_chord_part()` checks for. On paper, this should all work.
+
+**Real gap found**: the original round-trip diagnostic only ever tested
+the SOUTH *button* — never the RIGHT_TRIGGER *axis* specifically, which
+has a documented SDL convention subtlety buttons don't:
+`SDL_gamepad.h`'s own doc says gamepad-level trigger axes read
+`0..SDL_JOYSTICK_AXIS_MAX`, explicitly noting "this is NOT the same range
+that will be reported by the lower-level `SDL_GetJoystickAxis()`" —
+implying some real devices' auto-generated mapping RESCALES a bipolar
+joystick-level raw trigger axis into unipolar gamepad-level range. Since
+`updateVrMenuGamepadState()` already writes joystick-level values in
+0..32767 unipolar (gamepad-style, not bipolar) via
+`SDL_SetJoystickVirtualAxis`, an unexpected rescale here could silently
+produce a gamepad-level reading that never crosses
+`dusk/ui/input.cpp`'s `kGamepadAxisPressThreshold` (16384) even at a full
+physical trigger pull — never previously tested, and a concrete
+mechanism that would exactly explain the observed symptom without
+needing to distrust anything else already confirmed working.
+
+**Two new temporary diagnostics added, not yet tested**:
+1. `vr_menu_gamepad.hpp`'s `updateVrMenuGamepadPlayerIndex()`: a second
+   one-shot round-trip, this time for `SDL_GAMEPAD_AXIS_RIGHT_TRIGGER`
+   specifically — writes raw `0` then raw `32767` (both via
+   `SDL_SetJoystickVirtualAxis` + `SDL_UpdateJoysticks()`, same fix as the
+   button round-trip needed), logs what `SDL_GetGamepadAxis()` reports
+   for each against the 16384 threshold.
+2. `dusk/ui/input.cpp`'s `process_axis_direction()` and the
+   `SDL_EVENT_GAMEPAD_BUTTON_DOWN`/`UP` branch of `handle_event()`: live
+   `[dusk::ui::menugamepaddiag]` logging, gated to `port == PAD_CHAN1` so
+   it never fires for a real player's own controller, printing the raw
+   event value, `active`/`released`, the resolved `PADButton`, and
+   `is_menu_chord(port)` — this traces the ACTUAL chord state machine in
+   real usage, not just SDL's own mapping layer, so it'll catch anything
+   else going on even if the trigger-rescale theory turns out wrong.
+
+**Build note**: adding `<windows.h>` to `input.cpp` for
+`OutputDebugStringA` broke compilation at `touch_moved_too_far()`'s
+pre-existing `std::max()` call — `windows.h`'s own `min`/`max` macros
+collided with it (`error C2589: '(': illegal token on right side of '::'`).
+Fixed by defining `NOMINMAX` before the include, the standard fix for
+this exact class of collision — worth remembering if `<windows.h>` is
+ever added to another file in this codebase that also uses `std::min`/
+`std::max`.
+
+**Built successfully** (RelWithDebInfo) — `vr_menu_gamepad.hpp`,
+`vr_main.cpp`, `dusk/ui/input.cpp` recompiled, clean link, no new
+warnings after the `NOMINMAX` fix.
+
+**UPDATE (same day) — real root cause found from this exact data, NOT the
+rescale theory. Fixed, built, NOT yet re-tested.** User's log showed the
+trigger round-trip: `wrote raw 0 -> SDL_GetGamepadAxis=0, wrote raw 32767
+-> SDL_GetGamepadAxis=0` — a full press reading back as a COMPLETE zero,
+not a miscalibrated-but-nonzero value, ruling out a simple rescale.
+Combined with the live diagnostic showing **zero** real
+`SDL_EVENT_GAMEPAD_BUTTON_DOWN` events for START ever appeared despite
+the user holding it repeatedly (only the round-trip's own synthetic SOUTH
+press/release showed up), the real mechanism became clear: SDL's
+auto-generated mapping for a virtual `SDL_JOYSTICK_TYPE_GAMEPAD` does
+**not** identity-map raw index == enum value the way both this project
+and the vendored header docs alone implied — it appears to **compact**
+raw indices to the ascending-enum-order position among only the bits
+actually SET in `button_mask`/`axis_mask`. The original sparse mask
+(SOUTH=0, EAST=1, START=6 for buttons; LEFTX=0, LEFTY=1,
+RIGHT_TRIGGER=5 for axes) meant SOUTH/EAST/LEFTX/LEFTY's *compacted*
+position coincidentally equaled their real enum value (all low bits) —
+exactly why the original SOUTH-only round-trip passed and looked like
+proof of identity mapping — but START's real compacted position would
+have been 2 (third bit set), not 6, and RIGHT_TRIGGER's would have been 2
+as well (third axis bit set), not 5. Writes via the real enum values (6
+and 5) were silently landing on raw slots nothing was listening to.
+
+**Fix** (`vr_menu_gamepad.hpp`'s `ensureVrMenuGamepadAttached()`):
+`button_mask`/`axis_mask` now set EVERY bit from 0 up through
+`SDL_GAMEPAD_BUTTON_COUNT`/`SDL_GAMEPAD_AXIS_COUNT` (i.e. `(1u << COUNT)
+- 1u`), not just the handful of inputs actually driven — this makes
+compacted position equal raw enum value unconditionally for everything,
+regardless of exactly how SDL's real compaction algorithm works
+internally (never independently confirmed beyond this empirical fix, and
+not worth further reverse-engineering an undocumented internal SDL
+behavior when a robust workaround exists). `naxes`/`nbuttons` already
+used the full enum count from the start, so no separate array-sizing
+change was needed.
+
+**Diagnostic scaffolding deliberately left in place** (both round-trip
+tests in `vr_menu_gamepad.hpp`, and the live `[dusk::ui::menugamepaddiag]`
+logging in `dusk/ui/input.cpp`) — not confirmed fixed yet, one more
+in-headset round needed first, per this project's normal practice of
+only removing diagnostics once a fix is actually confirmed working.
+
+**Built successfully** (RelWithDebInfo) — only `vr_main.cpp`
+(transitively includes the header) recompiled, clean link, no new
+warnings.
+
+**NOT yet tested in-headset.** Next step: hold the chord (right stick
+click or left menu button, + right trigger) again. Expect: the trigger
+round-trip line should now show a nonzero readback for the 32767 write,
+the live diagnostic should show a real START button-down event with
+`is_menu_chord=1`, and — separately, remember the menu only renders to
+the **desktop monitor**, not the headset — check whether the Dusklight
+menu actually opens on screen. If the round-trip/diagnostic now look
+right but the menu still doesn't open, the remaining gap would be
+downstream of `dusk::ui::input.cpp` entirely (worth checking
+`ActionBinds::OPEN_DUSKLIGHT_MENU`'s current binding state for Port 2,
+or whatever consumes `Rml::Input::KI_F1` to actually toggle the
+document) — not something to guess at without a fresh capture.
+
+**CONFIRMED FIXED IN-HEADSET** — user: "Now it shows up." Closes out the
+button/axis-compaction investigation; the mask fix (every bit 0 through
+the full enum count, not just the sparse subset actually driven) is the
+real, permanent fix. Diagnostic scaffolding removed same round (both
+round-trip tests in `vr_menu_gamepad.hpp`, and `dusk/ui/input.cpp`'s
+`[dusk::ui::menugamepaddiag]` logging + the `<windows.h>`/`NOMINMAX`
+include block it needed) — confirmed working, no reason to keep it per
+this project's standing "remove freely once confirmed" policy.
+
+**Same-day follow-up — menu-open chord cooldown added.** User: "add a
+cooldown to the button press? Like half a second cause it kinda spams" —
+holding the chord continuously was re-triggering open/close repeatedly.
+Root cause not independently re-diagnosed (not necessary — a flat
+debounce is exactly what was asked for and is a reasonable, low-risk fix
+regardless of the precise underlying jitter mechanism), but the leading
+theory: `dusk::ui::input.cpp`'s chord detection is an AND of two
+SEPARATELY-thresholded inputs (a digital button + an analog trigger
+axis), each with its own press/release hysteresis — an OpenXR analog
+trigger read likely doesn't present as cleanly binary as a real
+controller's digital press, so the AND condition can flicker in and out
+near the threshold even while the player feels like they're holding
+continuously.
+
+**Fix** (`vr_menu_gamepad.hpp`): once the chord is allowed through once
+(`menuChordHeld && triggerChordValue > 0.5` — roughly matching
+`dusk/ui/input.cpp`'s own `kGamepadAxisPressThreshold`, 16384/32767), a
+new `detail::g_menuChordCooldownRemaining` timer starts at
+`kMenuChordCooldownSec = 0.5f`. While counting down, `updateVrMenuGamepadState()`
+forces the chord's TWO underlying virtual inputs (both `SDL_GAMEPAD_BUTTON_START`
+and the `SDL_GAMEPAD_AXIS_RIGHT_TRIGGER` value) fully released regardless
+of the player's real physical state — releasing only one wouldn't drop
+`is_menu_chord()`'s AND. `updateVrMenuGamepadState()`/
+`neutralizeVrMenuGamepadState()` both gained a `dtSeconds` parameter
+(threaded from `pacing.presentation_dt_seconds`, the same real-measured-
+frame-time source every other per-frame timer in this codebase already
+uses) so the cooldown decrements correctly even across early-return-heavy
+frames.
+
+**Built successfully** (RelWithDebInfo) — `vr_menu_gamepad.hpp`,
+`vr_main.cpp`, `dusk/ui/input.cpp` all recompiled, clean link, no new
+warnings.
+
+**CONFIRMED WORKING IN-HEADSET** — user: "Ok it works." 0.5s left as-is,
+no retuning requested. This closes out Phase 1's steps 1 and 2 (attach +
+menu-open chord) end to end: the virtual gamepad attaches, claims Port 2,
+and holding right-stick-click/left-menu-click + right-trigger cleanly
+opens the Dusklight menu on the desktop monitor exactly once per press,
+with no spam.
+
+**Step 3 (navigation) wired same day, per explicit user confirmation
+("Yes") to proceed** — real call site (`vr_main.cpp`) now passes
+`leftStick.x`/`leftStick.y`/`rightAHeld`/`rightBHeld` instead of the
+placeholder `0.f`/`0.f`/`false`/`false` used for steps 1-2. No new mask
+work needed, per the step 1-2 lesson (every standard button/axis is
+already advertised via the full-range `button_mask`/`axis_mask` fix, not
+just a sparse subset) — SOUTH/EAST/LEFTX/LEFTY were already covered by
+that same fix. `PADBlockInput(any_document_visible())`
+(`dusk/ui/input.cpp`) already guarantees these dual-purpose inputs can't
+leak into gameplay while the menu is closed vs. open — same reasoning
+already relied on for the chord itself.
+
+Built successfully (RelWithDebInfo) — only `vr_main.cpp` recompiled,
+clean link, no new warnings.
+
+**CONFIRMED WORKING IN-HEADSET, directionally correct** — user: "Tested
+it in the headset, navigation works however it is insanely fast unlike a
+regular controller."
+
+**UPDATE (same day) — stick smoothing added to address the speed
+report, built, NOT yet re-tested.** Investigated before guessing: read
+`dusk/ui/input.cpp`'s `repeat_interval()`/`update_input()` directly and
+confirmed repeat SPEED itself is governed entirely by wall-clock elapsed
+hold time (`now_seconds()`, `repeat.nextRepeatAt`) via a fixed ramp
+(`kGamepadRepeatStartInterval` 0.12s → `kGamepadRepeatMinInterval` 0.045s
+over `kGamepadRepeatRampDuration` 1.0s) — identical code path, NOT
+magnitude-dependent, for a real gamepad and this virtual one. Since the
+user explicitly framed it as "unlike a regular controller," the shared
+ramp itself can't be the cause (a real controller would feel the same
+ramp). Leading theory instead: `dusk/ui/input.cpp`'s press/release
+hysteresis band (`kGamepadAxisPressThreshold`=16384,
+`kGamepadAxisReleaseThreshold`=12000, both out of 32767) assumes a real
+gamepad's mechanically-stabilized stick, braced by the same hand gripping
+the controller body — naturally crosses that band once per deliberate
+push. A VR controller's stick is held in an unsupported, floating hand;
+normal hand tremor can flicker the raw value back and forth across that
+band several times a second, and EACH crossing fires an immediate,
+un-ramped FRESH press (`begin_gamepad_key()`) independent of the intended
+hold-then-ramp behavior — several firing in quick succession from tremor
+would read as erratic rapid-fire, matching the report, without needing
+the shared ramp itself to be at fault.
+
+**Fix** (`vr_menu_gamepad.hpp`): low-pass filter (standard exponential
+smoothing, `1 - exp(-dt/tau)`, framerate-independent via `dtSeconds` — VR
+frame time isn't perfectly fixed) applied to the raw left-stick value
+BEFORE it's written to the virtual joystick, so tremor gets smoothed out
+before it ever reaches SDL's press/release logic, while a real deliberate
+push still tracks through within a fraction of a second.
+`kMenuStickSmoothingTimeConstant = 0.08f` (80ms) is an untested starting
+guess, not derived from anything — the one constant to retune if this
+still feels off (too twitchy → raise it; feels sluggish/laggy to respond
+→ lower it), same "quick reasonable default, iterate on real feedback"
+approach as the menu-chord cooldown.
+
+Built successfully (RelWithDebInfo) — only `vr_main.cpp` (transitively
+includes the header) recompiled, clean link, no new warnings.
+
+**CONFIRMED WORKING IN-HEADSET** — user: "Yea that works." `kMenuStickSmoothingTimeConstant`
+left at its initial 0.08f guess, no retuning requested.
+
+**This closes out Phase 1 of the VR-controller-drives-the-Dusklight-menu
+feature end to end**: attach (step 1), menu-open chord with a 0.5s
+cooldown (step 2), and stick+A/B navigation with tremor smoothing
+(step 3) are all confirmed working in-headset. Full input loop: hold
+right-stick-click/left-menu-click + right-trigger to open the menu on the
+desktop monitor, left stick to move the selection, right A to confirm,
+right B to back out. Diagnostic scaffolding from the investigation was
+already removed once each bug was confirmed fixed (per this project's
+standing practice) — nothing left to clean up.
+
+### Phase 2 — menu visible IN the headset, started 2026-08-16, steps 1-2 landed, NOT yet tested
+
+**Goal** (explicit user request: "Yeah we need it visible in the
+headset"). Planned via a full Plan Mode session (two background research
+agents + my own direct verification of every load-bearing claim) — see
+`C:\Users\joeyw\.claude\plans\fizzy-finding-minsky.md` for the full
+approved plan, including exact code citations for everything below.
+
+**Architecture**: RmlUi already renders into a real, separate, copyable
+WebGPU texture (`extern/aurora/lib/rmlui.cpp`'s `s_renderTarget`) —
+confirmed directly, not assumed. Critically, `record_frame()` (the only
+thing that actually writes into it) is only ever called from
+`aurora::end_frame()`, which — per `m_Do_main.cpp`'s real call order —
+always runs AFTER `dusk::vr::tick()` has finished that frame's own
+per-eye rendering. This means `s_renderTarget` is always a
+fully-finished PREVIOUS frame throughout the whole VR eye loop — no
+torn reads, no double-buffering needed, just one frame (~11-14ms) of
+inherent latency, accepted deliberately rather than trying to restructure
+`end_frame()`'s internal call timing (which would risk double-calling
+`g_context->Update()`, corrupting RmlUi's own animation/input state).
+
+**The bridge** (GX texture object ← WebGPU texture, since RmlUi's texture
+is raw `wgpu::Texture` but the proven `drawHudBillboard()`-style draw
+mechanism operates on GX `TGXTexObj`): traced the real cache mechanism
+`GXCopyTex` uses (`GXState::copyTextureCache`/`copyTextures[dest]`,
+`extern/aurora/lib/dolphin/gx/GXFrameBuffer.cpp`'s `copy_tex()` and
+`extern/aurora/lib/gx/gx.cpp`'s `resolve_sampled_textures()`) and added a
+new function that populates the SAME cache entries without requiring a
+real GX render — `aurora::gx::ensure_external_copy_texture()`. A plain
+WebGPU `CopyTextureToTexture` (an encoder-level op, not a draw — doesn't
+need an active render pass) then fills the resulting texture from
+`s_renderTarget` each frame.
+
+**Also confirmed important**: RmlUi's alpha is real and PREMULTIPLIED
+(via `g_CopyPremultipliedAlphaPipeline`'s blend factors in `aurora.cpp`)
+— the new billboard needs `GX_BL_ONE`/`GX_BL_INVSRCALPHA`, NOT HUD's
+`GX_BL_SRCALPHA`/`GX_BL_INVSRCALPHA`, and does NOT need HUD's luma-key
+alpha workaround (that existed only because HUD's own material alpha was
+unusable — RmlUi's alpha is real and meaningful, sample it directly via
+`GX_CA_TEXA`).
+
+**Step 1 (plumbing, landed)**: `aurora::rmlui::get_render_target()`
+(`extern/aurora/lib/rmlui.hpp`/`.cpp`) — read-only accessor for
+`s_renderTarget`. `aurora::gx::ensure_external_copy_texture()`
+(`extern/aurora/lib/gx/gx.hpp`/`.cpp`) — the cache-population bridge
+described above, mirroring `copy_tex()`'s own cache logic minus the
+GX-render step. Both purely additive, zero risk to any existing call
+site. Built clean.
+
+**Step 2 (validation probe, landed, NOT yet tested)**: the one genuinely
+open technical question from the plan — whether
+`aurora::gfx::push_encoder_task()` (the mechanism that will actually
+perform the per-frame `CopyTextureToTexture`) is valid to call from the
+same pre-eye-loop window `captureHudBillboard()`/`captureMapCopy2D()`
+already use. That window is proven safe for GX offscreen-pass *nesting*
+specifically, but `push_encoder_task()`'s own doc comment requires "an
+active render pass" more generally — never proven for this exact window
+before. Added a temporary, no-op probe right after
+`mDoGph_gInf_c::captureMapCopy2D()` in `vr_main.cpp`'s `tick()`: registers
+a trivial encoder-task callback, calls `push_encoder_task()` once, logs
+the boolean result via `[dusk::vr::menubillboard]` `OutputDebugStringA`.
+Built clean.
+
+**Step 2 result: CONFIRMED — `push_encoder_task` returns `true` from the
+pre-eye-loop window.** User tested, log showed
+`[dusk::vr::menubillboard] push_encoder_task probe (pre-eye-loop window)
+returned true (window is valid)`. This is the plan's one flagged unknown
+— now resolved, no fallback needed.
+
+**Step 3 (solid-color GXTexObj bridge test) landed, NOT yet tested.**
+Removed the now-obsolete probe (its purpose is fully answered) and
+replaced it with the real test call, per this project's standing
+"remove diagnostics freely once confirmed" practice. Implemented in
+`vr_stereo_render.hpp`'s new "VR menu billboard" section:
+- `computeBillboardPose()` — the shared eye-space corner math, factored
+  out of `computeHudPose()` (which now just calls it with its own
+  constants) rather than hand-copying the formula a second time — this
+  project has been bitten by exactly that duplication-drift bug class
+  more than once (`vr_smooth_turn.hpp`'s own header comment cites it).
+  `computeHudPose()`'s behavior is unchanged (pure refactor, verified by
+  inspection — same inputs produce the same outputs).
+- `computeMenuBillboardPose(aspectHeightOverWidth)` — menu-specific
+  distance/width constants (`kMenuBillboardDistanceMeters = 1.2f`,
+  `kMenuBillboardWidthMeters = 1.0f`, both untested starting guesses),
+  height derived at call time from the real aspect ratio (not hardcoded
+  like HUD's fixed 608:448) — deliberately reuses HUD's own
+  `g_hudSmoothedWorldForward` damping state rather than a second
+  independent smoothing system, per the plan's reasoning (both are
+  head-locked-with-damping panels driven by the same signal; splitting
+  it out later is a trivial follow-up if testing shows it's needed).
+- `drawMenuBillboard(TGXTexObj*, aspectHeightOverWidth)` — near-copy of
+  `drawHudBillboard()` with the two confirmed-necessary differences: real
+  per-pixel alpha via `GX_CA_TEXA` (no luma-key — RmlUi's alpha is real,
+  unlike HUD's), and `GX_BL_ONE`/`GX_BL_INVSRCALPHA` blend (premultiplied,
+  matching RmlUi's own compositing convention — NOT HUD's
+  `GX_BL_SRCALPHA`/`GX_BL_INVSRCALPHA`, which would double-darken here).
+- `ensureMenuBillboardTestTexture()` — the actual step-3 test: creates a
+  fixed 512×512 `GXInitTexObj` (bypassing HUD's `ResTIMG`/
+  `mDoLib_setResTimgObj()` indirection — unnecessary here, no real GX
+  texture resource involved), populates the `GXState` copy-texture cache
+  via the new `ensure_external_copy_texture()`, then fills the resulting
+  texture with an opaque magenta clear via `push_encoder_task()` (a
+  genuine WebGPU render-pass clear, not real content — isolates "does the
+  draw work" from "does the RmlUi copy work," per the plan's explicit
+  request). Uses a side-table slot (`s_pendingTestClearDst`) for the
+  destination texture rather than trying to carry a `wgpu::Texture`
+  directly through the payload buffer — confirmed by re-reading
+  `vr_xr_submit.hpp`'s `Session::encodeEyeCopy()` that THAT'S the real
+  established pattern (a ref-counted handle isn't safe to raw-memcpy
+  through `push_encoder_task`'s payload), correcting an inaccurate claim
+  in the original plan text.
+- `aurora::gx::ensure_external_copy_texture()` is forward-declared
+  directly in `vr_stereo_render.hpp` rather than including the full
+  lib-internal `gx.hpp` — that header pulls in `GXState` (aurora's entire
+  internal GX-emulation struct) and is only ever included today from
+  within `extern/aurora`'s own GX backend translation units; untested and
+  unnecessarily risky to pull into this already-heavy game-side header
+  wholesale for one function.
+- `vr_main.cpp`: new `#include "dusk/ui/ui.hpp"`, `const bool menuVisible
+  = dusk::ui::any_document_visible();` computed once, gates both the new
+  per-frame `ensureMenuBillboardTestTexture()` call (same pre-eye-loop
+  window) and the new per-eye `drawMenuBillboard(&g_menuBillboardTexObj,
+  1.0f)` call (alongside the existing aim-crosshair draw) — the fixed
+  `1.0f` aspect matches the test texture's fixed 512×512 size; step 4
+  will derive this from the real RmlUi render-target dimensions instead.
+
+**Built successfully** (RelWithDebInfo) — `vr_stereo_render.hpp`,
+`vr_main.cpp` recompiled, clean link, no new warnings.
+
+**Step 3 result: CONFIRMED WORKING** — user: "Yes i see the magenta
+square." Draw mechanism, GXTexObj bridge, and placement all validated
+in-headset with zero further changes needed.
+
+**Step 4 (real RmlUi content) landed, NOT yet tested.** Removed the
+solid-color test scaffolding (`ensureMenuBillboardTestTexture()`,
+`menu_billboard_detail::s_pendingTestClearDst`/`testClearEncoderTaskCallback`)
+per this project's standing "remove diagnostics freely once confirmed"
+practice, replaced with the real implementation:
+- `ensureAndCopyMenuBillboardTexture()` — reads
+  `aurora::rmlui::get_render_target()` (early-out if `!rt.texture` or
+  zero size — RmlUi hasn't rendered yet, or a document just opened this
+  exact frame), re-runs `GXInitTexObj` whenever the real dimensions
+  change (handles both first-use AND the desktop window being resized
+  mid-session, since RmlUi's canvas is OS-window-sized), updates the new
+  `g_menuBillboardAspectHeightOverWidth` global from the real
+  width/height ratio, then pushes a `CopyTextureToTexture` encoder task
+  from `rt.texture` into the `ensure_external_copy_texture()`-backed
+  destination.
+- The copy encoder-task callback duplicates
+  `vr_xr_submit.hpp`'s `dusk::vr::copyTextureToTexture()` 6-line shape
+  inline (same reasoning as before — avoids pulling that much heavier,
+  OpenXR/D3D12-session-specific header into this one for 6 lines), using
+  the same side-table-slot pattern (not a payload-carried
+  `wgpu::Texture`) as step 3's test callback did.
+- `vr_main.cpp`'s per-eye `drawMenuBillboard()` call now passes
+  `vr_render::g_menuBillboardAspectHeightOverWidth` (updated live from
+  the real RmlUi canvas size) instead of step 3's fixed `1.0f` test
+  value.
+
+**Built successfully** (RelWithDebInfo) — `vr_stereo_render.hpp`,
+`vr_main.cpp` recompiled, clean link, no new warnings.
+
+**Step 4 result: real menu content appeared, but a genuine feedback loop
+was found — root-caused and fixed same day, NOT yet re-tested.** User:
+"I can see the menu in vr but it looks like my view is looping in the
+window."
+
+**Root cause, confirmed directly by reading the code (not guessed)**:
+`record_frame()` (`rmlui.cpp`) passes `webgpu::present_source()` into
+RmlUi's `BeginFrame()` as the "scene" background baked into
+`s_renderTarget` whenever a document has a visible CSS backdrop-filter
+(`context_has_visible_backdrop_filter()`, likely true for the Dusklight
+menu's blurred-panel styling) — `needsBackdrop ? BaseLayerContent::Scene
+: BaseLayerContent::Transparent`. But `present_source()` is ALSO exactly
+what the VR desktop-mirror feature points at the just-rendered VR eye
+texture, via `aurora::gfx::set_present_source_mirror()`
+(`vr_main.cpp`'s `tick()`). Since that same eye texture, this same frame,
+was drawn INCLUDING the new menu billboard (which itself samples
+`s_renderTarget` from the frame before) — this is a genuine, unbounded
+real-time feedback loop, not a cosmetic bug: every frame's RmlUi render
+bakes in an already-nested copy of a previous frame's own headset view,
+one generation deeper each time. Exactly matches "my view is looping in
+the window."
+
+**Fix**: new `aurora::rmlui::set_force_no_backdrop(bool)`
+(`extern/aurora/lib/rmlui.hpp`/`.cpp`) — forces
+`record_frame()`'s `needsBackdrop` to `false` regardless of the real CSS
+check, breaking the cycle at its source. Tied directly to the actual
+causal condition (the desktop mirror being genuinely active this frame),
+not a broader "VR is rendering" flag: `set_force_no_backdrop(true)`
+right alongside `set_present_source_mirror()`'s real call site
+(`vr_main.cpp`), gated on `mirrorEyeTargets.colorTexture` being non-null
+(matching `set_present_source_mirror()`'s own no-op condition — if the
+mirror didn't actually take this frame, there's nothing to guard
+against); `set_force_no_backdrop(false)` alongside the existing
+`clear_present_source_mirror()` reset in `tick()`'s "reset up front"
+block, same reasoning as every other reset there (an early return must
+not leave this stuck true from a prior frame). **Tradeoff, accepted**:
+the menu's blurred-background visual effect (if it has one) simply
+doesn't render while VR's desktop mirror is active — a minor cosmetic
+difference against an actual infinite-recursion artifact. Flatscreen
+play is completely unaffected (this only ever fires while the VR mirror
+is genuinely active).
+
+**Built successfully** (RelWithDebInfo) — `extern/aurora/lib/rmlui.cpp`/
+`.hpp`, `vr_main.cpp` recompiled, clean link, no new warnings.
+
+**CONFIRMED FIXED IN-HEADSET** — user: "Tested it, looks fixed now." The
+feedback-loop diagnosis (RmlUi's backdrop-blur baking in
+`present_source()`, which the VR desktop mirror had pointed at the same
+eye the billboard itself draws into) was correct, and
+`set_force_no_backdrop()`'s fix resolved it cleanly with no follow-up
+issues reported.
+
+**This closes out Phase 2 of the VR-menu feature.** Full loop, all
+confirmed working in-headset: the controller chord opens the menu
+(Phase 1), the menu is now visible as a head-locked billboard showing
+real RmlUi content at the correct aspect ratio with no rendering
+artifacts, and stick+A/B navigation (Phase 1, not separately re-tested
+with the visual half present but no reason to expect regression — same
+underlying input path, unchanged this session). Diagnostic/test
+scaffolding was removed as each step was confirmed, per this project's
+standing practice — nothing left to clean up.
+
+**Summary of the whole feature, both phases**: `src/dusk/vr/vr_menu_gamepad.hpp`
+(SDL virtual gamepad on Port 2, driving the existing `dusk::ui::input.cpp`
+menu-navigation pipeline unmodified) + `src/dusk/vr/vr_stereo_render.hpp`'s
+new "VR menu billboard" section (captures RmlUi's own render target each
+frame via a new `extern/aurora` bridge — `aurora::rmlui::get_render_target()`,
+`aurora::gx::ensure_external_copy_texture()` — and draws it as a
+head-locked stereo billboard, reusing the proven HUD-billboard draw
+mechanism with premultiplied-alpha blending instead of HUD's luma-key) +
+`aurora::rmlui::set_force_no_backdrop()` (breaks the backdrop/mirror
+feedback loop found during testing). All wired from `vr_main.cpp`'s
+`tick()`, gated on `dusk::ui::any_document_visible()` so none of it costs
+anything when the menu is closed.
+
 ## Key lesson learned this session
 
 Don't infer that an uncommitted fix supersedes a nearby disable guard just

@@ -29,6 +29,7 @@
 #include "dusk/game_clock.h"                    // dusk::game_clock::MainLoopPacer
 #include "dusk/settings.h"                      // dusk::getSettings().game.vrDesktopMirror
 #include "dusk/logging.h"                       // DuskLog-style aurora::Module, see VrLog below
+#include "dusk/ui/ui.hpp"                       // dusk::ui::any_document_visible() -- VR menu billboard gating
 
 #include "dusk/vr/vr_xr_bootstrap.hpp"
 #include "dusk/vr/vr_stereo_render.hpp"         // vr_render::
@@ -36,6 +37,7 @@
 #include "dusk/vr/vr_link_visibility.hpp"       // vr_link::
 #include "dusk/vr/vr_smooth_turn.hpp"           // dusk::vr::updateSmoothTurn/getSmoothTurnYawRad
 #include "dusk/vr/vr_xr_submit.hpp"             // dusk::vr::Session
+#include "dusk/vr/vr_menu_gamepad.hpp"          // dusk::vr::ensureVrMenuGamepadAttached, etc.
 #include "dusk/vr/vr_main.hpp"
 
 // TEMP DIAGNOSTIC (VR black-screen-after-save investigation): plain,
@@ -691,6 +693,13 @@ bool startup() {
         VrLog.info("startup succeeded: runtime={} swapchain={}x{} dxgiFormat={}",
                    sysProps.systemName, eyeWidth * 2, eyeHeight, dxgiFormat);
 
+        // Phase 1 of the VR-controller-drives-the-Dusklight-menu feature
+        // (see vr_menu_gamepad.hpp's own header comment) -- attach once
+        // here, now that the session is confirmed up. Not fatal if this
+        // fails (logs internally); VR still works without it, just without
+        // menu access.
+        ensureVrMenuGamepadAttached();
+
         return true;
     } catch (const std::exception& e) {
         // Catches everything upstream, including toDxgiSwapchainFormat()
@@ -792,6 +801,11 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     g_renderedToHeadsetThisFrame = false;
     g_duskVRRenderingToHeadset = false;
     g_duskVREyePassOpen = false;
+    // VR-menu-gamepad (see vr_menu_gamepad.hpp): neutralize unconditionally
+    // here too, same reasoning as everything else in this block -- any
+    // early return below must not leave a menu-open chord or nav button
+    // stuck held from a dropped frame.
+    neutralizeVrMenuGamepadState(pacing.presentation_dt_seconds);
     // Desktop mirror (see the per-eye loop below, where this gets re-set for
     // real): cleared up front like everything else in this block, so any
     // early return between here and the real eye-rendering section (no
@@ -799,6 +813,14 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     // window on its normal flatscreen fallback instead of stuck showing a
     // stale VR eye from a prior frame/session.
     aurora::gfx::clear_present_source_mirror();
+    // Paired with set_force_no_backdrop(true) below, right where the mirror
+    // is actually (re-)set for real -- see that call site's comment and
+    // aurora::rmlui::set_force_no_backdrop()'s own comment for the real
+    // feedback-loop bug this exists to prevent. Reset here alongside the
+    // mirror clear for the identical reason: an early return below must not
+    // leave this stuck true from a prior frame that DID have the mirror
+    // active.
+    aurora::rmlui::set_force_no_backdrop(false);
 
     if (!g_session) {
         logTickReasonOnChange("no-session");
@@ -854,7 +876,10 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
             } else if (stateEvent.state == XR_SESSION_STATE_EXITING ||
                        stateEvent.state == XR_SESSION_STATE_LOSS_PENDING) {
                 // Genuine teardown -- the runtime is not coming back for
-                // this session.
+                // this session. Detach the VR-menu-gamepad here too (not on
+                // STOPPING, the resumable case -- see vr_menu_gamepad.hpp's
+                // detachVrMenuGamepad() comment).
+                detachVrMenuGamepad();
                 g_session = nullptr;
                 g_sessionRunning = false;
                 g_duskVRSessionActive = false;
@@ -1086,6 +1111,21 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     const bool leftMenuHeld = getBoolAction(g_menuClickAction, g_leftHandPath);
     const bool rightStickClickHeld = getBoolAction(g_stickClickAction, g_rightHandPath);
     const bool leftStickClickHeld = getBoolAction(g_stickClickAction, g_leftHandPath);
+
+    // VR-menu-gamepad, plan step 3 (see vr_menu_gamepad.hpp) -- now wires
+    // navigation too, on top of step 2's menu-open chord: left thumbstick
+    // moves the selection (up/down/left/right), right A confirms, right B
+    // backs out/cancels. All already computed above for gameplay --
+    // reused as-is, no new OpenXR action reads. Only live while the menu
+    // is actually open in practice: dusk::ui::input.cpp's own
+    // PADBlockInput(any_document_visible()) already zeroes gameplay's
+    // reading of these same inputs whenever a document is visible, so
+    // there's no double-purpose conflict feeding them here unconditionally
+    // every frame.
+    updateVrMenuGamepadPlayerIndex();
+    updateVrMenuGamepadState(leftStick.x, leftStick.y, rightAHeld, rightBHeld,
+                              leftMenuHeld || rightStickClickHeld, rightTrigger,
+                              pacing.presentation_dt_seconds);
 
     // Swing-gesture -> attack, LEFT hand: added 2026-08-05 per explicit user
     // request ("swinging your left hand in front of you acts as pressing the
@@ -1633,6 +1673,16 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     // runs now instead of skipping again.
     mDoGph_gInf_c::captureMapCopy2D();
 
+    // VR menu billboard, Phase 2 plan step 4 (see vr_stereo_render.hpp's
+    // own "VR menu billboard" section comment for the full mechanism):
+    // step 3's solid-color test CONFIRMED the draw mechanism works
+    // in-headset, so this now copies the REAL RmlUi content each frame.
+    // Gated on menuVisible so this costs nothing when no document is open.
+    const bool menuVisible = dusk::ui::any_document_visible();
+    if (menuVisible) {
+        vr_render::ensureAndCopyMenuBillboardTexture();
+    }
+
     // Desktop mirror: captured from eye 0 (left) inside the loop below,
     // applied once after it. See aurora::gfx::set_present_source_mirror()'s
     // own comment for the mechanism; this is just where VR code decides
@@ -1673,6 +1723,16 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
             if (link->getAimSightVisible()) {
                 vr_render::drawAimCrosshair(*link->getLineTopPosP());
             }
+        }
+
+        // VR menu billboard, Phase 2 plan step 4 -- real RmlUi content
+        // (see the per-frame copy above and vr_stereo_render.hpp's own
+        // "VR menu billboard" section comment). aspectHeightOverWidth is
+        // now the real RmlUi render-target aspect (updated per frame by
+        // ensureAndCopyMenuBillboardTexture()), not a fixed test value.
+        if (menuVisible) {
+            vr_render::drawMenuBillboard(&vr_render::g_menuBillboardTexObj,
+                                          vr_render::g_menuBillboardAspectHeightOverWidth);
         }
 
         // TODO: inject hand mesh before resolving the pass:
@@ -1778,6 +1838,23 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     // got populated this frame (eye 0 never resolved).
     if (dusk::getSettings().game.vrDesktopMirror) {
         aurora::gfx::set_present_source_mirror(mirrorEyeTargets);
+        // Paired with the reset in tick()'s "reset up front" block -- see
+        // aurora::rmlui::set_force_no_backdrop()'s own comment for the real
+        // feedback-loop bug this exists to prevent: RmlUi's backdrop-blur
+        // content would otherwise sample THIS SAME frame's VR eye texture
+        // (present_source(), now mirror-overridden), which itself already
+        // contains the menu billboard drawn from LAST frame's RmlUi output
+        // -- an unbounded circular dependency, not a cosmetic bug (found
+        // 2026-08-16 via a real in-headset report: "my view is looping in
+        // the window"). Gated on the mirror having actually been set THIS
+        // frame (colorTexture non-null), matching
+        // set_present_source_mirror()'s own no-op condition -- if the
+        // mirror didn't take (eye 0 never resolved), present_source() falls
+        // back to the normal internal framebuffer, which isn't part of this
+        // loop at all, so there's nothing to guard against.
+        if (mirrorEyeTargets.colorTexture) {
+            aurora::rmlui::set_force_no_backdrop(true);
+        }
     }
 
     // NEW this session (split from what used to be tick()'s tail): we can't

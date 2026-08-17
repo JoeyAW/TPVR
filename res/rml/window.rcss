@@ -65,7 +65,13 @@ window[open] {
 window tab-bar {
     flex: 0 0 64dp;
     height: 64dp;
-    background-color: rgba(217, 217, 217, 10%);
+    /* Darkened/more opaque than the original rgba(217,217,217,10%) wash --
+       that relied on window's own backdrop-filter blur to stay legible.
+       VR forces the blur off while its desktop mirror is active (see
+       aurora::rmlui::set_force_no_backdrop()), which otherwise lets the
+       real game HUD show through sharp and unblurred right behind the
+       tab labels. */
+    background-color: rgba(10, 9, 6, 45%);
     font-family: "Fira Sans Condensed";
     font-weight: bold;
     font-size: 18dp;
@@ -181,7 +187,10 @@ scrollbarhorizontal sliderbar {
 
 button {
     text-align: center;
-    background-color: rgba(17, 16, 10, 20%);
+    /* Darkened/more opaque than the original 20% -- see the comment on
+       `window tab-bar` above for why (blur forced off behind VR's menu
+       billboard). */
+    background-color: rgba(10, 9, 6, 55%);
     opacity: 0.9;
     padding: 8dp 16dp;
     border-radius: 14dp;
@@ -223,7 +232,10 @@ select-button {
     display: flex;
     align-items: center;
     gap: 8dp;
-    background-color: rgba(17, 16, 10, 20%);
+    /* Darkened/more opaque than the original 20% -- see the comment on
+       `window tab-bar` above for why (blur forced off behind VR's menu
+       billboard). */
+    background-color: rgba(10, 9, 6, 55%);
     opacity: 0.9;
     padding: 8dp 16dp;
     border-radius: 14dp;

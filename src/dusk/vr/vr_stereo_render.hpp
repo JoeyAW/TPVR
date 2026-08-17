@@ -49,6 +49,26 @@
 #include <aurora/gfx.hpp>          // aurora::gfx::create_pass, resolve_pass, etc.
 #include <openxr/openxr.h>
 
+// Lib-internal aurora header, same pattern vr_xr_submit.hpp already uses
+// for extern/aurora/lib/webgpu/gpu.hpp -- aurora::rmlui::get_render_target()
+// (RmlUi's own render target, wired up in step 4). Small/self-contained,
+// safe to include directly (unlike gx.hpp below, deliberately NOT
+// included wholesale -- see that comment).
+#include "../../../extern/aurora/lib/rmlui.hpp"
+
+// aurora::gx::ensure_external_copy_texture() lives in the lib-internal
+// extern/aurora/lib/gx/gx.hpp -- deliberately NOT included wholesale here
+// (that header pulls in GXState, the entire internal GX-emulation state
+// struct, and is only ever included today from within extern/aurora's own
+// GX backend translation units -- untested and unnecessarily risky to pull
+// into this already-heavy game-side header). Forward-declared instead,
+// matching its real signature exactly (gx.cpp/gx.hpp are the source of
+// truth if this ever needs re-checking).
+namespace aurora::gx {
+wgpu::Texture ensure_external_copy_texture(const void* dest, uint32_t width, uint32_t height,
+                                            GXTexFmt format) noexcept;
+}
+
 #include "dusk/vr/vr_smooth_turn.hpp"  // dusk::vr::rotateYawXr/rotateYawQuat
 #include "d/d_com_inf_game.h"      // dComIfGd_getView()
 #include "f_op/f_op_view.h"        // view_class, lookat_class, Mtx44, Mtx
@@ -723,42 +743,54 @@ struct HudQuadCorners {
     float x[4], y[4], z[4];
 };
 
-inline HudQuadCorners computeHudPose() {
+// Shared eye-space billboard corner math -- factored out of computeHudPose()
+// 2026-08-16 when the new menu billboard needed the exact same math with
+// different distance/size constants and (optionally) a different smoothed-
+// direction source. This project has been bitten more than once by two call
+// sites each carrying their own copy of a "should match the other one"
+// formula that silently drifts out of sync (vr_smooth_turn.hpp's own header
+// comment cites the eyePoseToViewMtx/buildHandMtx case) -- one
+// implementation here instead of a second hand-copied one.
+//
+// distanceUnits/halfWidthUnits/halfHeightUnits are MAGNITUDES, not
+// pre-signed -- see computeHudPose()'s own historical note (still true
+// here): (ex,ey,ez) below already carries the correct sign, so a caller
+// passing an already-negated distance would double-negate and flip the
+// panel behind the camera.
+inline HudQuadCorners computeBillboardPose(const cXyz& smoothedWorldForward, float distanceUnits,
+                                            float halfWidthUnits, float halfHeightUnits) {
     view_class* view = dComIfGd_getView();
-    assert(view != nullptr && "VR: computeHudPose() called outside gameplay?");
-
-    const float halfW = kHudWidthMeters * 0.5f * kHudUnitsPerMetre;
-    const float halfH = kHudHeightMeters * 0.5f * kHudUnitsPerMetre;
-    // Magnitude only -- NOT pre-signed like the old fixed-offset version
-    // used to be. (ex,ey,ez) below already carries the correct sign
-    // (≈(0,0,-1) in eye-local space when undamped, the same convention
-    // confirmed working pre-damping), so multiplying by an ALSO-negated
-    // distance here would double-negate and flip the panel behind the
-    // camera -- exactly the bug that first version of this function had.
-    const float dist = kHudDistanceMeters * kHudUnitsPerMetre;
+    assert(view != nullptr && "VR: computeBillboardPose() called outside gameplay?");
 
     // Re-project the damped WORLD-space forward direction into THIS eye's
     // local space via the eye's own (already-current, un-damped) view
     // matrix rotation -- this is what keeps the panel's own plane always
     // flat-facing the current eye (no tilt/warp) while only its center
-    // position lags. When g_hudSmoothedWorldForward is fully caught up
-    // (matches the current eye's actual forward), (ex,ey,ez) round-trips to
-    // exactly (0,0,-1) -- i.e. identical to the original undamped
-    // behavior -- confirming the math, not just asserting it.
+    // position lags. When smoothedWorldForward is fully caught up (matches
+    // the current eye's actual forward), (ex,ey,ez) round-trips to exactly
+    // (0,0,-1) -- i.e. identical to undamped behavior -- confirming the
+    // math, not just asserting it.
     const Mtx& m = view->viewMtx;
-    const cXyz& f = g_hudSmoothedWorldForward;
+    const cXyz& f = smoothedWorldForward;
     const float ex = m[0][0] * f.x + m[0][1] * f.y + m[0][2] * f.z;
     const float ey = m[1][0] * f.x + m[1][1] * f.y + m[1][2] * f.z;
     const float ez = m[2][0] * f.x + m[2][1] * f.y + m[2][2] * f.z;
 
-    const float cx = ex * dist, cy = ey * dist, cz = ez * dist;
+    const float cx = ex * distanceUnits, cy = ey * distanceUnits, cz = ez * distanceUnits;
 
     HudQuadCorners c;
-    c.x[0] = cx - halfW; c.y[0] = cy + halfH; c.z[0] = cz;  // top-left
-    c.x[1] = cx + halfW; c.y[1] = cy + halfH; c.z[1] = cz;  // top-right
-    c.x[2] = cx + halfW; c.y[2] = cy - halfH; c.z[2] = cz;  // bottom-right
-    c.x[3] = cx - halfW; c.y[3] = cy - halfH; c.z[3] = cz;  // bottom-left
+    c.x[0] = cx - halfWidthUnits; c.y[0] = cy + halfHeightUnits; c.z[0] = cz;  // top-left
+    c.x[1] = cx + halfWidthUnits; c.y[1] = cy + halfHeightUnits; c.z[1] = cz;  // top-right
+    c.x[2] = cx + halfWidthUnits; c.y[2] = cy - halfHeightUnits; c.z[2] = cz;  // bottom-right
+    c.x[3] = cx - halfWidthUnits; c.y[3] = cy - halfHeightUnits; c.z[3] = cz;  // bottom-left
     return c;
+}
+
+inline HudQuadCorners computeHudPose() {
+    const float halfW = kHudWidthMeters * 0.5f * kHudUnitsPerMetre;
+    const float halfH = kHudHeightMeters * 0.5f * kHudUnitsPerMetre;
+    const float dist = kHudDistanceMeters * kHudUnitsPerMetre;
+    return computeBillboardPose(g_hudSmoothedWorldForward, dist, halfW, halfH);
 }
 
 // Call once per eye, from mDoGph_Painter()'s per-eye HUD call site (replaces
@@ -853,6 +885,234 @@ inline void drawHudBillboard(TGXTexObj* hudTex) {
     GXPosition3f32(c.x[2], c.y[2], c.z[2]); GXTexCoord2f32(1.0f, 1.0f);
     GXPosition3f32(c.x[3], c.y[3], c.z[3]); GXTexCoord2f32(0.0f, 1.0f);
     GXEnd();
+}
+
+// ---------------------------------------------------------------------------
+// VR menu billboard (Dusklight/RmlUi menu, made visible in the headset)
+// ---------------------------------------------------------------------------
+//
+// Goal (explicit user request, 2026-08-16, Phase 2 of the VR-menu feature --
+// Phase 1, controller open/navigate, is already confirmed working, see
+// vr_menu_gamepad.hpp): the Dusklight menu previously only rendered to the
+// desktop window's own surface -- opening it in VR did nothing visible in
+// the headset. Full research trail + verified facts in the approved plan,
+// C:\Users\joeyw\.claude\plans\fizzy-finding-minsky.md, and the vr-mod-notes
+// skill's "Phase 2" section -- summary here, not re-derived:
+//
+// RmlUi already renders into a real, separate, copyable wgpu::Texture
+// (extern/aurora/lib/rmlui.cpp's s_renderTarget, exposed read-only via the
+// new aurora::rmlui::get_render_target()) -- NOT tied to the desktop
+// window's swapchain view. Critically, the only thing that writes into it
+// (record_frame()) is only ever called from aurora::end_frame(), which --
+// per m_Do_main.cpp's real call order -- always runs AFTER dusk::vr::tick()
+// has already finished that same frame's own per-eye rendering. So
+// s_renderTarget is always a fully-finished PREVIOUS frame throughout the
+// whole VR eye loop -- no torn reads, no double-buffering needed, just one
+// frame (~11-14ms) of inherent latency, imperceptible for a UI overlay.
+// Deliberately NOT attempting to make record_frame() run earlier -- it
+// calls g_context->Update() (advances RmlUi's animation/input timers), so
+// calling it twice a frame would double-advance UI state.
+//
+// The bridge (GX texture object <- raw WebGPU texture): a GXTexObj doesn't
+// own a texture itself, its `data` field is just an opaque cache-key
+// pointer -- aurora::gx::ensure_external_copy_texture() (new, mirrors
+// GXCopyTex's own GXState::copyTextureCache/copyTextures[dest] population,
+// see gx.cpp) lets us populate that same cache from content that ISN'T the
+// output of a real GX render, so the texture object below resolves to a
+// texture we can freely CopyTextureToTexture into ourselves.
+//
+// RmlUi's alpha is real and PREMULTIPLIED (confirmed via aurora.cpp's own
+// compositing pipeline, g_CopyPremultipliedAlphaPipeline) -- unlike HUD's
+// alpha (never meaningfully authored, hence HUD's luma-key TEV workaround
+// above), so this billboard samples GX_CA_TEXA directly and uses
+// GX_BL_ONE/GX_BL_INVSRCALPHA, NOT HUD's GX_BL_SRCALPHA/GX_BL_INVSRCALPHA.
+// ---------------------------------------------------------------------------
+
+// Tunable placement/size -- untested starting guesses, to be tuned live
+// in-headset like every other tuned distance in this project. Deliberately
+// NOT reusing HUD's constants: HUD is a glanced-at status overlay
+// (deliberately far/small); a settings menu is read/interacted-with for
+// extended periods and wants to be closer/larger, more like a typical VR
+// desktop-panel placement.
+inline constexpr float kMenuBillboardDistanceMeters = 1.2f;
+inline constexpr float kMenuBillboardWidthMeters = 1.0f;
+
+// Height is NOT a compile-time constant like HUD's fixed 608:448 aspect --
+// RmlUi's canvas is OS-window-sized (any aspect, can change on resize), so
+// this is computed at draw time from the real render-target dimensions
+// (see ensureAndCopyMenuBillboardTexture()'s cached width/height below).
+inline HudQuadCorners computeMenuBillboardPose(float aspectHeightOverWidth) {
+    const float halfW = kMenuBillboardWidthMeters * 0.5f * kHudUnitsPerMetre;
+    const float halfH = halfW * aspectHeightOverWidth;
+    const float dist = kMenuBillboardDistanceMeters * kHudUnitsPerMetre;
+    // Deliberately reuses g_hudSmoothedWorldForward (the SAME damped
+    // direction HUD uses) rather than standing up a second independent
+    // smoothing system -- both are head-locked-with-damping panels driven
+    // by the same "where is the player looking" signal. If in-headset
+    // testing shows the menu wants different damping feel (it's read/
+    // interacted-with rather than glanced-at), splitting it into its own
+    // g_menuSmoothedWorldForward is a trivial, low-risk follow-up -- not
+    // built speculatively without evidence it's needed.
+    return computeBillboardPose(g_hudSmoothedWorldForward, dist, halfW, halfH);
+}
+
+// Persistent GX texture-object identity for the menu billboard. The key is
+// pointer identity only (never read/written) -- same convention
+// GXState::copyTextures/copyTextureCache use elsewhere (see gx.cpp). No
+// ResTIMG/mDoLib_setResTimgObj() indirection needed here (unlike HUD's
+// m_hudBillboardTexObj) -- GXInitTexObj() is called directly since there's
+// no real GX-side texture resource being copied from.
+inline u8 g_menuBillboardTexKey[4]{};
+inline TGXTexObj g_menuBillboardTexObj{};
+inline uint32_t g_menuBillboardTexWidth = 0;
+inline uint32_t g_menuBillboardTexHeight = 0;
+
+// Call once per eye (like drawHudBillboard()), from vr_main.cpp's tick(),
+// gated on dusk::ui::any_document_visible() -- needs
+// g_menuBillboardTexObj already populated this frame by
+// ensureAndCopyMenuBillboardTexture() (vr_main.cpp, pre-eye-loop window).
+inline void drawMenuBillboard(TGXTexObj* menuTex, float aspectHeightOverWidth) {
+    view_class* view = dComIfGd_getView();
+    assert(view != nullptr && "VR: drawMenuBillboard() called outside gameplay?");
+
+    GXSetProjection(view->projMtx, GX_PERSPECTIVE);
+    GXLoadPosMtxImm(cMtx_getIdentity(), GX_PNMTX0);
+    GXSetCurrentMtx(0);
+
+    GXClearVtxDesc();
+    GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
+    GXSetVtxDesc(GX_VA_TEX0, GX_DIRECT);
+    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
+    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
+
+    GXSetNumChans(0);
+    GXSetNumTexGens(1);
+    GXSetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, 0x3C);
+
+    // Real per-pixel alpha -- no luma-key needed, see this section's header
+    // comment for why (RmlUi's alpha is real/meaningful/premultiplied,
+    // unlike HUD's).
+    GXSetNumTevStages(1);
+    GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR_NULL);
+    GXSetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_TEXC);
+    GXSetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+    GXSetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_TEXA);
+    GXSetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+
+    // Premultiplied blend -- matches RmlUi's own compositing convention
+    // (aurora.cpp's g_CopyPremultipliedAlphaPipeline). NOT HUD's
+    // GX_BL_SRCALPHA/GX_BL_INVSRCALPHA -- that pairing is correct for HUD's
+    // own non-premultiplied luma-key alpha only; using it here would
+    // double-darken real premultiplied content.
+    GXSetBlendMode(GX_BM_BLEND, GX_BL_ONE, GX_BL_INVSRCALPHA, GX_LO_SET);
+    // Disabled Z-test/write, same reasoning as HUD -- a settings menu
+    // shouldn't be hideable by standing near a wall.
+    GXSetZMode(GX_DISABLE, GX_ALWAYS, GX_DISABLE);
+    GXSetCullMode(GX_CULL_NONE);
+    GXSetAlphaCompare(GX_ALWAYS, 0, GX_AOP_OR, GX_ALWAYS, 0);
+
+    GXLoadTexObj(menuTex, GX_TEXMAP0);
+
+    const HudQuadCorners c = computeMenuBillboardPose(aspectHeightOverWidth);
+    GXBegin(GX_QUADS, GX_VTXFMT0, 4);
+    GXPosition3f32(c.x[0], c.y[0], c.z[0]); GXTexCoord2f32(0.0f, 0.0f);
+    GXPosition3f32(c.x[1], c.y[1], c.z[1]); GXTexCoord2f32(1.0f, 0.0f);
+    GXPosition3f32(c.x[2], c.y[2], c.z[2]); GXTexCoord2f32(1.0f, 1.0f);
+    GXPosition3f32(c.x[3], c.y[3], c.z[3]); GXTexCoord2f32(0.0f, 1.0f);
+    GXEnd();
+}
+
+// Real render-target aspect ratio (height/width), updated once per frame by
+// ensureAndCopyMenuBillboardTexture() below -- RmlUi's canvas is OS-window-
+// sized (any aspect, can change on resize), unlike HUD's fixed 608:448, so
+// this can't be a compile-time constant. vr_main.cpp reads this when
+// calling drawMenuBillboard() per eye.
+inline float g_menuBillboardAspectHeightOverWidth = 1.0f;
+
+namespace menu_billboard_detail {
+// Side-table slots for the encoder-task callback below, same pattern
+// vr_xr_submit.hpp's Session::pendingCopySrc_ already uses -- a
+// wgpu::Texture is NOT safe to carry directly through push_encoder_task's
+// raw memcpy'd payload buffer (it's a ref-counted handle, not POD), so it's
+// kept alive here instead and the payload carries nothing. Only one menu
+// billboard exists (not per-eye like the real eye-copy case), so a single
+// global slot pair is enough.
+inline wgpu::Texture s_pendingCopySrc;
+inline wgpu::Texture s_pendingCopyDst;
+inline uint32_t s_pendingCopyWidth = 0;
+inline uint32_t s_pendingCopyHeight = 0;
+inline aurora::gfx::EncoderTaskId s_copyTaskId = aurora::gfx::InvalidEncoderTask;
+
+// Same 6-line shape as vr_xr_submit.hpp's dusk::vr::copyTextureToTexture()
+// -- duplicated rather than cross-included to avoid pulling that much
+// heavier (OpenXR/D3D12-session-specific) header into this one just for
+// this, per the plan's own "whichever avoids include-order friction" note.
+inline void copyEncoderTaskCallback(const aurora::gfx::EncoderTaskContext& /*ctx*/,
+                                     const wgpu::CommandEncoder& cmd, const void* /*payload*/,
+                                     size_t /*payloadSize*/, void* /*userdata*/) {
+    if (!s_pendingCopySrc || !s_pendingCopyDst) {
+        return;
+    }
+    wgpu::CommandEncoder mutableCmd = cmd; // CopyTextureToTexture is non-const
+
+    wgpu::TexelCopyTextureInfo srcCopy{};
+    srcCopy.texture = s_pendingCopySrc;
+    srcCopy.aspect = wgpu::TextureAspect::All;
+
+    wgpu::TexelCopyTextureInfo dstCopy{};
+    dstCopy.texture = s_pendingCopyDst;
+    dstCopy.aspect = wgpu::TextureAspect::All;
+
+    wgpu::Extent3D extent{s_pendingCopyWidth, s_pendingCopyHeight, 1};
+    mutableCmd.CopyTextureToTexture(&srcCopy, &dstCopy, &extent);
+}
+} // namespace menu_billboard_detail
+
+// Plan step 4 (real content, replacing step 3's solid-color test -- that
+// test CONFIRMED WORKING in-headset, so the test scaffolding is removed
+// here per this project's standing "remove diagnostics freely once
+// confirmed" practice, not left in place). Call once per frame (not per
+// eye) from the same pre-eye-loop window captureHudBillboard()/
+// captureMapCopy2D() already use -- confirmed safe for
+// aurora::gfx::push_encoder_task() by step 2's probe.
+inline void ensureAndCopyMenuBillboardTexture() {
+    const auto& rt = aurora::rmlui::get_render_target();
+    if (!rt.texture || rt.size.width == 0 || rt.size.height == 0) {
+        // RmlUi hasn't rendered a frame yet this session (or the very
+        // first frame after a document just opened) -- nothing to copy
+        // yet, try again next frame.
+        return;
+    }
+
+    const uint32_t width = rt.size.width;
+    const uint32_t height = rt.size.height;
+    if (g_menuBillboardTexWidth != width || g_menuBillboardTexHeight != height) {
+        // Handles both first-use AND the desktop window being resized
+        // mid-VR-session (RmlUi's canvas is OS-window-sized).
+        GXInitTexObj(&g_menuBillboardTexObj, g_menuBillboardTexKey, width, height, GX_TF_RGBA8,
+                     GX_CLAMP, GX_CLAMP, GX_FALSE);
+        g_menuBillboardTexWidth = width;
+        g_menuBillboardTexHeight = height;
+    }
+    g_menuBillboardAspectHeightOverWidth = static_cast<float>(height) / static_cast<float>(width);
+
+    wgpu::Texture dst =
+        aurora::gx::ensure_external_copy_texture(g_menuBillboardTexKey, width, height, GX_TF_RGBA8);
+
+    menu_billboard_detail::s_pendingCopySrc = rt.texture;
+    menu_billboard_detail::s_pendingCopyDst = dst;
+    menu_billboard_detail::s_pendingCopyWidth = width;
+    menu_billboard_detail::s_pendingCopyHeight = height;
+
+    if (menu_billboard_detail::s_copyTaskId == aurora::gfx::InvalidEncoderTask) {
+        aurora::gfx::EncoderTaskDescriptor desc{
+            .label = "vr_menu_billboard_copy",
+            .callback = &menu_billboard_detail::copyEncoderTaskCallback,
+            .userdata = nullptr,
+        };
+        menu_billboard_detail::s_copyTaskId = aurora::gfx::register_encoder_task_type(desc);
+    }
+    aurora::gfx::push_encoder_task(menu_billboard_detail::s_copyTaskId, nullptr, 0);
 }
 
 // ---------------------------------------------------------------------------

@@ -738,6 +738,7 @@ void handle_event(const SDL_Event& event) noexcept {
     u32 port = 0;
     PADButton button = 0;
     const bool hasPadButton = find_event_pad_button(event.gbutton, port, button);
+
     if (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
         set_pad_button_held(port, button, true);
         const bool chorded = hasPadButton && is_menu_chord_part(button) && is_menu_chord(port);

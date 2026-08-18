@@ -1,16 +1,14 @@
 <div align="center">
-  <img src="res/logo.png" alt="Logo" width="640">
+  <img src="res/logo.png?v=2" alt="Logo" width="640">
 
   <p align="center">
-    <a href="https://twilitrealm.dev">Twilit Realm Website</a>
-    •
-    <a href="https://discord.gg/CxQJ9PjnjA">VR Discord</a>
+    <a href="https://discord.gg/CxQJ9PjnjA">Join the Discord</a>
   </p>
 </div>
 
 # Overview
 
-Dusklight VR is a vibecoded VR port of Twilight Princess.
+TPVR is a **vibecoded** VR mod for Dusklight, the PC of Twilight Princess. It is not affiliated with the Dusklight team in any way.
 
 It aims to be as accurate as possible to the original game while allowing you to experience the gameplay from a VR perspective.
 
@@ -32,10 +30,10 @@ More on why it uses AI generated code below.
 # Setup
 
 > [!IMPORTANT]
-> Dusklight VR does *not* provide any copyrighted assets. You must provide your own copy of the original game.
+> TPVR does *not* provide any copyrighted assets. You must provide your own copy of the original game.
 
 > [!IMPORTANT]
-> At a minimum, Dusklight VR requires a GPU with support for D3D12. It is only supported on Windows so far. Your experience with specific hardware, operating systems, VR software and drivers may vary. Virtual Desktop with VDXR is your best bet at the moment.
+> At a minimum, TPVR requires a GPU with support for D3D12. It is only supported on Windows so far. Your experience with specific hardware, operating systems, VR software and drivers may vary. Virtual Desktop with VDXR is your best bet at the moment.
 
 ### 1. Dump your game
 
@@ -43,13 +41,13 @@ You must dump your own copy of the game. Please see [this article](https://wiki.
 
 Currently, only the GameCube releases are supported.
 
-### 2. Install Dusklight
+### 2. Install TPVR
 
 Download the latest release, extract the zip file, and run Dusklight.exe with your choice of VR streamer open.
 
 # Building
 
-If you'd like to build Dusklight from source, please read the [build instructions](docs/building.md).
+If you'd like to build TPVR from source, please read the [build instructions](docs/building.md).
 
 # Statement on AI-generated code
 <details>

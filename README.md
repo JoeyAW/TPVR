@@ -2,9 +2,7 @@
   <img src="res/logo.png?v=2" alt="Logo" width="640">
 
   <p align="center">
-    <a href="https://twilitrealm.dev">Twilit Realm Website</a>
-    •
-    <a href="https://discord.gg/CxQJ9PjnjA">VR Discord</a>
+    <a href="https://discord.gg/CxQJ9PjnjA">Join the Discord</a>
   </p>
 </div>
 

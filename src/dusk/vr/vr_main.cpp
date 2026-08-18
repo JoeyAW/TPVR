@@ -804,7 +804,16 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     // VR-menu-gamepad (see vr_menu_gamepad.hpp): neutralize unconditionally
     // here too, same reasoning as everything else in this block -- any
     // early return below must not leave a menu-open chord or nav button
-    // stuck held from a dropped frame.
+    // stuck held from a dropped frame. Takes dtSeconds again (v7 design):
+    // it DOES advance the stick-smoothing accumulator toward (0,0) every
+    // single frame here, on purpose, reproducing v1's original double-
+    // per-frame application -- see advanceMenuStickSmoothing()'s own
+    // comment. It still deliberately does NOT touch the chord gate's
+    // hold-to-open/cooldown timer (computeMenuChordGate() is never called
+    // from here) -- THAT state genuinely cannot tolerate this unconditional
+    // every-frame call (see the TAKE 2 comment in vr_menu_gamepad.hpp for
+    // why: it broke the hold-to-open feature outright the first time this
+    // was tried), unlike the stick smoothing accumulator.
     neutralizeVrMenuGamepadState(pacing.presentation_dt_seconds);
     // Desktop mirror (see the per-eye loop below, where this gets re-set for
     // real): cleared up front like everything else in this block, so any
@@ -1116,15 +1125,50 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     // navigation too, on top of step 2's menu-open chord: left thumbstick
     // moves the selection (up/down/left/right), right A confirms, right B
     // backs out/cancels. All already computed above for gameplay --
-    // reused as-is, no new OpenXR action reads. Only live while the menu
-    // is actually open in practice: dusk::ui::input.cpp's own
-    // PADBlockInput(any_document_visible()) already zeroes gameplay's
+    // reused as-is, no new OpenXR action reads. dusk::ui::input.cpp's own
+    // PADBlockInput(any_document_visible()) already zeroes GAMEPLAY's
     // reading of these same inputs whenever a document is visible, so
-    // there's no double-purpose conflict feeding them here unconditionally
-    // every frame.
+    // there's no conflict on that side.
+    //
+    // leftStick.x/y are fed into updateVrMenuGamepadState() UNCONDITIONALLY
+    // below (v7 design, see vr_menu_gamepad.hpp's "Left-stick handling"
+    // history comment) -- the stuck-right bug this used to be gated
+    // against is instead fixed here, directly, via a one-shot reset on the
+    // real menu-closed->open transition. Deliberately a plain function-
+    // local static, touched ONLY from this real per-frame call site --
+    // never from neutralizeVrMenuGamepadState(), so it can't suffer the
+    // same "corrupted by the unconditional every-frame neutralize call"
+    // bug class that hit the hold-to-open timer and (per the user's own
+    // A/B report) very likely the stick smoothing too.
+    const bool menuVisible = dusk::ui::any_document_visible();
+    {
+        static bool s_menuWasVisibleLastRealFrame = false;
+        if (menuVisible && !s_menuWasVisibleLastRealFrame) {
+            resetMenuStickSmoothingToZero();
+        }
+        s_menuWasVisibleLastRealFrame = menuVisible;
+    }
     updateVrMenuGamepadPlayerIndex();
+    // DISABLED 2026-08-17 per explicit user request ("Just disable the bind
+    // to open the menu at this point, ill fix it another time") -- the
+    // left-stick navigation speed/feel was never successfully fixed across
+    // seven design rounds (v1-v7, see vr_menu_gamepad.hpp's "Left-stick
+    // handling" history comment for the full trail) despite one of them
+    // (v7) being an exact, verified reproduction of the originally-
+    // confirmed-good code. Rather than keep guessing at an eighth design,
+    // the chord is simply never allowed to fire -- kMenuChordDisabled
+    // forces its two physical inputs to false/0 right here, before they
+    // ever reach computeMenuChordGate(). Everything else in this whole
+    // feature (attach, player index claim, the chord/hold-to-open gate
+    // logic itself, the stick smoothing, the menu billboard rendering) is
+    // left completely intact and untouched -- flip this back to false (and
+    // remove the two forced-false/0.f overrides below it) to re-enable
+    // once the navigation feel is revisited.
+    constexpr bool kMenuChordDisabled = true;
+    const bool menuChordHeldForGate = kMenuChordDisabled ? false : (leftMenuHeld || rightStickClickHeld);
+    const float menuChordTriggerForGate = kMenuChordDisabled ? 0.f : rightTrigger;
     updateVrMenuGamepadState(leftStick.x, leftStick.y, rightAHeld, rightBHeld,
-                              leftMenuHeld || rightStickClickHeld, rightTrigger,
+                              menuChordHeldForGate, menuChordTriggerForGate,
                               pacing.presentation_dt_seconds);
 
     // Swing-gesture -> attack, LEFT hand: added 2026-08-05 per explicit user
@@ -1677,8 +1721,8 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     // own "VR menu billboard" section comment for the full mechanism):
     // step 3's solid-color test CONFIRMED the draw mechanism works
     // in-headset, so this now copies the REAL RmlUi content each frame.
-    // Gated on menuVisible so this costs nothing when no document is open.
-    const bool menuVisible = dusk::ui::any_document_visible();
+    // Gated on menuVisible (computed earlier this frame, above, for the
+    // menu-gamepad call) so this costs nothing when no document is open.
     if (menuVisible) {
         vr_render::ensureAndCopyMenuBillboardTexture();
     }

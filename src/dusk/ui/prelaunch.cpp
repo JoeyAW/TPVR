@@ -45,7 +45,6 @@ const Rml::String kDocumentSource = R"RML(
     <content id="root" open>
         <menu>
             <hero class="intro-item delay-0">
-                <eyebrow><span>Twilit Realm</span> presents</eyebrow>
                 <img src="res/logo.png" />
             </hero>
             <div id="menu-list" />

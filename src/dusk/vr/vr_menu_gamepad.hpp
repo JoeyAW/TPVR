@@ -189,54 +189,216 @@ inline float g_menuChordCooldownRemaining = 0.f;
 }  // namespace detail
 inline constexpr float kMenuChordCooldownSec = 0.5f;
 
-// Left-stick smoothing -- added per user report ("navigation works,
-// however it is insanely fast unlike a regular controller"). Navigation
-// REPEAT SPEED itself is governed entirely by dusk/ui/input.cpp's own
-// wall-clock repeat_interval() ramp -- identical code path for a real
-// gamepad and this virtual one, confirmed by reading it, and NOT
-// magnitude-dependent -- so a difference "unlike a regular controller"
-// can't come from that shared ramp itself. The likely real mechanism:
-// dusk/ui/input.cpp's press/release hysteresis
-// (kGamepadAxisPressThreshold=16384, kGamepadAxisReleaseThreshold=12000)
-// assumes a real gamepad's mechanically-stabilized stick (resting against
-// a thumb, often braced by the same hand gripping the controller body),
-// which naturally crosses that band once per deliberate push. A VR
-// controller's stick is held in an unsupported, floating hand -- normal
-// hand tremor can flicker the raw value back and forth across that same
-// band several times a second. Each crossing fires an immediate, un-
-// ramped FRESH press (begin_gamepad_key(), input.cpp) independent of the
-// intended hold-then-ramp repeat behavior -- several of those firing in
-// quick succession from tremor would read as erratic rapid-fire, not a
-// smooth accelerating repeat, matching the report. Low-pass filtering the
-// raw stick value before it ever reaches SDL smooths out that tremor
-// while still tracking a real, deliberate push -- framerate-independent
-// (uses dtSeconds, not a fixed per-frame blend factor) via the standard
-// exponential-smoothing formula, same shape as this project's other
-// smoothed-value trackers (e.g. vr_stereo_render.hpp's HUD orientation
-// damping). kMenuStickSmoothingTimeConstant is an untested starting
-// guess, not derived from anything -- the one constant to retune if this
-// still feels off, or feels too sluggish to be responsive.
+// Hold-to-open requirement -- added per explicit user request ("make it so
+// you have to hold the menu opening hotkey for 1 second instead of just
+// pressing it"). Tracks how long the chord has been held CONTINUOUSLY
+// (kMenuChordHoldToOpenSec, real wall-clock seconds via dtSeconds) before
+// it's allowed to reach the virtual gamepad at all -- below that duration
+// the chord is forced fully released (both inputs, same "AND needs both
+// dropped" reasoning as the cooldown above) regardless of physical hold
+// state, exactly like the cooldown's own forced-release shape. Resets to 0
+// the instant the chord is physically released, so a quick tap (or several
+// quick taps) can never accidentally open the menu -- only one continuous
+// >=1s hold does. Deliberately independent of, and evaluated before, the
+// cooldown above: once a hold has been long enough to actually open the
+// menu, continuing to hold it still lets the pre-existing cooldown govern
+// any further open/close toggling every kMenuChordCooldownSec, unchanged.
+namespace detail {
+inline float g_menuChordHoldElapsed = 0.f;
+}  // namespace detail
+inline constexpr float kMenuChordHoldToOpenSec = 1.0f;
+
+// Left-stick handling -- history of this whole block, oldest first (kept
+// for context; skip to "CURRENT DESIGN (v7)" below for what's actually
+// live):
+//
+// v1: added per user report ("navigation works, however it is insanely
+// fast unlike a regular controller"). Diagnosed as VR hand tremor
+// flickering the raw axis back and forth across dusk/ui/input.cpp's
+// press/release band several times a second, each crossing firing an
+// immediate, un-ramped FRESH press. Fixed with an exponential low-pass
+// filter on the raw stick value (0.08s time constant) -- CONFIRMED
+// WORKING at the time, per the user.
+//
+// v2/v3: retuned that same filter's time constant (0.16, then 0.35)
+// chasing later "wayy too fast" / "instant full-speed jump" reports.
+//
+// v4: dropped the filter entirely for a fixed-cadence PULSE GATE (force a
+// real release-then-repress of the axis at a chosen interval, so
+// dusk/ui/input.cpp's own accelerating repeat ramp -- kGamepadRepeatStartInterval
+// 0.12s down to kGamepadRepeatMinInterval 0.045s/~22Hz over a 1s hold --
+// never gets the chance to engage at all). Verified mechanically correct
+// via two real diagnostic captures, including finding and fixing a real
+// hysteresis bug in the deadzone check (kMenuStickReleaseThreshold,
+// below) that had been causing a single tap to fire many presses via
+// frame-rate flicker right at the threshold.
+//
+// v5: reverted ALL the way back to v1's plain filter, per user feedback
+// that the ORIGINAL filter was the confirmed-good baseline and a later
+// architecture bug (see "TAKE 2" below) was what actually broke it, not
+// the filter's own inherent behavior. Built and asked for a retest --
+// STILL reported "too fast / spams through entries" even at the exact
+// original 0.08s constant, running through the corrected architecture.
+//
+// v6: took v5's result as proof the filter itself is the wrong tool
+// (it only ever controls the FIRST press's rise time, never the ONGOING
+// rate once a real sustained hold lets dusk/ui/input.cpp's own repeat
+// ramp take over) and restored v4's pulse gate (with its confirmed
+// hysteresis fix) at a much slower cadence (0.6s/move). STILL reported
+// "not fixed."
+//
+// Six rounds in, the user asked the right question directly: just
+// restore the code to literally before the stuck-right/visibility-gating
+// fix, since THAT exact code (double-blend-per-frame smoothing at 0.08s,
+// fed the raw stick UNCONDITIONALLY regardless of menu visibility) was
+// the last known-good state. Rather than keep trying to derive a
+// "better" or "more correct" mechanism that reproduces the same feel
+// (v2 through v6 all failed to), just reproduce that state exactly --
+// including its double-application-via-neutralize quirk, which earlier
+// analysis showed gives measurably MORE damping than a single clean pass
+// at the same nominal time constant (probably part of why 0.08 felt
+// right in the first place).
+//
+// CURRENT DESIGN (v7): v1's exact smoothing filter and its double-per-
+// frame application via neutralizeVrMenuGamepadState() are BOTH restored
+// verbatim -- see advanceMenuStickSmoothing() below, called from BOTH
+// updateVrMenuGamepadState() (with the real stick value) and
+// neutralizeVrMenuGamepadState() (with (0,0), exactly like the original
+// architecture, before the TAKE-2 split ever touched this accumulator).
+// This is deliberately NOT "corrected" back to a single clean
+// application -- that correction is what v2 was already built on top of,
+// and per the user's own A/B report, that's what broke the feel to begin
+// with. The stuck-right bug is fixed WITHOUT touching any of this
+// per-frame dynamic at all: resetMenuStickSmoothingToZero() is called
+// exactly once, directly from vr_main.cpp's tick() (not from anywhere in
+// this header), on the real menu-closed->open transition -- a plain
+// one-shot hard reset that can't perturb the restored original smoothing
+// behavior on any OTHER frame, unlike every earlier attempt at fixing
+// stuck-right, which all gated or reset the accumulator from INSIDE the
+// shared per-frame path and kept interacting badly with it. The deadzone
+// (kMenuStickDeadzone) is kept, applied before smoothing -- a separate,
+// independently-confirmed-good fix for a different symptom (tiny pushes
+// registering as full deflection), unrelated to any of this speed
+// history and safe here since it feeds a continuous filter, not a binary
+// state machine.
 namespace detail {
 inline float g_leftStickSmoothedX = 0.f;
 inline float g_leftStickSmoothedY = 0.f;
 }  // namespace detail
-inline constexpr float kMenuStickSmoothingTimeConstant = 0.08f;  // seconds
+inline constexpr float kMenuStickSmoothingTimeConstant = 0.08f;  // seconds -- ORIGINAL confirmed-good value
+inline constexpr float kMenuStickDeadzone = 0.2f;
 
-// Call once per real frame with whatever this frame's VR controller state
-// already computed for gameplay (see vr_main.cpp's tick() -- these are ALL
-// already-read locals, no new OpenXR action reads needed). Values use
-// SDL's OWN ranges, not PADStatus's s8 scale: sticks are Sint16
+// Advances the smoothing accumulator by one dtSeconds step toward
+// (leftStickX, leftStickY) and returns the current smoothed value. Safe,
+// BY DESIGN, to call from both the real per-frame site AND
+// neutralizeVrMenuGamepadState() every single frame -- unlike
+// computeMenuChordGate()'s hold-elapsed timer (see the TAKE 2 comment
+// below), this accumulator doesn't need to accumulate TOWARD a threshold
+// over many frames to do its job, so double-applying it every frame
+// (once toward (0,0) from neutralize, once toward the real value from
+// the real call) is a deliberate, reproduced-on-purpose behavior here,
+// not a bug -- see the v7 history note above for why.
+inline void advanceMenuStickSmoothing(float leftStickX, float leftStickY, float dtSeconds,
+                                       float& outLeftStickX, float& outLeftStickY) {
+    if (std::abs(leftStickX) < kMenuStickDeadzone) leftStickX = 0.f;
+    if (std::abs(leftStickY) < kMenuStickDeadzone) leftStickY = 0.f;
+
+    const float smoothingAlpha = 1.f - std::exp(-dtSeconds / kMenuStickSmoothingTimeConstant);
+    detail::g_leftStickSmoothedX += (leftStickX - detail::g_leftStickSmoothedX) * smoothingAlpha;
+    detail::g_leftStickSmoothedY += (leftStickY - detail::g_leftStickSmoothedY) * smoothingAlpha;
+    outLeftStickX = detail::g_leftStickSmoothedX;
+    outLeftStickY = detail::g_leftStickSmoothedY;
+}
+
+// Fixes the stuck-right bug: call once, directly from vr_main.cpp's
+// tick(), on the real menu-closed->open transition (tracked via a
+// function-local static IN tick() itself, never touched by
+// neutralizeVrMenuGamepadState() -- see the v7 history note above for
+// why that isolation is exactly the point). Hard-zeroes the accumulator
+// so a freshly-opened menu never inherits whatever the player's live
+// GAMEPLAY stick position had smoothed to while the menu was closed.
+inline void resetMenuStickSmoothingToZero() {
+    detail::g_leftStickSmoothedX = 0.f;
+    detail::g_leftStickSmoothedY = 0.f;
+}
+
+// BUG FIX (TAKE 2): the CHORD gate's hold-to-open/cooldown STATE (below,
+// in computeMenuChordGate) is cross-frame in a way that DOES require
+// isolation from neutralizeVrMenuGamepadState() -- it has to accumulate
+// TOWARD a threshold (kMenuChordHoldToOpenSec) over many consecutive real
+// frames, which the stick smoothing accumulator above does not (see its
+// own comment for why double-applying IT every frame is fine/intentional
+// here, unlike this timer). computeMenuChordGate() is called from
+// exactly ONE place: updateVrMenuGamepadState(), itself called from
+// exactly one real per-frame site in vr_main.cpp. It must NEVER be
+// reachable from neutralizeVrMenuGamepadState() -- that function is called
+// UNCONDITIONALLY at the very top of every tick(), before the real
+// per-frame update runs, as a "reset up front in case of an early return"
+// safety net (see tick()'s own comment). A first version of this hold-to-
+// open feature ran the hold-elapsed timer inside the SAME function both
+// call sites shared, using a physicallyHeld=false reading on the
+// neutralize call to reset it -- which, since neutralize() runs on
+// literally every frame (not just ones that actually early-return), wiped
+// g_menuChordHoldElapsed back to 0 immediately before the real call each
+// frame ran, capping it at a single frame's dt forever -- confirmed
+// in-headset as "pressing and holding the right stick and trigger doesn't
+// open the menu at all" (it can never reach kMenuChordHoldToOpenSec). The
+// fix is this split: writeVrMenuGamepadOutput() (further down) owns NO
+// cross-frame state at all -- it just stages already-resolved values onto
+// the SDL joystick -- so neutralizeVrMenuGamepadState() can call THAT
+// directly every frame with all-neutral values, without ever touching the
+// chord timer that only the real per-frame path is allowed to advance.
+
+// Computes the gated (hold-to-open, then cooldown) menu-chord output. MUST
+// be called exactly once per REAL frame (see the TAKE 2 comment above) --
+// never from neutralizeVrMenuGamepadState(), or the hold-elapsed timer can
+// never accumulate past a single frame's dt (this was the actual bug --
+// see the TAKE 2 comment above for the full story).
+inline void computeMenuChordGate(bool menuChordHeld, float triggerChordValue, float dtSeconds,
+                                  bool& outMenuChordHeld, float& outTriggerChordValue) {
+    // Hold-to-open gate -- see kMenuChordHoldToOpenSec's own comment.
+    // Evaluated BEFORE the cooldown block below: until the chord has been
+    // held continuously for long enough, it's forced fully released here,
+    // which also naturally keeps the cooldown block's own trigger
+    // condition (right below) from ever seeing it as "about to fire."
+    const bool physicallyHeld = menuChordHeld && triggerChordValue > 0.5f;
+    if (physicallyHeld) {
+        detail::g_menuChordHoldElapsed += dtSeconds;
+    } else {
+        detail::g_menuChordHoldElapsed = 0.f;
+    }
+
+    outMenuChordHeld = physicallyHeld && detail::g_menuChordHoldElapsed >= kMenuChordHoldToOpenSec;
+    outTriggerChordValue = outMenuChordHeld ? triggerChordValue : 0.f;
+
+    if (detail::g_menuChordCooldownRemaining > 0.f) {
+        detail::g_menuChordCooldownRemaining -= dtSeconds;
+        outMenuChordHeld = false;
+        outTriggerChordValue = 0.f;
+    } else if (outMenuChordHeld && outTriggerChordValue > 0.5f) {
+        // 0.5 roughly matches dusk/ui/input.cpp's own kGamepadAxisPressThreshold
+        // (16384 of 32767) -- only start the cooldown once the chord is
+        // actually about to fire, not on every frame it's merely trending
+        // upward.
+        detail::g_menuChordCooldownRemaining = kMenuChordCooldownSec;
+    }
+}
+
+// Writes already-fully-resolved values straight onto the virtual
+// joystick's SDL state and flushes them via SDL_UpdateJoysticks(). Owns NO
+// cross-frame state of its own -- safe to call from both
+// updateVrMenuGamepadState() (real per-frame path, after the compute
+// functions above have resolved gated/smoothed values) and
+// neutralizeVrMenuGamepadState() (the unconditional early-return safety
+// net) without either one corrupting the other's timers. Values use SDL's
+// OWN ranges, not PADStatus's s8 scale: sticks are Sint16
 // (SDL_JOYSTICK_AXIS_MIN..MAX, i.e. -32768..32767), the trigger axis is
 // 0..SDL_JOYSTICK_AXIS_MAX (SDL_gamepad.h's own doc: "Trigger axis values
 // range from 0 (released) to SDL_JOYSTICK_AXIS_MAX (fully pressed)").
-// dtSeconds drives the menu-chord cooldown above -- pass
-// pacing.presentation_dt_seconds (real measured frame time), same source
-// every other per-frame timer in this codebase uses. No-ops gracefully if
-// the joystick isn't open yet, same reasoning as
+// No-ops gracefully if the joystick isn't open yet, same reasoning as
 // updateVrMenuGamepadPlayerIndex() above.
-inline void updateVrMenuGamepadState(float leftStickX, float leftStickY, bool rightAHeld,
-                                      bool rightBHeld, bool menuChordHeld, float triggerChordValue,
-                                      float dtSeconds) {
+inline void writeVrMenuGamepadOutput(float leftStickX, float leftStickY, bool rightAHeld,
+                                      bool rightBHeld, bool menuChordHeld, float triggerChordValue) {
     if (detail::g_vrMenuGamepadInstanceId == 0) {
         return;
     }
@@ -244,29 +406,6 @@ inline void updateVrMenuGamepadState(float leftStickX, float leftStickY, bool ri
     if (joystick == nullptr) {
         return;
     }
-
-    if (detail::g_menuChordCooldownRemaining > 0.f) {
-        detail::g_menuChordCooldownRemaining -= dtSeconds;
-        menuChordHeld = false;
-        triggerChordValue = 0.f;
-    } else if (menuChordHeld && triggerChordValue > 0.5f) {
-        // 0.5 roughly matches dusk/ui/input.cpp's own kGamepadAxisPressThreshold
-        // (16384 of 32767) -- only start the cooldown once the chord is
-        // actually about to fire, not on every frame it's merely trending
-        // upward.
-        detail::g_menuChordCooldownRemaining = kMenuChordCooldownSec;
-    }
-
-    // Left-stick smoothing -- see kMenuStickSmoothingTimeConstant's own
-    // comment for why. dtSeconds-based (not a fixed blend factor) so the
-    // filter's actual time constant stays correct regardless of VR's
-    // real, sometimes-variable frame rate.
-    const float smoothingAlpha =
-        1.f - std::exp(-dtSeconds / kMenuStickSmoothingTimeConstant);
-    detail::g_leftStickSmoothedX += (leftStickX - detail::g_leftStickSmoothedX) * smoothingAlpha;
-    detail::g_leftStickSmoothedY += (leftStickY - detail::g_leftStickSmoothedY) * smoothingAlpha;
-    leftStickX = detail::g_leftStickSmoothedX;
-    leftStickY = detail::g_leftStickSmoothedY;
 
     const auto clamp01 = [](float v) { return v < 0.f ? 0.f : (v > 1.f ? 1.f : v); };
     const auto clampSigned = [](float v) { return v < -1.f ? -1.f : (v > 1.f ? 1.f : v); };
@@ -289,7 +428,7 @@ inline void updateVrMenuGamepadState(float leftStickX, float leftStickY, bool ri
     SDL_SetJoystickVirtualButton(joystick, SDL_GAMEPAD_BUTTON_START, menuChordHeld);
 
     // REQUIRED, not optional (found via the round-trip diagnostic's own
-    // first-attempt false negative, see its comment above): every
+    // first-attempt false negative, see this module's own history): every
     // SDL_SetJoystickVirtual* call above only stages a value -- it has no
     // effect on anything that reads gamepad/joystick state (including the
     // SDL_EVENT_GAMEPAD_* events dusk::ui::input::handle_event() needs)
@@ -302,15 +441,49 @@ inline void updateVrMenuGamepadState(float leftStickX, float leftStickY, bool ri
     SDL_UpdateJoysticks();
 }
 
+// Call once per real frame with whatever this frame's VR controller state
+// already computed for gameplay (see vr_main.cpp's tick() -- these are ALL
+// already-read locals, no new OpenXR action reads needed). leftStickX/Y
+// are fed UNCONDITIONALLY -- see advanceMenuStickSmoothing()'s own
+// comment for why this call site deliberately does NOT gate them by menu
+// visibility (that's handled separately, via resetMenuStickSmoothingToZero()
+// at the real transition, called directly from vr_main.cpp). dtSeconds
+// drives the menu-chord cooldown/hold-to-open timer and the stick
+// smoothing filter -- pass pacing.presentation_dt_seconds (real measured
+// frame time), same source every other per-frame timer in this codebase
+// uses.
+inline void updateVrMenuGamepadState(float leftStickX, float leftStickY, bool rightAHeld,
+                                      bool rightBHeld, bool menuChordHeld, float triggerChordValue,
+                                      float dtSeconds) {
+    bool gatedMenuChordHeld = false;
+    float gatedTriggerChordValue = 0.f;
+    computeMenuChordGate(menuChordHeld, triggerChordValue, dtSeconds, gatedMenuChordHeld,
+                          gatedTriggerChordValue);
+
+    float smoothedLeftStickX = 0.f;
+    float smoothedLeftStickY = 0.f;
+    advanceMenuStickSmoothing(leftStickX, leftStickY, dtSeconds, smoothedLeftStickX,
+                               smoothedLeftStickY);
+
+    writeVrMenuGamepadOutput(smoothedLeftStickX, smoothedLeftStickY, rightAHeld, rightBHeld,
+                              gatedMenuChordHeld, gatedTriggerChordValue);
+}
+
 // Releases/centers every input this module drives. Called unconditionally
 // from every early-return path in tick()'s "reset up front" block so
 // nothing can ever get stuck held (e.g. a menu chord held down across a
 // dropped frame) -- same reasoning as that block's existing
-// g_duskVREyePassOpen/desktop-mirror resets. dtSeconds still decrements
-// the cooldown above even here, so an early-return-heavy stretch of
-// frames doesn't stall it.
+// g_duskVREyePassOpen/desktop-mirror resets. Deliberately does NOT call
+// computeMenuChordGate() (would corrupt its hold-elapsed timer, see the
+// TAKE 2 comment above) -- but DOES call advanceMenuStickSmoothing()
+// toward (0,0), on purpose, reproducing v1's original double-per-frame
+// application (see the v7 history note above for why this one is
+// intentional, unlike the chord timer).
 inline void neutralizeVrMenuGamepadState(float dtSeconds) {
-    updateVrMenuGamepadState(0.f, 0.f, false, false, false, 0.f, dtSeconds);
+    float unusedX = 0.f;
+    float unusedY = 0.f;
+    advanceMenuStickSmoothing(0.f, 0.f, dtSeconds, unusedX, unusedY);
+    writeVrMenuGamepadOutput(0.f, 0.f, false, false, false, 0.f);
 }
 
 // Genuine teardown only -- called from tick()'s EXITING/LOSS_PENDING

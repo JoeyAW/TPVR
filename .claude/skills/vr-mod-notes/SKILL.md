@@ -8788,6 +8788,188 @@ feedback loop found during testing). All wired from `vr_main.cpp`'s
 `tick()`, gated on `dusk::ui::any_document_visible()` so none of it costs
 anything when the menu is closed.
 
+### VR menu-gamepad, follow-up bugs — stuck-right & hold-to-open FIXED; left-stick nav SPEED never resolved after 7 rounds — chord DISABLED 2026-08-17, pick up here
+
+**Two real, confirmed-fixed bugs first** (both still in place, both working):
+
+1. **"Gets stuck holding left stick to the right" on the menu's first open,
+   selection jumping to the end of the list.** Root cause: the left-stick
+   smoothing filter (see below) was fed the real, live GAMEPLAY left stick
+   value every real frame regardless of whether the menu was even open —
+   so it continuously tracked whatever direction the player was walking,
+   and the instant the chord opened the menu, that stale/live deflection
+   was already sitting there, read by `dusk/ui/input.cpp` as an
+   immediately-held hard-over direction. **Final fix** (survived every
+   later redesign): `resetMenuStickSmoothingToZero()`
+   (`vr_menu_gamepad.hpp`) is called exactly once, directly from
+   `vr_main.cpp`'s `tick()`, via a function-local `static bool
+   s_menuWasVisibleLastRealFrame` that ONLY that real per-frame call site
+   ever touches — on the real `false->true` transition, it hard-zeroes the
+   smoothing accumulator. Deliberately NOT done inside the shared
+   `vr_menu_gamepad.hpp` functions themselves (multiple earlier attempts
+   at that interacted badly with `neutralizeVrMenuGamepadState()` running
+   unconditionally every frame — see bug 2 below, same underlying class of
+   mistake).
+2. **"Holding the chord for a full second doesn't open the menu at all"**
+   (after adding the hold-to-open feature). Root cause:
+   `neutralizeVrMenuGamepadState()` runs at the very top of every single
+   `tick()`, unconditionally — not just on frames that actually
+   early-return, as a "reset up front in case of an early return" safety
+   net. The FIRST version of the hold-to-open timer lived inside the same
+   shared function neutralize called through, using
+   `physicallyHeld=false` — meaning neutralize wiped the hold-elapsed
+   timer back to 0 immediately before the real per-frame update could
+   ever accumulate more than one frame's `dt`, so it could never reach
+   `kMenuChordHoldToOpenSec` (1.0s). **Fix** (the "TAKE 2" split, still
+   in place): `computeMenuChordGate()`/`computeMenuStickGate()` (now
+   `advanceMenuStickSmoothing()`) — the functions that own cross-frame
+   STATE — are called from exactly ONE place, the real per-frame site in
+   `vr_main.cpp`, never from neutralize. `writeVrMenuGamepadOutput()` is a
+   separate, stateless function that stages values onto the SDL joystick;
+   neutralize calls THAT directly with all-neutral values instead of
+   routing through the stateful compute functions. This split is real,
+   correct, and should NOT be undone — it fixed hold-to-open outright and
+   never regressed across any of the redesigns below.
+
+**The unresolved saga: left-stick navigation SPEED, seven design rounds,
+none confirmed working — chord is now DISABLED (`vr_main.cpp`,
+`kMenuChordDisabled = true`, right where the chord's two physical inputs
+are read) per explicit user request ("Just disable the bind to open the
+menu at this point, ill fix it another time") rather than attempt an
+eighth guess. Everything else (attach, player-index claim, the chord/
+hold-to-open gate, the stick-smoothing code, the in-headset menu billboard
+rendering — Phase 2, described earlier in this file) is left completely
+intact — flip that one bool back to reconnect it.**
+
+Chronological trail, in full, so a future session doesn't just repeat
+these same attempts:
+
+- **v1 (predates this whole investigation)**: original report — "navigation
+  works, however it is insanely fast unlike a regular controller."
+  Diagnosed as VR hand tremor flickering the raw stick axis back and
+  forth across `dusk/ui/input.cpp`'s press/release band
+  (`kGamepadAxisPressThreshold=16384`, `kGamepadAxisReleaseThreshold=12000`)
+  several times a second — each crossing fires an immediate, un-ramped
+  fresh press. Fixed with an exponential low-pass filter on the raw stick
+  value, `0.08s` time constant. **User confirmed this fixed it** ("Yea
+  that works") in an earlier session, before this investigation started.
+- **v2/v3 (this session)**: after the stuck-right fix above was added
+  (which, unknown at the time, interacted with a pre-existing
+  double-per-frame-application quirk — neutralize was ALSO routing
+  through the same smoothing function every frame back then, before the
+  TAKE-2 split existed), user reported "wayy too fast" / "instant
+  full-speed jump from even a small push." Retuned the filter's time
+  constant twice (0.08→0.16→0.35) and added a stick deadzone
+  (`kMenuStickDeadzone=0.2`, still in place, matches the existing
+  `vr_smooth_turn.hpp` precedent) — **the deadzone specifically was
+  confirmed correct by the user and never questioned again**; the time-
+  constant retuning did not fix the speed complaint.
+- **v4**: dropped the low-pass filter entirely for a fixed-cadence PULSE
+  GATE — force a real release-then-repress of the SDL axis at a chosen
+  interval (`kMenuStickMoveIntervalSec`/`kMenuStickPulseGapSec`),
+  deliberately short enough that `dusk/ui/input.cpp`'s own
+  `kGamepadRepeatInitialDelay` (0.32s) and accelerating repeat ramp
+  (`kGamepadRepeatStartInterval` 0.12s down to `kGamepadRepeatMinInterval`
+  0.045s/~22Hz over a 1s hold) never get the chance to engage — so
+  input.cpp only ever sees one fresh press-then-release per pulse cycle,
+  at exactly the cadence this module chooses. **Verified mechanically
+  correct via a real `[dusk::vr::stickpulse]` diagnostic capture** — the
+  gate cycled exactly as designed (~0.125s active + ~0.055s gap, rock
+  solid across dozens of transitions) — the mechanism itself was never
+  the bug. Retuned the interval 0.12s→0.3s chasing "still too fast"
+  reports.
+- **The single-tap-jumps-to-last-entry bug, found and fixed via a SECOND
+  real capture**: a user report that even a single quick flick could jump
+  the selection from the first to the last of 5 options was root-caused
+  via a `[dusk::ui::navdiag]` capture added DIRECTLY inside
+  `dusk/ui/input.cpp`'s `process_axis_direction()`/`process_repeats()` —
+  showed the exact same key firing FRESH PRESS → RELEASED
+  (`heldFor≈0.013-0.015s`, one real VR frame) → FRESH PRESS, over and
+  over, every single frame. Root cause: the deadzone was being used as
+  BOTH the enter- and exit-held threshold with zero hysteresis — if the
+  raw stick magnitude hovers right at that one boundary (very plausible
+  during a tap's spring-back release), the gate's binary `held` state
+  flip-flops every frame, and each fresh `true` reading unconditionally
+  fires an immediate press on entry — reproducing the original v1 tremor
+  bug, just re-exposed because the pulse gate (unlike a low-pass filter)
+  has no inherent smoothing to absorb that flicker. **Fixed** with a
+  proper hysteresis band — `kMenuStickReleaseThreshold=0.1` (lower than
+  the `0.2` deadzone), used to STAY held once already held, same shape
+  `dusk/ui/input.cpp`'s own press/release thresholds already use. This
+  hysteresis fix is real, confirmed via direct evidence (not a guess),
+  and should be reused as-is if the pulse-gate approach is ever revisited.
+- **v5**: BEFORE the hysteresis-fixed pulse gate (v4 + the fix above) was
+  ever actually retested, the user asserted the ORIGINAL v1 filter was
+  the real confirmed-good baseline, and that the stuck-right fix (bug 1
+  above) was what broke it. Reverted all the way back to v1's plain
+  0.08s filter, running through the (by-then-correct) TAKE-2 architecture.
+  **Retested: STILL reported "too fast / spams through entries."** This
+  is the single most important data point in the whole saga — it proves
+  the ORIGINAL filter, even reproduced exactly and running through
+  provably-correct architecture, does not actually satisfy the current
+  complaint on its own.
+- **v6**: concluded from v5 that a low-pass filter is structurally
+  incapable of capping ONGOING repeat speed (it only ever controls how
+  long the FIRST press takes to rise above threshold — once a real
+  sustained hold crosses that threshold and stays there,
+  `dusk/ui/input.cpp`'s own accelerating ramp takes over completely
+  unchanged regardless of the filter's constant). Restored v4's pulse
+  gate WITH the confirmed hysteresis fix, slowed further to
+  `kMenuStickMoveIntervalSec=0.6s` (~1.5 moves/sec). **Reported "still not
+  fixed."** Notably, this was the FIRST time the hysteresis-fixed pulse
+  gate was actually tested end-to-end by the user — and it still didn't
+  satisfy the complaint, which is itself a real, useful data point (rules
+  out "just retune the interval further" as an obviously-sufficient fix).
+- **v7 (final state before disabling)**: per the user's direct question
+  ("will it be fixed if you just restore it back to before the always
+  held down right fix?"), rebuilt the EXACT original architecture
+  verbatim — including the double-per-frame-application quirk (smoothing
+  advanced BOTH by `neutralizeVrMenuGamepadState()` toward `(0,0)` and by
+  the real per-frame call toward the actual stick value, every single
+  frame) — reasoning that this double-application was likely part of why
+  0.08s originally felt right (a single clean application at the same
+  nominal constant is measurably less damped, by direct calculation: two
+  sequential exponential blends at the same alpha discount the prior
+  accumulated value by `(1-alpha)^2` per frame instead of `(1-alpha)`).
+  Stuck-right (bug 1) was fixed via the ONE-SHOT reset described above —
+  deliberately never touching the restored per-frame dynamic at all, so
+  it can't perturb it. **User reported "Still broken"** with no further
+  detail before asking to just disable the bind entirely.
+
+**What was NEVER actually gathered, and is the most concrete lead for a
+future session**: no real diagnostic capture exists for v7 specifically —
+every round from v5 onward was judged purely on the user's verbal
+"still too fast"/"still broken" reports, without a fresh
+`[dusk::vr::stickpulse]`-style trace of what the SMOOTHED value/dispatch
+cadence actually looked like under v7's restored double-application
+architecture. Given how much this saga's earlier rounds were clarified
+(and in the hysteresis case, actually resolved) by real captures rather
+than continued guessing, that's the strongest next step: re-add a
+`[dusk::vr::stickpulse]`-equivalent trace to `advanceMenuStickSmoothing()`
+(log the smoothed output value + a `[dusk::ui::navdiag]`-equivalent trace
+of every real `ProcessKeyDown` input.cpp actually dispatches) for ONE
+real capture under v7 specifically, before trying an eighth design blind.
+It's also not fully clear whether "still broken" in the v7 round meant
+speed alone, or whether stuck-right (bug 1) had also regressed somehow —
+worth explicitly re-confirming both symptoms separately when this is
+picked back up, rather than assuming only speed is still open.
+
+**Other loose ends, not blocking, worth knowing about**:
+- The deadzone (`kMenuStickDeadzone=0.2`) and the hysteresis fix
+  (`kMenuStickReleaseThreshold=0.1`, only relevant if a pulse-gate design
+  is revisited) are both real, independently-confirmed-correct pieces —
+  don't second-guess or re-derive either from scratch.
+- `resetMenuStickSmoothingToZero()`'s one-shot-reset-at-the-real-call-site
+  pattern (for stuck-right) is a clean, structurally-isolated fix
+  regardless of whatever ends up happening with the speed mechanism —
+  worth keeping even if the smoothing/pulse-gate internals get redesigned
+  again.
+- The "Twilit Realm presents" text was removed from the pre-launch splash
+  screen (`src/dusk/ui/prelaunch.cpp`, the `<eyebrow>` element) per a
+  separate, unrelated, already-confirmed-working request the same
+  session — the logo image itself (`res/logo.png`) was kept, only the
+  text above it was removed.
+
 ## Key lesson learned this session
 
 Don't infer that an uncommitted fix supersedes a nearby disable guard just

@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="res/logo.png" alt="Logo" width="640">
+  <img src="res/logo.png?v=2" alt="Logo" width="640">
 
   <p align="center">
     <a href="https://twilitrealm.dev">Twilit Realm Website</a>

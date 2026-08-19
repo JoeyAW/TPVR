@@ -9379,17 +9379,77 @@ Built successfully (RelWithDebInfo, incremental) — `settings.h`/`.cpp`,
 `vr_link_visibility.hpp` (via `vr_main.cpp`), `d_a_alink.cpp`,
 `dusk/ui/settings.cpp` all recompiled, clean link, no new warnings.
 
-**NOT yet tested in-headset.** Next step for whoever picks this up:
-enable "Third Person" in the VR settings tab, confirm the camera now sits
-behind/outside Link (same feel as Wolf form) with the headset still
-freely orienting, his body/face/hat/arms/ears all show, and tracked
-hands/sword/shield/held items correctly stop overriding pose (i.e. no
-mismatched limbs) — same checks section 21/18 already established for
-the cutscene/Wolf-form fallback this reuses. Also confirm toggling "Hide
-Body" while Third Person is on has no visible effect, and that turning
-Third Person back off restores normal first-person behavior exactly as
-before (nothing in this change touches `isFirstPerson()`'s existing
-event/mount logic, only adds an earlier unconditional short-circuit).
+**IN-HEADSET RESULT (2026-08-19): camera/body half CONFIRMED WORKING**
+— user: "the whole game is in third person," no complaints about the
+camera feel or body/face/hat/arm visibility. **Known gap, explicitly
+deferred by the user ("document it as a fix for another day"), NOT to be
+picked up without being asked**: the tracked hands, sword, and shield
+still follow the real controllers instead of showing normal third-person
+animation — i.e. `isFirstPerson()` returning false correctly moved the
+CAMERA and body/limb VISIBILITY, but something is still driving the hand/
+item POSE from controller tracking regardless.
+
+**Root cause, found by re-reading the code (not yet tested/confirmed via
+a build+headset round — a plausible diagnosis from tracing the actual
+call graph, ready for someone to verify next time)**: there are TWO
+separate places every frame that write tracked poses into
+`mpLinkHandModel`/`mSwordModel`/`mShieldModel`, and only ONE of them is
+gated on `isFirstPerson()`:
+
+1. **The real per-eye-relevant path** — `dusk::vr::refreshTrackedHandDrawMtxLive()`/
+   `refreshTrackedItemMtxLive()`/`refreshTrackedHeldItemMtxLive()` etc.
+   (`vr_link_visibility.hpp`, called once per real frame from
+   `vr_main.cpp`'s `tick()`, outside `daAlink_c::draw()`'s call graph
+   entirely) — each already starts with `if (!link || ... ||
+   !isFirstPerson(link)) return;`. These correctly stop overriding pose
+   in third-person mode, exactly as designed.
+2. **A second, legacy write path inside `daAlink_c::draw()`/`setDrawHand()`
+   itself** (`d_a_alink.cpp`) — `dusk::vr::applyTrackedHandMtx(mpLinkHandModel)`
+   (~line 19110-19112, right after `setDrawHand()`'s own animated-joint
+   resync) and `dusk::vr::applyTrackedItemMtx(mSwordModel, mShieldModel, ...)`
+   (~line 19820-19826, right after `setDrawHand()`'s call in the main draw
+   branch). **Both are gated ONLY on `isRenderingToHeadset()`** — no
+   `isFirstPerson()` check at all. Per this project's own extensively-
+   documented section 20 investigation, `daAlink_c::draw()` never runs
+   during a real per-eye VR pass — only from the legacy ~30Hz
+   `fapGm_Execute()` sim-tick path — but that's exactly the path that
+   populates `dusk::frame_interp`'s once-per-tick snapshot for these
+   joints (`J3DModel::setAnmMtx()`/`calc()` auto-record into it). Since
+   `applyTrackedHandMtx()`/`applyTrackedItemMtx()` write the CONTROLLER-
+   TRACKED pose immediately after the correct animated resync, every
+   single tick's recorded snapshot for these joints is the tracked pose,
+   unconditionally, regardless of `isFirstPerson()` state.
+
+**Why this defeats path 1's own correct gating**: once path 1 stops
+overriding (third-person mode), draw time falls back to
+`dusk::frame_interp`'s normal interpolation between the last two once-per-
+tick snapshots — but per path 2 above, BOTH of those snapshots are
+themselves already the tracked-controller pose, so the "normal" fallback
+still shows tracked hands/items instead of real third-person animation.
+This is the same general bug shape section 20 spent a long investigation
+on (a write believed harmless/legacy turning out to silently determine
+what the real per-eye draw actually shows via the once-per-tick snapshot
+mechanism) — not a new class of bug for this codebase, just a new call
+site of it.
+
+**Proposed fix, NOT applied yet**: gate both call sites on `isFirstPerson()`
+too, not just `isRenderingToHeadset()`. `d_a_alink.cpp` has no existing
+thin-forward for `isFirstPerson()` at its own scope (the one that used to
+exist, `dusk::vr::isFirstPersonView()`, was fully removed during the
+2026-08-09 flatscreen-camera-sync revert — see that section above) — the
+established pattern for exposing a `vr_link_visibility.hpp` function to
+`d_a_alink.cpp` without pulling the heavy header in directly is a thin
+forward declared in `vr_main.hpp`/defined in `vr_main.cpp` (same shape as
+`applyTrackedHandMtx()`/`applyTrackedItemMtx()` themselves) — a new
+`dusk::vr::isFirstPersonView(daAlink_c*)` (or reuse that exact old name)
+would need re-adding for this. **Before applying**: verify this
+diagnosis is actually correct first (e.g. temporary logging on whether
+`applyTrackedHandMtx()`/`applyTrackedItemMtx()` still fire while
+`vrThirdPerson` is on) rather than assuming the read-through-the-code
+theory is complete — this project's own standing lesson is that a
+plausible code-reading diagnosis has been wrong before (see section 20's
+many false starts) and deserves a real capture before trusting it fully,
+even though this one looks solid.
 
 ## Key lesson learned this session
 

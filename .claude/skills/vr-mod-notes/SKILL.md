@@ -9336,6 +9336,61 @@ instant they're actively wielded), and now correctly showing through for
 real cutscenes specifically while staying hidden through gameplay,
 dialogue, and door/transition events. No known open issues.
 
+### "Third Person" VR setting — built 2026-08-18, NOT yet tested in-headset
+
+**Goal** (explicit user request: "add a third person option that shows
+link's body and puts the entire game in third person to the vr menu").
+
+**Reused the existing third-person fallback machinery rather than
+inventing a new camera-anchor/visibility path**: `isFirstPerson(daAlink_c*)`
+(`vr_link_visibility.hpp`) is already the single choke point Wolf form and
+cutscenes go through to get third-person behavior — when it returns
+false, `getVrCameraEyeAnchor()` falls back to the flatscreen third-person
+eye (headset position/rotation still applied on top, same as Wolf/
+cutscenes), `updateFrame()` shows face/hat/arms/ears, and every tracked-
+hand/item override stops overriding pose so normal third-person animation
+shows instead — all already proven in-headset for those existing cases.
+New `ConfigVar<bool> game.vrThirdPerson` (`dusk/settings.h`/`.cpp`,
+default `false`) is checked at the very top of `isFirstPerson()`, before
+the event/mount checks, forcing third-person unconditionally whenever
+it's on — needed a new `#include "dusk/settings.h"` in
+`vr_link_visibility.hpp` (previously not included there; verified no
+circular dependency).
+
+**"Shows link's body" half**: the separate "Hide Body" setting
+(`vrHideBody`, its own earlier section above) hides `mpLinkModel`
+independently of `isFirstPerson()` — forcing third person alone wouldn't
+un-hide it. `d_a_alink.cpp`'s `hideBodyForVr` (the same local both the
+body and stowed-sword/shield hide logic already key off) now also
+requires `!vrThirdPerson`, so enabling Third Person always shows the body
+regardless of what Hide Body is set to.
+
+**UI**: new "Third Person" toggle in the Dusklight menu's VR tab
+(`dusk/ui/settings.cpp`), placed above "Hide Body" in the same
+"Appearance" section, with help text noting it overrides Hide Body.
+
+**Deliberately NOT touched**: controller-pointing item aim
+(`setBodyAngleToCamera()`) and the world-space aim-point marker both key
+off `isRenderingToHeadset()`, not `isFirstPerson()` — unaffected by this
+setting, so aiming still works the same in third person. Not requested,
+not changed.
+
+Built successfully (RelWithDebInfo, incremental) — `settings.h`/`.cpp`,
+`vr_link_visibility.hpp` (via `vr_main.cpp`), `d_a_alink.cpp`,
+`dusk/ui/settings.cpp` all recompiled, clean link, no new warnings.
+
+**NOT yet tested in-headset.** Next step for whoever picks this up:
+enable "Third Person" in the VR settings tab, confirm the camera now sits
+behind/outside Link (same feel as Wolf form) with the headset still
+freely orienting, his body/face/hat/arms/ears all show, and tracked
+hands/sword/shield/held items correctly stop overriding pose (i.e. no
+mismatched limbs) — same checks section 21/18 already established for
+the cutscene/Wolf-form fallback this reuses. Also confirm toggling "Hide
+Body" while Third Person is on has no visible effect, and that turning
+Third Person back off restores normal first-person behavior exactly as
+before (nothing in this change touches `isFirstPerson()`'s existing
+event/mount logic, only adds an earlier unconditional short-circuit).
+
 ## Key lesson learned this session
 
 Don't infer that an uncommitted fix supersedes a nearby disable guard just

@@ -19925,8 +19925,14 @@ int daAlink_c::draw() {
         // can't tell them apart -- see that function's own comment). Body
         // still stays hidden during ordinary gameplay, dialogue, AND door/
         // transition events -- only real cutscenes show it.
+        // "Third Person" VR setting follow-up (2026-08-18, same request as
+        // isFirstPerson()'s own vrThirdPerson check, vr_link_visibility.hpp):
+        // third person is pointless with an invisible body, so it forces
+        // the body (and, transitively via hideBodyForVr below, the stowed
+        // sword/shield) to show regardless of what "Hide Body" is set to.
         const BOOL hideBodyForVr = dusk::vr::isRenderingToHeadset() &&
                                     dusk::getSettings().game.vrHideBody.getValue() &&
+                                    !dusk::getSettings().game.vrThirdPerson.getValue() &&
                                     !dusk::vr::isRealCutsceneRunning();
         modelDraw(mpLinkModel, isPlayerNoDraw || hideBodyForVr);
 

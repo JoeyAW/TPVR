@@ -895,6 +895,16 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
             });
 
         leftPane.add_section("Appearance");
+        config_bool_select(leftPane, rightPane, getSettings().game.vrThirdPerson,
+            {
+                .key = "Third Person",
+                .helpText = "Plays the entire game in third person while in VR, the same "
+                            "camera Wolf Link and cutscenes already use -- your headset "
+                            "still looks around freely, just from behind Link instead of "
+                            "through his eyes. Also shows his body (overriding \"Hide "
+                            "Body\" below if it's on), since there's no point being in "
+                            "third person with an invisible avatar. Off by default."
+            });
         config_bool_select(leftPane, rightPane, getSettings().game.vrHideBody,
             {
                 .key = "Hide Body",
@@ -903,7 +913,8 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                             "Your tracked hands and anything actively held (sword drawn, "
                             "shield raised, other items) still show normally. Off by "
                             "default so you can see him normally; turn this on if you'd "
-                            "rather not see your own body."
+                            "rather not see your own body. Has no effect while \"Third "
+                            "Person\" above is on."
             });
 
         leftPane.add_section("Brightness");

@@ -13,6 +13,7 @@
 #include <openxr/openxr.h>
 
 #include "dusk/vr/vr_smooth_turn.hpp"  // dusk::vr::rotateYawXr/rotateYawQuat
+#include "dusk/settings.h"  // dusk::getSettings().game.vrThirdPerson
 #include "d/actor/d_a_alink.h"
 #include "d/actor/d_a_boomerang.h"
 #include "d/actor/d_a_mg_rod.h"
@@ -897,6 +898,25 @@ inline bool s_kanteraRestingValid = false;
 // head position worth anchoring the camera to in that case anyway.
 inline bool isFirstPerson(daAlink_c* link) {
     if (!link || link->checkWolf()) return false;
+
+    // "Third Person" VR setting (added 2026-08-18, explicit user request:
+    // "add a third person option that shows link's body and puts the
+    // entire game in third person"). Forcing this single choke point to
+    // false, unconditionally, before any of the event/mount checks below,
+    // reuses every third-person fallback this file already has proven
+    // in-headset (getVrCameraEyeAnchor() falls back to the flatscreen
+    // third-person eye same as Wolf form/cutscenes; updateFrame() shows
+    // face/hat/arms/ears the same as it already does for those same
+    // fallback cases; tracked-hand/item overrides -- all gated on
+    // isFirstPerson() -- correctly stop overriding pose so the normal
+    // third-person animation shows instead) rather than inventing a
+    // parallel camera-anchor/visibility path from scratch. See its
+    // matching hideBodyForVr override (d_a_alink.cpp) for the "shows
+    // link's body" half -- this function alone only stops FIRST-person
+    // from ever being requested, it doesn't independently un-hide
+    // anything the separate "Hide Body" setting hid.
+    if (dusk::getSettings().game.vrThirdPerson.getValue()) return false;
+
     if (!link->checkEventRun()) return true;  // no event at all -- ordinary gameplay
 
     dEvt_control_c* event = dComIfGp_getEvent();

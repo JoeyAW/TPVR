@@ -222,6 +222,19 @@ struct UserSettings {
         // a player preference for players who don't want to see their own
         // avatar body in VR, not a bug workaround).
         ConfigVar<bool> vrHideBody;
+        // Forces the WHOLE game into third-person VR, the same way Wolf
+        // form/cutscenes already render (camera anchored to the flatscreen
+        // third-person eye instead of Link's head, headset position/
+        // rotation still applied on top -- see isFirstPerson(),
+        // vr_link_visibility.hpp) -- rather than a separate camera-anchor
+        // mode invented from scratch. Also forces Link's body (and stowed
+        // sword/shield) to show even if "Hide Body" above is on, since a
+        // third-person view with an invisible body would be pointless --
+        // see the vrThirdPerson checks at both call sites. Default off
+        // (added 2026-08-18 per explicit user request: "add a third person
+        // option that shows link's body and puts the entire game in third
+        // person").
+        ConfigVar<bool> vrThirdPerson;
         // Live-adjustable VR gamma-compensation exponent for every runtime
         // EXCEPT SteamVR (which keeps its own separate, independently-tuned,
         // decoupled baseline -- see vr_xr_submit.hpp's

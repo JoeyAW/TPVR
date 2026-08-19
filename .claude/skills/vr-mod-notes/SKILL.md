@@ -9211,6 +9211,131 @@ appears between Video and Input, and that both sliders/the toggle work
 and persist (`config::save()` already wired the same way as every other
 control in this file, not independently verified this round).
 
+### "Hide Body" VR setting — built 2026-08-18, NOT yet confirmed in-headset
+
+**Goal** (explicit user request, VR settings tab follow-up): "add an
+option to hide link's body at all times in every outfit/armor while
+still showing the hands. It should default to off... and be able to be
+toggled on."
+
+**Mechanism, deliberately reused rather than invented**: `daAlink_c::
+modelDraw(J3DModel*, int param_1)` already has a pure render-time skip
+path — `param_1 != 0` does only lightweight `calcMaterial()`/`diff()`,
+never the real geometry resubmission — this is the SAME mechanism
+cutscenes already use (`isPlayerNoDraw`, derived from
+`checkPlayerNoDraw()`) to hide Link's body for a shot he's not meant to
+be visible in. No gameplay/collision effect, confirmed by this project's
+own prior investigation (section 20/21). New code in `d_a_alink.cpp`'s
+human-form draw branch, right at the ONE `modelDraw(mpLinkModel, ...)`
+call site: `hideBodyForVr = isRenderingToHeadset() &&
+getSettings().game.vrHideBody.getValue()`, OR'd into that call's existing
+`isPlayerNoDraw` argument. Every other `modelDraw()` call in the same
+function (hands, hat, face, sword, shield, held items) is completely
+untouched — satisfies "still showing the hands" by construction, not by
+any extra logic.
+
+**"Every outfit/armor" satisfied for free**: gating the DRAW CALL itself
+(not per-material shape indices, unlike the earlier Hero's-Clothes/Ordon-
+Clothes arm-hiding work) means it works uniformly no matter which
+clothing/armor resource is currently loaded into `mpLinkModel` — no
+outfit-specific data needed.
+
+**"At all times" taken literally**: deliberately NOT gated on
+`isFirstPerson()` or any cutscene/dialogue check — stays in effect
+through cutscenes too, not just ordinary first-person gameplay, per the
+user's own wording. **Wolf form is NOT covered** (the OTHER
+`modelDraw(mpLinkModel, ...)` call site, inside the `checkWolf()`
+branch) — Wolf Link has no separate tracked-hand model or "body vs.
+hands" concept this setting's own description assumes, so extending it
+there wouldn't have a coherent meaning; flagged here in case that's ever
+asked for.
+
+**New `ConfigVar<bool> game.vrHideBody`** (`dusk/settings.h`/`.cpp`,
+default `false`), registered the same way as every other settings bool.
+New "Appearance" section in the VR settings tab (`dusk/ui/settings.cpp`,
+between "Display" and "Brightness"), one `config_bool_select` — "Hide
+Body".
+
+**Built successfully** (RelWithDebInfo, full rebuild since `settings.h`
+is widely included) — `settings.h`/`.cpp`, `dusk/ui/settings.cpp`,
+`d_a_alink.cpp` and dependents recompiled, clean link, no new warnings.
+
+**Follow-up, same day — user tested and confirmed "Works well enough,"
+then asked for one more piece**: "make it so the sword and shield are
+also hidden when unequipped. They are on link's back" — with the body
+gone, a stowed sword/shield resting on the now-invisible back read as
+floating objects.
+
+**Fix, reusing already-established VR hand-attach flags rather than
+inventing new detection**: `checkItemSwordEquip()`
+(`mEquipItem==0x103`, virtual on `daAlink_c`, already the authoritative
+"is the sword actively hand-attached/drawn" signal this project's own VR
+sword-tracking work — section 16/20 — established) and
+`checkShieldHandAttached()` (same file, same reasoning, already built for
+the identical purpose) are exactly "is this weapon currently being
+wielded, as opposed to resting on the back." At the human-form draw
+branch's sword/shield `modelDraw()` calls:
+- `mSwordModel`: hidden (via the same `isPlayerNoDraw`-style OR'd flag
+  used for the body) only while `hideBodyForVr && !checkItemSwordEquip()`
+  — stays fully visible, tracking the hand, whenever actually drawn.
+- `mSheathModel`: hidden unconditionally whenever `hideBodyForVr` is on,
+  regardless of whether the sword itself is drawn — the sheath has no
+  "in-hand" state at all, it's always a back-mounted object.
+- `mShieldModel`: same shape as the sword, gated on
+  `hideBodyForVr && !checkShieldHandAttached()`.
+
+Wolf form's own separate sword/shield draw calls (inside the `checkWolf()`
+branch) are untouched, consistent with the body-hide feature's own
+existing Wolf-form exclusion. Help text for the "Hide Body" setting
+(`dusk/ui/settings.cpp`) updated to describe this.
+
+Built successfully (RelWithDebInfo) — only `d_a_alink.cpp`,
+`dusk/ui/settings.cpp` recompiled, clean link, no new warnings.
+
+**CONFIRMED WORKING IN-HEADSET** — user: "Yup that's fixed."
+
+**Second follow-up, same day — reverses the earlier "at all times"
+decision for real cutscenes specifically**: "Can you show his body when
+in a cutscene? Not dialogue, not transition or doors, just cutscenes."
+
+**Real distinction needed, found by reading `d_event.cpp` directly**:
+`dEvt_control_c` events come in several `dEvt_type_e` values — `TALK_e`
+(dialogue), `DOOR_e`/`TREASURE_e` (transitions/doors), `OTHER_e`/
+`COMPULSORY_e` (genuine scripted cutscenes). But `demoCheck()` (OTHER_e)
+and `doorCheck()` (DOOR_e/TREASURE_e) BOTH set the exact same
+`mMode = dEvt_mode_DEMO_e` once running — confirmed directly in
+`d_event.cpp` — so `getMode()` (what `isFirstPerson()` already uses to
+separate dialogue from everything else) genuinely cannot distinguish a
+real cutscene from a door/transition; a new check was needed. The
+original event TYPE is still recoverable though: `dComIfGp_getEvent()`'s
+`mOrder[8]`/`mOrderIdx` are both public (`d_event.h`) — `mOrderIdx` is
+set once in `entry()` when an order is accepted and running, untouched
+by `Step()` (the per-frame pump) for the rest of the event's duration,
+so `mOrder[mOrderIdx].mEventType` reliably reflects the real type for as
+long as the event runs, not just at the instant it started.
+
+**New `vr_link::isRealCutsceneRunning()`** (`vr_link_visibility.hpp`,
+right after `isFirstPerson()`, same file/pattern) — true only for
+`dEvt_type_OTHER_e`/`COMPULSORY_e`, false for dialogue, door/treasure
+transitions, or no event at all. Exposed via the usual thin-forward
+(`dusk::vr::isRealCutsceneRunning()`, `vr_main.hpp`/`.cpp`) so
+`d_a_alink.cpp` doesn't need the heavier header. `hideBodyForVr`
+(`d_a_alink.cpp`) now ANDs in `!isRealCutsceneRunning()` — body (and, by
+the same shared local, the stowed sword/sheath/shield from the round
+above) stays hidden through ordinary gameplay, dialogue, AND door/
+transition events; only genuine cutscenes show it.
+
+Built successfully (RelWithDebInfo, full rebuild since `vr_main.hpp`
+changed) — `vr_link_visibility.hpp`, `vr_main.hpp`/`.cpp`,
+`d_a_alink.cpp` recompiled, clean link, no new warnings.
+
+**CONFIRMED WORKING IN-HEADSET** — user: "Seems fixed." Closes out the
+"Hide Body" VR setting feature end to end: body hidden by default-off
+toggle, sword/shield/sheath hidden while stowed (visible again the
+instant they're actively wielded), and now correctly showing through for
+real cutscenes specifically while staying hidden through gameplay,
+dialogue, and door/transition events. No known open issues.
+
 ## Key lesson learned this session
 
 Don't infer that an uncommitted fix supersedes a nearby disable guard just

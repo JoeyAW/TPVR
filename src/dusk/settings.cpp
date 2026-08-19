@@ -76,6 +76,7 @@ UserSettings g_userSettings = {
         .enableMapBackground {"game.enableMapBackground", true},
         .disableCutscenePillarboxing {"game.disableCutscenePillarboxing", false},
         .vrDesktopMirror {"game.vrDesktopMirror", true},
+        .vrHideBody {"game.vrHideBody", false},
         // 2.0 confirmed correct on Virtual Desktop 2026-08-16 -- applies to
         // VD/Meta Link/etc. only, NOT SteamVR (which keeps its own
         // independently-tuned, decoupled baseline -- see vr_xr_submit.hpp's
@@ -295,6 +296,7 @@ void registerSettings() {
     Register(g_userSettings.game.enableMapBackground);
     Register(g_userSettings.game.disableCutscenePillarboxing);
     Register(g_userSettings.game.vrDesktopMirror);
+    Register(g_userSettings.game.vrHideBody);
     Register(g_userSettings.game.vrGammaCompensation);
     Register(g_userSettings.game.vrGammaCompensationSteamVr);
     Register(g_userSettings.game.enableFastIronBoots);

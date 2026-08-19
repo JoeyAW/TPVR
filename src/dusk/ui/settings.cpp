@@ -894,6 +894,18 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                             "pass, so this has no meaningful performance cost."
             });
 
+        leftPane.add_section("Appearance");
+        config_bool_select(leftPane, rightPane, getSettings().game.vrHideBody,
+            {
+                .key = "Hide Body",
+                .helpText = "Hides Link's whole body in VR, in any outfit or armor, along "
+                            "with the sword and shield while they're stowed on his back. "
+                            "Your tracked hands and anything actively held (sword drawn, "
+                            "shield raised, other items) still show normally. Off by "
+                            "default so you can see him normally; turn this on if you'd "
+                            "rather not see your own body."
+            });
+
         leftPane.add_section("Brightness");
         config_percent_select(leftPane, rightPane, getSettings().game.vrGammaCompensation,
             "VR Brightness Compensation",

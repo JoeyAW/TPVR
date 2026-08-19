@@ -226,6 +226,14 @@ bool isFishingHookInWater();
 // fishing. Cheap (a single actor lookup); safe to call every frame.
 bool isFishingRodActive();
 
+// "Hide Body" VR setting follow-up (2026-08-18): true only while a
+// genuine scripted CUTSCENE is running (not dialogue, not a door/treasure
+// transition) -- see vr_link::isRealCutsceneRunning()'s own comment
+// (vr_link_visibility.hpp) for why getMode() alone can't tell these apart
+// and what actually does. Cheap (a couple of field reads on the already-
+// live event-control singleton); safe to call every frame.
+bool isRealCutsceneRunning();
+
 // VR fix (2026-08-12): the clawshot's hand-grip tracking (deliberately
 // scoped to the two grip models only, not the chain itself -- see
 // vr_link::refreshTrackedHookshotMtxLive()'s own comment,

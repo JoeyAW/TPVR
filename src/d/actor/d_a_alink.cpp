@@ -19895,7 +19895,40 @@ int daAlink_c::draw() {
             }
         }
 
-        modelDraw(mpLinkModel, isPlayerNoDraw);
+        // "Hide Body" VR setting (2026-08-18, explicit user request: "hide
+        // link's body at all times in every outfit/armor while still
+        // showing the hands"). Reuses the SAME isPlayerNoDraw mechanism
+        // cutscenes already use to hide Link's body for a shot -- a pure
+        // render-time skip (modelDraw()'s param_1!=0 branch just does
+        // lightweight calcMaterial()/diff(), no real geometry submission),
+        // no gameplay/collision effect -- rather than inventing a new hide
+        // path. Gates ONLY this one modelDraw call: mpLinkHandModel,
+        // mSwordModel/mShieldModel, mpLinkHatModel/mpLinkFaceModel, and
+        // held items below are all completely untouched, matching "still
+        // showing the hands". Works uniformly across every outfit/armor
+        // resource loaded into mpLinkModel, since it gates the draw call
+        // itself rather than per-outfit material indices. Wolf form (the
+        // other modelDraw(mpLinkModel, ...) call site, above the
+        // checkWolf() branch) is deliberately NOT covered -- Wolf Link has
+        // no separate tracked-hand model or "body vs. hands" distinction
+        // this setting's own description assumes.
+        //
+        // FOLLOW-UP 2026-08-18 (explicit user request, after confirming the
+        // above worked: "show his body when in a cutscene? Not dialogue,
+        // not transition or doors, just cutscenes"): originally
+        // unconditional ("at all times" per the first request) -- now
+        // carved out for genuine scripted cutscenes specifically via
+        // isRealCutsceneRunning() (vr_link_visibility.hpp), which
+        // distinguishes a real cutscene (dEvt_type_OTHER_e/COMPULSORY_e)
+        // from plain dialogue and door/treasure transitions (both of which
+        // set the exact same event MODE a cutscene does, so mode alone
+        // can't tell them apart -- see that function's own comment). Body
+        // still stays hidden during ordinary gameplay, dialogue, AND door/
+        // transition events -- only real cutscenes show it.
+        const BOOL hideBodyForVr = dusk::vr::isRenderingToHeadset() &&
+                                    dusk::getSettings().game.vrHideBody.getValue() &&
+                                    !dusk::vr::isRealCutsceneRunning();
+        modelDraw(mpLinkModel, isPlayerNoDraw || hideBodyForVr);
 
         if (dComIfGp_checkCameraAttentionStatus(field_0x317c, 0x20)) {
 #if PLATFORM_SHIELD
@@ -19958,12 +19991,29 @@ int daAlink_c::draw() {
         tevStr.TevKColor.b = 0;
 
         if (checkSwordDraw()) {
+            // "Hide Body" VR setting follow-up (2026-08-18, explicit user
+            // request: "make it so the sword and shield are also hidden
+            // when unequipped. They are on link's back"). With the body
+            // itself hidden, a stowed sword/shield resting on the (now
+            // invisible) back reads as a floating object. Hide the sword
+            // too, but ONLY while actually stowed -- checkItemSwordEquip()
+            // (mEquipItem==0x103) is the same authoritative "is the sword
+            // actively hand-attached/drawn" flag this project's own VR
+            // hand-tracking work already established
+            // (vr_link_visibility.hpp) -- so the sword stays visible,
+            // tracking the hand, whenever it's actually being wielded, and
+            // only disappears while resting on the back.
+            const BOOL hideStowedSwordForVr = hideBodyForVr && !checkItemSwordEquip();
             if (!checkNoResetFlg3(FLG3_UNK_80000000)) {
-                modelDraw(mSwordModel, var_r3);
+                modelDraw(mSwordModel, var_r3 || hideStowedSwordForVr);
             }
 
+            // The sheath itself has no "in-hand" state -- it's always a
+            // back-mounted object -- so it hides unconditionally alongside
+            // the body whenever hideBodyForVr is on, regardless of whether
+            // the sword itself is currently drawn.
             if (!checkWoodSwordEquip()) {
-                modelDraw(mSheathModel, var_r3);
+                modelDraw(mSheathModel, var_r3 || hideBodyForVr);
             }
         }
 
@@ -19978,7 +20028,11 @@ int daAlink_c::draw() {
                 var_r24_2 = 0;
             }
 
-            modelDraw(mShieldModel, var_r3);
+            // Same reasoning as the sword above -- checkShieldHandAttached()
+            // is the authoritative "actively held up/guarding" flag this
+            // project's own VR shield-tracking work already established.
+            const BOOL hideStowedShieldForVr = hideBodyForVr && !checkShieldHandAttached();
+            modelDraw(mShieldModel, var_r3 || hideStowedShieldForVr);
             if (var_r24_2) {
                 tevStr.TevColor.r = 0;
                 tevStr.TevColor.g = 0;

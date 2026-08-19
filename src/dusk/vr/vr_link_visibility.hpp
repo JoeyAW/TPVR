@@ -931,6 +931,35 @@ inline bool isFirstPerson(daAlink_c* link) {
     return !link->checkPlayerNoDraw();
 }
 
+// Distinguishes a genuine scripted CUTSCENE (dEvt_type_OTHER_e/
+// COMPULSORY_e) from plain dialogue (dEvt_type_TALK_e -- already handled
+// separately via getMode()==dEvt_mode_TALK_e above) and from door/
+// treasure-chest transitions (dEvt_type_DOOR_e/TREASURE_e). All three set
+// the exact same dEvt_mode_DEMO_e once running -- see this function's own
+// citations of demoCheck()/doorCheck() above -- so getMode() alone can't
+// tell them apart; only the ORIGINAL event TYPE recorded on the accepted
+// dEvt_order_c still carries that distinction once the event is actually
+// running. dComIfGp_getEvent()'s mOrder[8]/mOrderIdx are both public
+// members (d_event.h) -- mOrderIdx is set once, in entry(), when an order
+// is accepted and starts running, and nothing in Step() (the per-frame
+// event pump) touches it again until the event ends, so it stays valid
+// for the event's whole duration, not just at the instant it started.
+//
+// Added 2026-08-18 for the "Hide Body" VR setting's own cutscene carve-
+// out (see dusk::vr::isRealCutsceneRunning(), vr_main.hpp/.cpp, and its
+// call site in d_a_alink.cpp) -- explicit user request, after confirming
+// the base "hide body at all times" behavior worked: "show his body when
+// in a cutscene? Not dialogue, not transition or doors, just cutscenes."
+inline bool isRealCutsceneRunning() {
+    if (!dComIfGp_event_runCheck()) return false;
+    dEvt_control_c* event = dComIfGp_getEvent();
+    if (!event) return false;
+    const s8 idx = event->mOrderIdx;
+    if (idx < 0 || idx >= 8) return false;
+    const u16 type = event->mOrder[idx].mEventType;
+    return type == dEvt_type_OTHER_e || type == dEvt_type_COMPULSORY_e;
+}
+
 // Crawling has no single MODE_FLG bit the way swimming has MODE_SWIMMING
 // -- it's a sequence of dedicated daAlink_PROC states instead
 // (PROC_CRAWL_START/_MOVE/_AUTO_MOVE/_END, d_a_alink.h) that mProcID walks

@@ -213,6 +213,15 @@ struct UserSettings {
         // set_present_source_mirror()) -- no extra render pass, no CPU
         // readback, near-zero cost.
         ConfigVar<bool> vrDesktopMirror;
+        // Hides Link's whole body model in VR (any outfit/armor -- gates
+        // the modelDraw(mpLinkModel, ...) call itself, not per-outfit
+        // material indices, so it works uniformly regardless of which
+        // clothing/armor resource is currently loaded) while leaving the
+        // tracked hand model, sword/shield, and held items untouched.
+        // Default off (added 2026-08-18 per explicit user request -- purely
+        // a player preference for players who don't want to see their own
+        // avatar body in VR, not a bug workaround).
+        ConfigVar<bool> vrHideBody;
         // Live-adjustable VR gamma-compensation exponent for every runtime
         // EXCEPT SteamVR (which keeps its own separate, independently-tuned,
         // decoupled baseline -- see vr_xr_submit.hpp's

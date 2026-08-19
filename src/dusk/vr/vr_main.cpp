@@ -512,6 +512,10 @@ bool isFishingRodActive() {
     return vr_link::isFishingRodActive();
 }
 
+bool isRealCutsceneRunning() {
+    return vr_link::isRealCutsceneRunning();
+}
+
 void refreshTrackedHookshotMtxLive() {
     vr_link::refreshTrackedHookshotMtxLive();
 }

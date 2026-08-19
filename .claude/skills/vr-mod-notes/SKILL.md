@@ -8970,6 +8970,205 @@ picked back up, rather than assuming only speed is still open.
   session — the logo image itself (`res/logo.png`) was kept, only the
   text above it was removed.
 
+### v8 (2026-08-18) — chord RE-ENABLED, new design combining a refined pulse gate with a previously-untried root cause (diagonal dual-axis firing) — built, NOT yet tested in-headset
+
+Picked back up per user request ("fix the VR menu scrolling too fast").
+Rather than retry v6's exact pulse-gate shape blind (it was reported "not
+fixed" despite being mechanically verified by capture), read
+`dusk/ui/input.cpp`'s real repeat/threshold logic end to end first and
+found a genuinely new candidate mechanism none of v1-v7 ever addressed:
+**v1-v7 all treated the stick's X and Y axes as fully independent inputs,
+each with its own deadzone/repeat state.** A real gamepad thumb rests on
+a desk-braced controller with a stable pivot, so an intended "straight
+up" push stays close to purely on-axis. A hand floating in the air
+holding a VR controller has no such brace — a few degrees of drift is
+very plausible, easily enough to cross BOTH axes' deadzones on the same
+push. With fully independent per-axis gating (every prior round's
+design), that fires TWO concurrent, independently-repeating navigation
+inputs (e.g. up AND right) instead of one — exactly what "spamming
+through entries"/"too fast" would look like, and completely untouched by
+retuning any smoothing time constant or pulse interval, since it was
+never a rate problem to begin with.
+
+**v8 design, `vr_menu_gamepad.hpp`**: (1) **dominant-axis selection** —
+`advanceMenuStickPulse()` zeroes whichever raw axis has the smaller
+magnitude before any deadzone/gate logic runs, so at most one direction
+can ever be requested at once; (2) v6's pulse-gate mechanism (force a
+real release-then-repress of the SDL axis at a fixed cadence, so
+`dusk/ui/input.cpp`'s own accelerating repeat ramp — 0.12s down to
+0.045s/~22Hz over a 1s hold — never gets the chance to engage at all),
+kept including its confirmed hysteresis fix (separate enter/exit
+thresholds), but this time **fully decoupled from
+`neutralizeVrMenuGamepadState()`** — v7's smoothing filter deliberately
+tolerated being advanced twice a frame (once from the real path, once
+from the unconditional neutralize-at-top-of-`tick()` safety net); a
+phase-timer state machine like this one cannot, for the same reason
+`computeMenuChordGate()`'s hold-elapsed timer couldn't (see this file's
+own "TAKE 2" comment) — double-advancing would silently shrink every
+phase's real duration. `neutralizeVrMenuGamepadState()` now just writes
+neutral values directly, never touches the pulse state. Cadence:
+`kMenuStickPulseActiveSec=0.08s` / `kMenuStickPulseGapSec=0.22s` (~3.3
+moves/sec) — untested starting guess, the constant to retune first if
+still off. `resetMenuStickSmoothingToZero()` renamed
+`resetMenuStickPulseState()` (same one-shot-on-transition fix shape for
+stuck-right, just retargeted at the new state machine).
+
+**Diagnostic added, deliberately left in for the first test** (per this
+project's "verify a fix is materially active before trusting a visual
+report" discipline — and the previous round's own flagged gap: no real
+capture existed for v6's OWN final tuning before it was judged "not
+fixed"): `[dusk::vr::menustickpulse]`, logging every phase transition
+(`Idle->Active` with the locked direction, `Active->Gap`,
+`Gap->Active`/`Gap->Idle`) — infrequent enough (~3/sec max) to log
+unconditionally, no throttling needed.
+
+**Chord re-enabled** (`vr_main.cpp`, `kMenuChordDisabled = false`) so the
+redesign can actually be tested — flip back to `true` if this round also
+needs reverting without more investigation.
+
+Built successfully (RelWithDebInfo) — only `vr_main.cpp` needed
+recompiling, clean link, no new warnings.
+
+**v8 tested — real capture provided, dominant-axis selection CONFIRMED
+working, but a real bug found in the re-engage timing (v8.1).** User sent
+back a genuine `[dusk::vr::menustickpulse]` capture unprompted (the first
+round in this whole saga to actually gather one for its own tuning) and
+reported: "flicking the stick moves to the end of the menu right away."
+
+**Dominant-axis selection confirmed correct**: every single transition in
+the capture showed `lockedY=0` — zero evidence of the diagonal
+double-firing bug this round was built to fix. That part of the theory
+held up.
+
+**But the capture's very first episode fired TWO pulses from what should
+have been one flick** — `Idle->Active`, `Active->Gap`,
+`Gap->Active (re-engaged)`, `Active->Gap`, `Gap->Idle (released)` — two
+tab-advances instead of one, on the settings menu's top tab bar (6 tabs:
+Video/Input/Audio/Gameplay/Cheats/Interface). Landing 2 tabs over from one
+flick, with no per-step visual feedback the user could track mid-motion in
+a headset, reads exactly like "jumped to the end."
+
+**Root cause**: the Gap phase's re-engage check only ever sampled the
+stick's position ONCE, at the exact instant the gap timer
+(`kMenuStickPulseGapSec=0.22s`) expired — not continuously through the
+gap. A real physical release (spring-back to center) can easily take
+longer than 0.22s to fully settle. If the stick was still mid-release and
+happened to read above the (lower) release threshold at that one exact
+frame — plausible, since 0.22s is a tight window — a single intended
+flick got misread as a sustained hold and fired a second pulse.
+
+**Fix (v8.1)**: `advanceMenuStickPulse()`'s `Gap` case now checks the
+release condition EVERY real frame during the gap, not just at expiry —
+the moment the stick dips below the release threshold at any point, it
+transitions to `Idle` immediately, canceling any possible re-engage,
+regardless of what it reads afterward. Only a stick that NEVER drops
+below the release threshold for the entire gap (a genuine sustained hold)
+can produce a second pulse now. This is a strictly tighter version of the
+same hysteresis idea already proven correct in v4 (separate enter/exit
+thresholds) — not a new mechanism, just applied continuously instead of
+at one sampled instant, closing the exact timing gap that let this
+through.
+
+Built successfully (RelWithDebInfo) — only `vr_main.cpp` needed
+recompiling, clean link, no new warnings.
+
+**v8.1 tested — "Still not fixed", plus a much bigger clue: "It's an issue
+with every single input... if I hover over an on and off toggle and hold
+down A, it spams the entry on and off."** A completely undecorated button
+(A/SOUTH — `rightAHeld` written straight through, zero pulse-gate/
+smoothing logic of any kind) doing the exact same thing as the stick
+proved conclusively that NONE of this whole day's stick-specific work
+(dominant-axis selection, the pulse gate, v8.1's continuous release check)
+was ever the real root cause — it had to be something upstream, shared by
+every input this module drives.
+
+**ACTUAL ROOT CAUSE, found by re-reading the exact call ordering in
+`vr_main.cpp`'s `tick()`**: `neutralizeVrMenuGamepadState()` was called
+UNCONDITIONALLY at the very top of tick(), on literally every real frame
+— not just on early-return paths, despite the comment saying "reset up
+front in case of an early return." Unlike the harmless plain-flag resets
+sitting right next to it (`g_duskVREyePassOpen = false` etc.), neutralize
+performs a REAL, OBSERVABLE side effect every single time: it writes
+actual "everything false/neutral" values to the SDL virtual joystick and
+calls `SDL_UpdateJoysticks()`, which FLUSHES those writes into real,
+queued `SDL_EVENT_GAMEPAD_*` events immediately. On every normal frame
+that does NOT early-return (i.e. every frame the menu is actually open
+and being used), the real per-frame path (`updateVrMenuGamepadState()`)
+then runs LATER that same frame and writes the ACTUAL held state — also
+flushed via its own `SDL_UpdateJoysticks()` call. Net effect, every
+single real VR frame, for ANYTHING actually held: neutralize writes
+false+flushes (a genuine RELEASE event, since the previous frame's real
+value is still what SDL has cached) immediately followed by the real
+update writing true+flushes (a genuine PRESS event) — a full press/
+release cycle on EVERY frame (~72-90Hz), not just on real presses/
+releases. `dusk/ui/input.cpp`'s `emit_key_press()` calls
+`context.ProcessKeyDown()` UNCONDITIONALLY every time it's invoked, with
+zero dedup against an "already held" state — so every one of these
+spurious per-frame presses reached RmlUi as a genuinely fresh key-down,
+which for a toggle-style Confirm/Submit control means toggling on every
+single frame it's held. This is why it hit every input uniformly: it has
+nothing to do with any single input's own gating logic. `KI_RETURN` (the
+A button's mapped key) isn't even in `is_repeatable_key()`'s list, so
+`input.cpp`'s OWN repeat-ramp system was never involved either — this
+was 100% duplicate SDL events, not a repeat-rate problem.
+
+This also fully explains the v8/v8.1 "flick jumps 2 tabs" symptom in
+hindsight — that investigation wasn't wrong exactly, but it was chasing a
+much smaller, real-but-secondary effect sitting on top of this much
+larger one. The stick's own internal phase state machine
+(Idle/Active/Gap) was never affected by this bug (it doesn't read
+anything back from SDL) — which is exactly why the
+`[dusk::vr::menustickpulse]` capture showed clean, correct transitions
+even while the actual SDL-level events were spamming underneath,
+completely invisible to that diagnostic. A real lesson here: that
+diagnostic logged OUR OWN computed state, not what actually reached SDL
+or RmlUi — a gap in what was being verified, not just what was being fixed.
+
+**Fix**: stop calling `neutralizeVrMenuGamepadState()` unconditionally.
+It should only run as a genuine fallback — when the real per-frame update
+did NOT run this frame. `tick()` has SEVEN different early-return points
+below where the old call used to sit (no session, session state
+transitions/teardown, session-not-running, `xrWaitFrame`/`xrBeginFrame`
+failure, `shouldRender==false`, view-not-ready) — manually adding a
+neutralize call at each one would work today but is fragile against
+tick() gaining an eighth early-return path later. This project already
+solved the identical shape of problem once before, for tick()'s own
+reentrancy flag (`TickReentrancyGuard`) — reused that exact RAII pattern:
+new `MenuGamepadFrameGuard` (`vr_menu_gamepad.hpp`), constructed once at
+the same spot the old unconditional call sat, whose destructor
+neutralizes automatically UNLESS `markRealUpdateRan()` was called first
+(now called right alongside the real `updateVrMenuGamepadState()` call).
+Covers every existing early-return path AND any future one, by
+construction, with zero per-site bookkeeping. `neutralizeVrMenuGamepadState()`
+itself lost its now-unused `dtSeconds` parameter (it never touched the
+chord/pulse timers, only ever wrote plain neutral SDL values — that part
+was always correct, just called far too often).
+
+Built successfully (RelWithDebInfo) — `vr_menu_gamepad.hpp`, `vr_main.cpp`
+recompiled, clean link, no new warnings.
+
+**CONFIRMED FIXED IN-HEADSET** — user tested and reported "Fixed it."
+`[dusk::vr::menustickpulse]` diagnostic logging removed (per this
+project's normal practice, now that the real bug is confirmed fixed — it
+was never going to be diagnostically useful for this particular bug class
+anyway, since it only ever logged the pulse gate's OWN internal state,
+never what actually reached SDL/RmlUi). Rebuilt clean (`vr_menu_gamepad.hpp`,
+`vr_main.cpp`), verified via a second successful incremental build.
+
+**This closes out the entire VR-menu-controller-navigation saga** — chord
+open (with hold-to-open and cooldown), stick navigation (dominant-axis
+selection + pulse gate + the MenuGamepadFrameGuard fix), and A/B
+confirm/cancel are all confirmed working together. Reusable lesson for
+this whole investigation: when a fix targeting one specific input
+mechanism (the stick) doesn't resolve a reported symptom, and a
+completely different, ungated input (a plain button) shows the identical
+symptom, that's strong evidence the bug is upstream of BOTH — shared
+plumbing, not either mechanism's own logic. Re-reading the actual
+per-frame CALL ORDERING (not just each function's own internal logic in
+isolation) is what found this; several of this whole session's earlier
+rounds (v1-v8.1) never questioned whether `neutralizeVrMenuGamepadState()`'s
+own call site was itself sound, only ever the values it wrote.
+
 ## Key lesson learned this session
 
 Don't infer that an uncommitted fix supersedes a nearby disable guard just

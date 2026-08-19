@@ -801,20 +801,28 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     g_renderedToHeadsetThisFrame = false;
     g_duskVRRenderingToHeadset = false;
     g_duskVREyePassOpen = false;
-    // VR-menu-gamepad (see vr_menu_gamepad.hpp): neutralize unconditionally
-    // here too, same reasoning as everything else in this block -- any
-    // early return below must not leave a menu-open chord or nav button
-    // stuck held from a dropped frame. Takes dtSeconds again (v7 design):
-    // it DOES advance the stick-smoothing accumulator toward (0,0) every
-    // single frame here, on purpose, reproducing v1's original double-
-    // per-frame application -- see advanceMenuStickSmoothing()'s own
-    // comment. It still deliberately does NOT touch the chord gate's
-    // hold-to-open/cooldown timer (computeMenuChordGate() is never called
-    // from here) -- THAT state genuinely cannot tolerate this unconditional
-    // every-frame call (see the TAKE 2 comment in vr_menu_gamepad.hpp for
-    // why: it broke the hold-to-open feature outright the first time this
-    // was tried), unlike the stick smoothing accumulator.
-    neutralizeVrMenuGamepadState(pacing.presentation_dt_seconds);
+    // VR-menu-gamepad (see vr_menu_gamepad.hpp): FIXED 2026-08-18 -- this
+    // used to call neutralizeVrMenuGamepadState() unconditionally right
+    // here, every single frame, which turned out to be a real, systemic
+    // bug (see MenuGamepadFrameGuard's own comment for the full story) --
+    // it generated a genuine press/release cycle on every real VR frame
+    // for anything actually held, reaching RmlUi as constant spam ("if I
+    // hold down A, it spams the entry on and off"). Replaced with an RAII
+    // guard: neutralizes automatically in its destructor, but ONLY if the
+    // real per-frame update (further down, where markRealUpdateRan() is
+    // called) never ran this frame -- covers every one of tick()'s early-
+    // return paths below (no session, session state transitions/teardown,
+    // xrWaitFrame/xrBeginFrame failure, shouldRender==false, view-not-
+    // ready) automatically, without a manual reset call at each one (see
+    // TickReentrancyGuard just above for the identical reasoning, already
+    // established in this file for tick()'s own reentrancy flag). It still
+    // deliberately does NOT touch the chord gate's hold-to-open/cooldown
+    // timer or the stick pulse gate's own phase timer (computeMenuChordGate()/
+    // advanceMenuStickPulse() are never called from the neutral path) --
+    // THAT state genuinely cannot tolerate an unconditional every-frame
+    // call (see the TAKE 2 comment in vr_menu_gamepad.hpp for why: it broke
+    // the hold-to-open feature outright the first time this was tried).
+    MenuGamepadFrameGuard menuGamepadFrameGuard;
     // Desktop mirror (see the per-eye loop below, where this gets re-set for
     // real): cleared up front like everything else in this block, so any
     // early return between here and the real eye-rendering section (no
@@ -1144,32 +1152,28 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     {
         static bool s_menuWasVisibleLastRealFrame = false;
         if (menuVisible && !s_menuWasVisibleLastRealFrame) {
-            resetMenuStickSmoothingToZero();
+            resetMenuStickPulseState();
         }
         s_menuWasVisibleLastRealFrame = menuVisible;
     }
     updateVrMenuGamepadPlayerIndex();
-    // DISABLED 2026-08-17 per explicit user request ("Just disable the bind
-    // to open the menu at this point, ill fix it another time") -- the
-    // left-stick navigation speed/feel was never successfully fixed across
-    // seven design rounds (v1-v7, see vr_menu_gamepad.hpp's "Left-stick
-    // handling" history comment for the full trail) despite one of them
-    // (v7) being an exact, verified reproduction of the originally-
-    // confirmed-good code. Rather than keep guessing at an eighth design,
-    // the chord is simply never allowed to fire -- kMenuChordDisabled
-    // forces its two physical inputs to false/0 right here, before they
-    // ever reach computeMenuChordGate(). Everything else in this whole
-    // feature (attach, player index claim, the chord/hold-to-open gate
-    // logic itself, the stick smoothing, the menu billboard rendering) is
-    // left completely intact and untouched -- flip this back to false (and
-    // remove the two forced-false/0.f overrides below it) to re-enable
-    // once the navigation feel is revisited.
-    constexpr bool kMenuChordDisabled = true;
+    // RE-ENABLED 2026-08-18 to test vr_menu_gamepad.hpp's v8 navigation
+    // redesign (dominant-axis selection + a pulse gate fully decoupled
+    // from neutralizeVrMenuGamepadState() -- see that header's "Left-stick
+    // handling" history comment for the full v1-v8 trail). Previously
+    // disabled 2026-08-17 after seven failed rounds; re-enable/disable by
+    // flipping kMenuChordDisabled below if this round also needs reverting.
+    constexpr bool kMenuChordDisabled = false;
     const bool menuChordHeldForGate = kMenuChordDisabled ? false : (leftMenuHeld || rightStickClickHeld);
     const float menuChordTriggerForGate = kMenuChordDisabled ? 0.f : rightTrigger;
     updateVrMenuGamepadState(leftStick.x, leftStick.y, rightAHeld, rightBHeld,
                               menuChordHeldForGate, menuChordTriggerForGate,
                               pacing.presentation_dt_seconds);
+    // Tells menuGamepadFrameGuard (top of tick()) a real update ran this
+    // frame, so its destructor must NOT also neutralize -- see that
+    // guard's own comment for the systemic press/release-spam bug this
+    // prevents.
+    menuGamepadFrameGuard.markRealUpdateRan();
 
     // Swing-gesture -> attack, LEFT hand: added 2026-08-05 per explicit user
     // request ("swinging your left hand in front of you acts as pressing the

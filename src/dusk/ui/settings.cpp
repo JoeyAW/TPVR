@@ -879,6 +879,13 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                             "during some cutscenes, particularly on ultra-wide displays. "
                             "Visuals beyond the original intended framing may appear buggy."
             });
+    });
+
+    add_tab("VR", [this](Rml::Element* content) {
+        auto& leftPane = add_child<Pane>(content, Pane::Type::Controlled);
+        auto& rightPane = add_child<Pane>(content, Pane::Type::Uncontrolled);
+
+        leftPane.add_section("Display");
         config_bool_select(leftPane, rightPane, getSettings().game.vrDesktopMirror,
             {
                 .key = "VR Desktop Mirror",
@@ -886,6 +893,22 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                             "instead of leaving it blank. Reuses the game's existing present "
                             "pass, so this has no meaningful performance cost."
             });
+
+        leftPane.add_section("Brightness");
+        config_percent_select(leftPane, rightPane, getSettings().game.vrGammaCompensation,
+            "VR Brightness Compensation",
+            "Corrects how bright the game looks inside the headset on most VR runtimes "
+            "(Virtual Desktop, Meta Link, etc.) compared to the desktop window. Lower "
+            "values brighten the image, higher values darken it. Raise this if VR looks "
+            "washed out; lower it if VR looks too dark. Has no effect on the desktop "
+            "window or on SteamVR.",
+            30, 300, 5);
+        config_percent_select(leftPane, rightPane, getSettings().game.vrGammaCompensationSteamVr,
+            "VR Brightness Compensation (SteamVR)",
+            "The same correction as above, but tuned separately for SteamVR -- its "
+            "compositor handles color differently than other VR runtimes. Only applies "
+            "while running through SteamVR.",
+            30, 220, 5);
     });
 
     add_tab("Input", [this](Rml::Element* content) {

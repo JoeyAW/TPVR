@@ -9169,6 +9169,48 @@ isolation) is what found this; several of this whole session's earlier
 rounds (v1-v8.1) never questioned whether `neutralizeVrMenuGamepadState()`'s
 own call site was itself sound, only ever the values it wrote.
 
+### New "VR" settings tab in the Dusklight menu — built 2026-08-18, NOT yet confirmed in-headset/on-screen
+
+**Goal** (explicit user request: "add a new VR specific settings menu...
+titled VR alongside [Video/Audio/Game/etc.]"). The Dusklight menu's
+Settings screen (`settings.cpp`'s `SettingsWindow`, a `Window` with a
+`TabBar`) already has Video/Input/Audio/Gameplay/Cheats/Interface tabs,
+each built the same way: `add_tab("Name", [this](Rml::Element* content) {
+... })`, populating a `Pane::Type::Controlled` left list +
+`Pane::Type::Uncontrolled` right detail pane via helpers like
+`config_bool_select`/`config_percent_select`.
+
+**Consolidated three VR settings that already existed but were scattered**
+(no new `ConfigVar`s needed):
+- `game.vrDesktopMirror` (bool) — moved out of the Video tab into the new
+  VR tab's "Display" section (was the only VR setting previously exposed
+  in the RmlUi menu at all).
+- `game.vrGammaCompensation` / `game.vrGammaCompensationSteamVr` (floats,
+  2026-08-16's "too bright" investigation) — previously ONLY reachable via
+  the Debug ImGui menu (`ImGuiMenuTools.cpp`). Added to the new tab's
+  "Brightness" section via `config_percent_select` (already used elsewhere
+  in this file for float `ConfigVar`s displayed as a percentage, e.g. gyro/
+  mouse sensitivity, HUD scale) — 30-300% for the general slider (native
+  0.3-3.0 range), 30-220% for the SteamVR-specific one (native 0.3-2.2),
+  both step=5. Reused as-is rather than inventing a new float-slider
+  widget — zero new UI plumbing needed.
+
+Tab placed between Video and Input in the `add_tab()` call sequence.
+Deliberately NOT gated on `isRenderingToHeadset()`/runtime detection —
+always visible/settable like the rest of the menu, matching how these
+settings would realistically be configured (before or between VR
+sessions, not while actively in the headset navigating this same desktop-
+only menu).
+
+**Built successfully** (RelWithDebInfo) — only `settings.cpp` recompiled,
+clean link, no new warnings.
+
+**NOT yet tested in-headset or on the desktop menu.** Next step for
+whoever picks this up: open the Dusklight menu, confirm a "VR" tab
+appears between Video and Input, and that both sliders/the toggle work
+and persist (`config::save()` already wired the same way as every other
+control in this file, not independently verified this round).
+
 ## Key lesson learned this session
 
 Don't infer that an uncommitted fix supersedes a nearby disable guard just

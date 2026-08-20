@@ -896,6 +896,13 @@ inline bool s_kanteraRestingValid = false;
 // dialogue; when he's been swapped out or explicitly hidden for a shot
 // that isn't about him, keep the third-person fallback -- there's no real
 // head position worth anchoring the camera to in that case anyway.
+// Forward declarations -- isHookshotAirborneOrHanging()/isHookshotAiming()
+// (below, next to isCrawling()) are needed by isFirstPerson()'s own Third
+// Person carve-out right below, but are themselves defined further down
+// this same file.
+inline bool isHookshotAirborneOrHanging(daAlink_c* link);
+inline bool isHookshotAiming(daAlink_c* link);
+
 inline bool isFirstPerson(daAlink_c* link) {
     if (!link || link->checkWolf()) return false;
 
@@ -915,7 +922,39 @@ inline bool isFirstPerson(daAlink_c* link) {
     // link's body" half -- this function alone only stops FIRST-person
     // from ever being requested, it doesn't independently un-hide
     // anything the separate "Hide Body" setting hid.
-    if (dusk::getSettings().game.vrThirdPerson.getValue()) return false;
+    //
+    // CARVE-OUT (2026-08-19, user report: "instead of going into first
+    // person [while using the clawshot with Third Person on], the camera
+    // goes under the ground behind link"): the flatscreen third-person
+    // camera this falls back to (getVrCameraEyeAnchor()'s fallbackEye,
+    // i.e. view->lookat.eye) was never confirmed to behave sanely during
+    // hookshot flight/hanging -- unlike Wolf form and cutscenes, which
+    // this fallback IS already proven correct for. Hookshot's own camera
+    // fix (isHookshotAirborneOrHanging(), section "Hookshot/clawshot
+    // flight + hanging" in vr-mod-notes) exists specifically because the
+    // ordinary camera anchors don't hold up while Link is mid-air on a
+    // chain or hanging off a wall/ceiling -- the third-person eye is
+    // exactly as untested for this state as the anchors that fix already
+    // had to route around. Per explicit user request ("try not to fix
+    // first person"), rather than attempt a new third-person-camera-
+    // during-hookshot fix from scratch, this specific state is exempted
+    // from the Third Person override entirely -- stays first-person
+    // (using the already-confirmed-correct hookshot anchor) even while
+    // Third Person is on, everything else unaffected.
+    //
+    // FOLLOW-UP (same day, first attempt above insufficient): user
+    // confirmed the actual drift happens specifically while AIMING the
+    // clawshot (PROC_HOOKSHOT_SUBJECT -- NOT covered by
+    // isHookshotAirborneOrHanging(), which deliberately excludes it), not
+    // during flight/hanging. See isHookshotAiming()'s own comment for the
+    // full mechanism (the base game's mode-4 "subject" aim camera,
+    // untested under VR's absolute controller-pointing aim). Confirmed
+    // via direct user follow-up that this is clawshot-specific, not a
+    // general aim-camera issue (bow/slingshot/boomerang aiming was
+    // explicitly checked and does NOT show this symptom) -- so scoped
+    // narrowly to hookshot's own aiming state, not every aim-capable item.
+    if (dusk::getSettings().game.vrThirdPerson.getValue() &&
+        !isHookshotAirborneOrHanging(link) && !isHookshotAiming(link)) return false;
 
     if (!link->checkEventRun()) return true;  // no event at all -- ordinary gameplay
 
@@ -1027,6 +1066,83 @@ inline bool isHookshotAirborneOrHanging(daAlink_c* link) {
         default:
             return false;
     }
+}
+
+// SEPARATE from isHookshotAirborneOrHanging() above on purpose -- used
+// ONLY by isFirstPerson()'s Third Person carve-out (2026-08-19 follow-up),
+// NOT added to isHookshotAirborneOrHanging() itself or
+// computeRawEyeAnchor()'s fallback list, since that would also change
+// plain FIRST-PERSON camera behavior while aiming (untested, and the user
+// explicitly asked not to touch first person -- "try not to fix first
+// person"). PROC_HOOKSHOT_SUBJECT (standing, aiming before firing --
+// "readying"/pointing the clawshot at a target) engages the base game's
+// own flatscreen "subject"/aim camera mode (dCam_getBody()->ChangeModeOK(4),
+// setSubjectMode(), d_a_alink_hook.inc's procHookshotRoofWait()/
+// procHookshotRoofShoot()) -- a camera mode never exercised by this
+// project's VR work before Third Person existed (first-person VR never
+// reads the flatscreen camera object at all while aiming, so this mode's
+// own behavior was untested here). Real symptom (user report, 2026-08-19):
+// with Third Person on, aiming the clawshot makes the camera drift
+// backward/downward continuously, worse aiming up, slower aiming down,
+// not stopping until aim/Z-target releases -- consistent with this
+// aim-camera mode running an unbounded position integration that's fine
+// on flatscreen (bounded by normal analog-stick-driven aim rates) but
+// runs away under VR's controller-pointing aim, which can swing the aim
+// angle far more abruptly (setBodyAngleToCamera()'s VR branch assigns the
+// ABSOLUTE controller angle every frame, not an incremental delta -- see
+// that function's own comment, d_a_alink_link.inc). Rather than debug
+// dCam's mode-4 subject-camera internals from scratch, simplest fix
+// (matching isHookshotAirborneOrHanging()'s own precedent) is to just
+// never let Third Person force this camera mode to engage in the first
+// place -- stay first-person during hookshot aiming too, same as flight/
+// hanging already does. PROC_SWIM_HOOKSHOT_SUBJECT is the underwater
+// equivalent (d_a_alink.h) -- included for the same reason, not
+// separately confirmed broken but presumptively the same code path.
+inline bool isHookshotAiming(daAlink_c* link) {
+    if (!link) return false;
+    switch (link->mProcID) {
+        case daAlink_c::PROC_HOOKSHOT_SUBJECT:
+        case daAlink_c::PROC_SWIM_HOOKSHOT_SUBJECT:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// DECOUPLES "camera should be first-person right now" from "the hookshot
+// model should track the real controller" -- added 2026-08-19, same-day
+// follow-up. isFirstPerson()'s Third Person carve-out (above) forces
+// first-person during hookshot aim/fly/hang SPECIFICALLY so the camera
+// anchor stays head-tracked instead of falling back to the broken
+// third-person "subject" aim camera (the underground-drift bug) -- but
+// this had an unintended side effect: since the tracked-hand override
+// (refreshTrackedHookshotMtxLive() below) and getLeftItemMatrix()/
+// getRightItemMatrix()'s own tracked-matrix substitution (d_a_alink_link.inc)
+// are BOTH gated on the same isFirstPerson() value, forcing it true for
+// the camera's sake also turned ON hand-tracking for the grip models --
+// which the user explicitly did NOT want while Third Person is on
+// ("Instead of returning to link's player model they are on my hands").
+// Confirmed via direct question: user wants the CAMERA to stay
+// first-person here (no drift), but the MODEL to keep following Link's
+// normal animated hand pose instead of the tracked controller.
+//
+// This function is that narrower "should track" decision, used ONLY by
+// the two hookshot-specific call sites below -- deliberately NOT folded
+// into isFirstPerson() itself (that would also affect Wolf/cutscene/
+// dialogue first-person, which is unrelated) and deliberately NOT
+// changing getLeftItemMatrix()/getRightItemMatrix()'s own general gating
+// (still isFirstPerson()-based, since ~10 OTHER unrelated consumers --
+// arrows, boomerang, fishing rod, canoe paddle, enemy actors -- read
+// those accessors too, and none of them are reachable while hookshot
+// aim/fly/hang is active in practice, so touching their shared gate isn't
+// warranted for a hookshot-only preference).
+inline bool shouldTrackHookshotToHand(daAlink_c* link) {
+    if (!isFirstPerson(link)) return false;
+    if (dusk::getSettings().game.vrThirdPerson.getValue() &&
+        (isHookshotAirborneOrHanging(link) || isHookshotAiming(link))) {
+        return false;
+    }
+    return true;
 }
 
 // ADDED 2026-08-15 (user request: "make it so iron boots are using the
@@ -1282,11 +1398,24 @@ inline void applyTrackedHandMtx(J3DModel* handModel) {
 // CRAWLING (user request 2026-08-09, same fix requested for crawling):
 // identical reasoning -- see isCrawling()'s own comment for why this is a
 // mProcID check rather than a MODE_FLG bit like swimming.
+// "Third Person" VR setting (2026-08-19 follow-up, user report: turning
+// Third Person on left the sword/shield/hands still tracking the real
+// controllers instead of showing normal third-person animation): this
+// function -- unlike refreshTrackedItemJointMtxLive()/
+// refreshTrackedBoomerangMtxLive()/refreshTrackedFishingRodMtxLive()/
+// refreshTrackedHookshotMtxLive() below, which all already gate on
+// isFirstPerson() -- never actually checked it, only swimming/crawling.
+// isFirstPerson() itself already forces third-person whenever the VR
+// setting is on (see its own comment), so gating here makes this function
+// stop overriding the hand pose the same way it already does for Wolf
+// form/cutscenes. Checked BEFORE dereferencing link for the swim/crawl
+// checks below, not after -- a null link should never reach those either.
 inline void refreshTrackedHandDrawMtxLive(J3DModel* handModel) {
     if (!handModel || !detail::s_handMtxValid) return;
 
     auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
-    if (link && (link->checkModeFlg(daAlink_c::MODE_SWIMMING) || isCrawling(link))) return;
+    if (!link || !isFirstPerson(link)) return;
+    if (link->checkModeFlg(daAlink_c::MODE_SWIMMING) || isCrawling(link)) return;
 
     applyTrackedHandMtx(handModel);
 
@@ -1611,9 +1740,21 @@ inline void markModelJointsLive(J3DModel* model) {
 // signal of anything gameplay-state-related. See refreshTrackedItemMtxLive()
 // below for what actually settled this (direct instrumentation of
 // daAlink_c::setItemMatrix() itself).
+// "Third Person" VR setting (2026-08-19 follow-up): same gap as
+// refreshTrackedHandDrawMtxLive() above -- never checked isFirstPerson(),
+// so sword/shield kept tracking the real controllers even with Third
+// Person forcing third-person camera/visibility. Returning early here
+// leaves mSwordModel/mShieldModel's base transform (and frame_interp's
+// once-per-tick recording of it) at whatever setItemMatrix()'s own
+// once-per-tick write already set -- exactly the normal third-person
+// fallback every other case (Wolf form, cutscenes) already relies on, no
+// separate smoothing needed since mDoExt_modelUpdateDL() (d_a_alink.cpp)
+// already resubmits geometry at real eye-pass rate regardless of
+// first/third person.
 inline void refreshTrackedItemMtxLive() {
     auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
     if (!link) return;
+    if (!isFirstPerson(link)) return;
 
     J3DModel* bodyModel = link->getBodyModel();
     if (!bodyModel) return;
@@ -1776,9 +1917,14 @@ inline void detail_pickHeldItemHandRefs(daAlink_c* link, J3DModel* bodyModel, bo
 // Called once per real frame from vr_main.cpp's tick(), alongside (and
 // after) refreshTrackedItemMtxLive() -- same "before the per-eye loop
 // opens" ordering, same reasons.
+// "Third Person" VR setting (2026-08-19 follow-up): same gap as
+// refreshTrackedItemMtxLive()/refreshTrackedHandDrawMtxLive() above --
+// never checked isFirstPerson(), so held items (bow, bottles, lantern,
+// copy rod, etc.) kept tracking the real controllers in third person too.
 inline void refreshTrackedHeldItemMtxLive() {
     auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
     if (!link) return;
+    if (!isFirstPerson(link)) return;
 
     J3DModel* bodyModel = link->getBodyModel();
     if (!bodyModel) return;
@@ -2203,9 +2349,13 @@ inline bool isFishingRodActive() {
 // condition setItemMatrix() itself already uses to decide whether to call
 // setHookshotPos() at all (d_a_alink.cpp), checked directly rather than
 // assumed.
+//
+// Gated on shouldTrackHookshotToHand(), NOT plain isFirstPerson() --
+// 2026-08-19 follow-up, see that function's own comment for why the two
+// need to be decoupled specifically for hookshot while Third Person is on.
 inline void refreshTrackedHookshotMtxLive() {
     auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
-    if (!link || !isFirstPerson(link)) return;
+    if (!link || !shouldTrackHookshotToHand(link)) return;
     if (!daPy_py_c::checkHookshotItem(link->getEquipItem())) return;
 
     link->applyTrackedHookshotGripTransforms();

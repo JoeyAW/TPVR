@@ -19107,7 +19107,13 @@ void daAlink_c::setDrawHand() {
     // dusk::vr::refreshTrackedHandDrawMtxLive(), called once per real frame
     // from vr_main.cpp's tick() -- see its own comment (vr_link_visibility.hpp)
     // for the full root-cause writeup. No-op on flatscreen.
-    if (dusk::vr::isRenderingToHeadset()) {
+    // "Third Person" VR setting (2026-08-19 follow-up): also gated on
+    // isVrFirstPerson(this) now, not just isRenderingToHeadset() -- see
+    // that function's own comment (vr_main.hpp) for why this legacy write
+    // needs the same gate as the real per-eye-relevant fix
+    // (refreshTrackedHandDrawMtxLive(), vr_main.cpp's tick()) even though
+    // it's confirmed dead for reaching the actual render output itself.
+    if (dusk::vr::isRenderingToHeadset() && dusk::vr::isVrFirstPerson(this)) {
         dusk::vr::applyTrackedHandMtx(mpLinkHandModel);
     }
 #endif
@@ -19817,7 +19823,10 @@ int daAlink_c::draw() {
         // otherwise it uses a completely different belt/back-relative
         // resting pose, detected the same way. Re-applied every eye, right
         // after setDrawHand(), same reasoning as its own tracked-hand call.
-        if (dusk::vr::isRenderingToHeadset()) {
+        // "Third Person" VR setting (2026-08-19 follow-up): also gated on
+        // isVrFirstPerson(this) now -- see its comment (vr_main.hpp) and
+        // the matching fix on the tracked-hand call site above.
+        if (dusk::vr::isRenderingToHeadset() && dusk::vr::isVrFirstPerson(this)) {
             dusk::vr::applyTrackedItemMtx(mSwordModel, mShieldModel,
                                            mpLinkModel->getAnmMtx(mLeftItemJntNo),
                                            mpLinkModel->getAnmMtx(mLeftHandJntNo),

@@ -227,6 +227,12 @@ s16 g_headMoveAngleS = 0;
 s16 g_controllerAimYawS = 0;
 s16 g_controllerAimPitchS = 0;
 
+// HMD-based aim pitch -- see getHeadAimAngles()'s own declaration comment
+// (vr_main.hpp). Yaw reuses g_headMoveAngleS directly (identical formula,
+// same headForward vector -- no reason to keep a second copy), so only
+// pitch needs its own storage here.
+s16 g_headAimPitchS = 0;
+
 // ROOT-CAUSED this session ("VR stops updating after creating a save file"):
 // true once xrBeginSession() has actually succeeded and false once the
 // runtime has told us to stop (XR_SESSION_STATE_STOPPING) -- distinct from
@@ -480,6 +486,14 @@ void refreshTrackedItemMtxLive() {
     vr_link::refreshTrackedItemMtxLive();
 }
 
+bool isVrFirstPerson(daAlink_c* link) {
+    return vr_link::isFirstPerson(link);
+}
+
+bool shouldTrackHookshotToHand(daAlink_c* link) {
+    return vr_link::shouldTrackHookshotToHand(link);
+}
+
 void refreshTrackedHeldItemMtxLive() {
     vr_link::refreshTrackedHeldItemMtxLive();
 }
@@ -535,6 +549,11 @@ s16 getHeadMoveAngleS() {
 void getControllerAimAngles(s16* outYawS, s16* outPitchS) {
     *outYawS = g_controllerAimYawS;
     *outPitchS = g_controllerAimPitchS;
+}
+
+void getHeadAimAngles(s16* outYawS, s16* outPitchS) {
+    *outYawS = g_headMoveAngleS;
+    *outPitchS = g_headAimPitchS;
 }
 
 // Call once at startup, after an aurora::gfx device exists (per the
@@ -1474,6 +1493,19 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
         const cXyz headForward =
             vr_render::computeHeadWorldForward(hmdPose, dusk::vr::getSmoothTurnYawRad());
         g_headMoveAngleS = cM_atan2s(headForward.x, headForward.z);
+
+        // HMD-based aim pitch (see getHeadAimAngles()'s own comment,
+        // vr_main.hpp) -- same horizontal-length/atan2s(y, horiz) shape and
+        // same negation as g_controllerAimPitchS below, on the theory that
+        // the sign requirement comes from mBodyAngle.x's own convention
+        // (what both pitches ultimately feed, d_a_alink_link.inc), not from
+        // which vector produced the y-component. Untested assumption --
+        // flip the sign here first if head-based aim pitch reads inverted
+        // in-headset, same "guess, test, flip if backwards" caveat every
+        // other rotation-sign guess in this project has needed at least
+        // once before landing.
+        const float horiz = std::sqrt(headForward.x * headForward.x + headForward.z * headForward.z);
+        g_headAimPitchS = static_cast<s16>(-cM_atan2s(headForward.y, horiz));
     }
 
     // Right-controller-pointing aim direction -- see g_controllerAimYawS/

@@ -131,7 +131,22 @@ BOOL daAlink_c::setBodyAngleToCamera() {
         // to need it in practice.
         if (dusk::vr::isRenderingToHeadset()) {
             s16 aimYawS, aimPitchS;
-            dusk::vr::getControllerAimAngles(&aimYawS, &aimPitchS);
+            // "Third Person" VR setting (2026-08-19 follow-up, explicit
+            // user request: "tie the reticle aim location to the hmd
+            // ONLY when third person is enabled"): controller-pointing
+            // aim assumes the player is looking through the tracked
+            // hand's own first-person view -- with Third Person on,
+            // there's no such view to visually anchor pointing to, so
+            // aim (and therefore mSight/the world-space aim-point
+            // marker, which reads the same shape_angle.y/mBodyAngle.x
+            // this sets) follows the HMD's own look direction instead.
+            // Ordinary first-person VR is completely unaffected --
+            // controller-pointing aim stays the default there.
+            if (dusk::getSettings().game.vrThirdPerson.getValue()) {
+                dusk::vr::getHeadAimAngles(&aimYawS, &aimPitchS);
+            } else {
+                dusk::vr::getControllerAimAngles(&aimYawS, &aimPitchS);
+            }
             shape_angle.y = aimYawS;
             sp8 = aimPitchS;
 

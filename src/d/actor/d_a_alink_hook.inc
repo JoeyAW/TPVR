@@ -894,7 +894,29 @@ static cXyz l_hookSnowSandHitScale(0.5f, 0.5f, 0.5f);
 static Vec const hookRoot = {0.0f, 0.0f, 23.5f};
 
 void daAlink_c::applyTrackedHookshotGripTransforms() {
-    mDoMtx_stack_c::copy(getLeftItemMatrix());
+    // VR (2026-08-19 follow-up): getLeftItemMatrix()/getRightItemMatrix()'s
+    // own tracked-hand substitution is gated on isFirstPerson() -- which
+    // is forced true here (even while the "Third Person" VR setting is
+    // on) specifically so the CAMERA stays head-anchored during hookshot
+    // aim/fly/hang, per isFirstPerson()'s own carve-out comment. Left
+    // unguarded, that side effect would also turn hand-tracking ON for
+    // this grip, which the user explicitly did NOT want while Third
+    // Person is on. dusk::vr::shouldTrackHookshotToHand() is the
+    // narrower, hookshot-specific decision that decouples the two --
+    // when it says no, read the raw body-joint matrix directly instead
+    // of going through the (still isFirstPerson()-gated) accessors, so
+    // the grip keeps following Link's normal animated hand pose. See
+    // that function's own comment (vr_main.hpp) for the full reasoning.
+#if TARGET_PC
+    const bool trackToHand = dusk::vr::shouldTrackHookshotToHand(this);
+    MtxP leftMtx = trackToHand ? getLeftItemMatrix() : mpLinkModel->getAnmMtx(mLeftItemJntNo);
+    MtxP rightMtx = trackToHand ? getRightItemMatrix() : mpLinkModel->getAnmMtx(mRightItemJntNo);
+#else
+    MtxP leftMtx = getLeftItemMatrix();
+    MtxP rightMtx = getRightItemMatrix();
+#endif
+
+    mDoMtx_stack_c::copy(leftMtx);
     mDoMtx_stack_c::transM(-2.0f, 1.0f, 1.0f);
     mDoMtx_stack_c::XYZrotM(cM_deg2s(5.7f), cM_deg2s(162.0f), 0);
 
@@ -906,7 +928,7 @@ void daAlink_c::applyTrackedHookshotGripTransforms() {
     }
     model->setBaseTRMtx(mDoMtx_stack_c::get());
 
-    mDoMtx_stack_c::copy(getRightItemMatrix());
+    mDoMtx_stack_c::copy(rightMtx);
     mDoMtx_stack_c::transM(-2.0f, 0.0f, 1.0f);
     mDoMtx_stack_c::XYZrotM(cM_deg2s(-78.0f), cM_deg2s(182.0f), cM_deg2s(-99.0f));
 

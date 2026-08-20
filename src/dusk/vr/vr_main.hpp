@@ -12,6 +12,7 @@
 #include "helpers/gx_helper.h"  // TGXTexObj
 
 class J3DModel;
+class daAlink_c;
 
 namespace dusk::vr {
 
@@ -298,6 +299,56 @@ s16 getHeadMoveAngleS();
 // and why this sources from OpenXR's own aim pose rather than the tracked
 // hand mesh's grip-based calibration.
 void getControllerAimAngles(s16* outYawS, s16* outPitchS);
+
+// HMD-based aim yaw/pitch, same s16 BAMS unit and computed-once-per-frame
+// pattern as getControllerAimAngles() above. Added 2026-08-19 (explicit
+// user request: "tie the reticle aim location to the hmd ONLY when third
+// person is enabled") -- outYawS is literally getHeadMoveAngleS()'s own
+// value (identical formula, no reason to duplicate it); outPitchS is a
+// new value derived the same way (see g_headAimPitchS's own comment,
+// vr_main.cpp, for the pitch-sign caveat). Call site: setBodyAngleToCamera()'s
+// VR branch (d_a_alink_link.inc), which picks between this and
+// getControllerAimAngles() based on the "Third Person" VR setting --
+// while Third Person is on, aiming (and therefore the world-space aim-
+// point marker/reticle, which reads the same shape_angle.y/mBodyAngle.x
+// this function ultimately feeds) follows where the player is actually
+// LOOKING instead of where the controller points, since third-person
+// controller-pointing aim has no first-person view to visually anchor to.
+void getHeadAimAngles(s16* outYawS, s16* outPitchS);
+
+// Thin forward to vr_link::isFirstPerson(link) (vr_link_visibility.hpp) --
+// same "keep the heavier OpenXR/aurora header out of core game files"
+// reasoning as every other function in this header. Added 2026-08-19 for
+// the "Third Person" VR setting's own follow-up bug: d_a_alink.cpp's two
+// legacy per-sim-tick tracked-pose writes (applyTrackedHandMtx()/
+// applyTrackedItemMtx() call sites, right after setDrawHand()) were only
+// ever gated on isRenderingToHeadset() -- correct back when they were
+// believed inert (see applyTrackedHandMtx()'s own comment: proven to never
+// run during a real VR eye pass), but those calls still feed
+// dusk::frame_interp's once-per-tick snapshot recording for these joints
+// (J3DModel::setAnmMtx()/calc() auto-record into it) -- and that snapshot
+// IS what third-person mode falls back to once refreshTrackedHandDrawMtxLive()/
+// refreshTrackedItemMtxLive() (this session's other 2026-08-19 fix) stop
+// marking the joints live. Without gating these too, the once-per-tick
+// snapshot itself would still be the tracked-controller pose, silently
+// defeating the other fix. Guard both call sites on
+// `isRenderingToHeadset() && isVrFirstPerson(this)`.
+bool isVrFirstPerson(daAlink_c* link);
+
+// Thin forward to vr_link::shouldTrackHookshotToHand(link)
+// (vr_link_visibility.hpp) -- see that function's own comment for the
+// full reasoning. Added 2026-08-19, same-day follow-up to
+// isVrFirstPerson() above: while Third Person is on, hookshot aim/fly/
+// hang forces isVrFirstPerson() true so the CAMERA stays head-anchored
+// (avoiding the third-person "subject" aim camera's underground-drift
+// bug) -- but per explicit user request the hookshot MODEL itself should
+// NOT also track the real controller during that same window; it should
+// keep following Link's normal animated hand pose instead. Call site:
+// daAlink_c::applyTrackedHookshotGripTransforms() (d_a_alink_hook.inc) --
+// use this instead of getLeftItemMatrix()/getRightItemMatrix() directly
+// when deciding whether to read the tracked-hand-relative matrix or the
+// raw body-joint matrix.
+bool shouldTrackHookshotToHand(daAlink_c* link);
 
 // Runs the first half of one VR frame: xrWaitFrame/xrBeginFrame, per-eye
 // render (including the fpcM_DrawIterater/cAPIGph_Painter draw call), and

@@ -9432,24 +9432,280 @@ what the real per-eye draw actually shows via the once-per-tick snapshot
 mechanism) — not a new class of bug for this codebase, just a new call
 site of it.
 
-**Proposed fix, NOT applied yet**: gate both call sites on `isFirstPerson()`
-too, not just `isRenderingToHeadset()`. `d_a_alink.cpp` has no existing
-thin-forward for `isFirstPerson()` at its own scope (the one that used to
-exist, `dusk::vr::isFirstPersonView()`, was fully removed during the
-2026-08-09 flatscreen-camera-sync revert — see that section above) — the
-established pattern for exposing a `vr_link_visibility.hpp` function to
-`d_a_alink.cpp` without pulling the heavy header in directly is a thin
-forward declared in `vr_main.hpp`/defined in `vr_main.cpp` (same shape as
-`applyTrackedHandMtx()`/`applyTrackedItemMtx()` themselves) — a new
-`dusk::vr::isFirstPersonView(daAlink_c*)` (or reuse that exact old name)
-would need re-adding for this. **Before applying**: verify this
-diagnosis is actually correct first (e.g. temporary logging on whether
-`applyTrackedHandMtx()`/`applyTrackedItemMtx()` still fire while
-`vrThirdPerson` is on) rather than assuming the read-through-the-code
-theory is complete — this project's own standing lesson is that a
-plausible code-reading diagnosis has been wrong before (see section 20's
-many false starts) and deserves a real capture before trusting it fully,
-even though this one looks solid.
+**FIXED 2026-08-19 (later same day) — built, NOT yet re-tested in-headset.**
+Applied the proposed fix above, plus a correction to its own diagnosis:
+"path 1... each already starts with `if (!link || ... ||
+!isFirstPerson(link)) return;`" turned out to be only PARTIALLY true.
+Re-read every `refreshTracked*Live()` function in `vr_link_visibility.hpp`
+directly (not re-trusted from the earlier summary) before touching
+anything, and found the check was present on
+`refreshTrackedItemJointMtxLive()`/`refreshTrackedBoomerangMtxLive()`/
+`refreshTrackedFishingRodMtxLive()`/`refreshTrackedHookshotMtxLive()`, but
+**absent** from three of the more central ones:
+`refreshTrackedHandDrawMtxLive()` (only checked swimming/crawling),
+`refreshTrackedItemMtxLive()` (the sword/shield positioner — only checked
+the item was hand-attached, via `checkItemSwordEquip()`/
+`checkShieldHandAttached()`, nothing about first/third person), and
+`refreshTrackedHeldItemMtxLive()` (bow/bottles/lantern/copy rod etc. —
+same gap). So the bug was actually in BOTH path 1 and path 2 — fixing
+only the legacy call sites (path 2, as originally proposed) would NOT
+have been sufficient on its own, since these three "live" functions were
+independently still overriding the pose every real frame regardless of
+`isFirstPerson()`.
+
+**Fix, both halves**:
+- Added `if (!link || !isFirstPerson(link)) return;` (or the equivalent
+  two-line form where a `link` null-check already existed) to all three
+  gap functions above, matching the pattern the other four `refreshTracked*Live()`
+  functions already used.
+- Added `dusk::vr::isVrFirstPerson(daAlink_c* link)` (`vr_main.hpp`/`.cpp`)
+  — a thin forward to `vr_link::isFirstPerson(link)`, needing a new
+  `class daAlink_c;` forward declaration in `vr_main.hpp` alongside the
+  existing `class J3DModel;` one. Both of `d_a_alink.cpp`'s legacy call
+  sites (`applyTrackedHandMtx(mpLinkHandModel)` ~line 19110,
+  `applyTrackedItemMtx(mSwordModel, mShieldModel, ...)` ~line 19820) now
+  read `if (dusk::vr::isRenderingToHeadset() && dusk::vr::isVrFirstPerson(this))`
+  instead of `isRenderingToHeadset()` alone — closing the once-per-tick
+  `frame_interp` snapshot-poisoning path exactly as diagnosed above.
+- Held items (`mHeldItemModel`/kantera) have no legacy per-tick write in
+  `d_a_alink.cpp` the way sword/shield/hands do (confirmed via grep — the
+  only `dusk::vr::` calls there are the hand/sword/shield/body-offset
+  ones already covered) — so for held items, fixing
+  `refreshTrackedHeldItemMtxLive()` alone is sufficient, no matching
+  legacy-call-site fix was needed or added.
+
+Built successfully (RelWithDebInfo) — `vr_link_visibility.hpp`,
+`vr_main.hpp`/`.cpp` (via `vr_main.cpp`), `d_a_alink.cpp` all recompiled,
+clean link, no new warnings.
+
+**NOT yet tested in-headset.** Next step: turn Third Person on and confirm
+hands/sword/shield/held items now show normal third-person body animation
+instead of following the real controllers. If sword/shield still tracks,
+double-check `checkItemSwordEquip()`/`checkShieldHandAttached()` aren't
+somehow still true in a state that shouldn't be hand-attached (unlikely,
+but per this project's standing lesson, verify with a real capture before
+assuming the code-reading diagnosis — including this correction to it —
+is complete).
+
+### Third Person + clawshot — camera went underground behind Link — FIXED 2026-08-19, NOT yet retested in-headset
+
+**Symptom** (user report): "When using the clawshots, instead of going
+into first person, the camera goes under the ground behind link." Only
+happens with the "Third Person" VR setting on — confirmed directly by
+asking the user rather than guessing (`AskUserQuestion`). User also said
+explicitly: "try not to fix first person" — i.e. don't touch the already-
+confirmed-working hookshot first-person camera fix, fix the third-person
+path specifically.
+
+**Root cause**: `isFirstPerson()`'s Third Person check
+(`dusk::getSettings().game.vrThirdPerson.getValue()`) forces third-person
+UNCONDITIONALLY, checked before any of the swim/crawl/vine/hookshot/
+magnetized/mounted carve-outs further down the function. Once forced
+false, `getVrCameraEyeAnchor()` falls back to `fallbackEye`
+(`view->lookat.eye`, the plain flatscreen third-person camera position) —
+the same fallback Wolf form and cutscenes already use successfully. But
+the dedicated "Hookshot/clawshot flight + hanging" camera fix
+(`isHookshotAirborneOrHanging()`, 2026-08-13) exists in the first place
+because ordinary camera anchors don't hold up while Link is mid-air on a
+chain or hanging off a wall/ceiling — that fix was only ever proven for
+the FIRST-person anchor; the flatscreen third-person eye during hookshot
+use was never separately confirmed sane, and evidently isn't (matches
+"underground behind Link").
+
+**Fix** (`vr_link_visibility.hpp`'s `isFirstPerson()`): added
+`&& !isHookshotAirborneOrHanging(link)` to the Third Person check — this
+one specific state stays first-person (reusing the already-confirmed-
+correct hookshot camera anchor) even while Third Person is on; every
+other state (ordinary standing, swimming, mounted, etc.) is unaffected
+and still goes third-person as before. `isHookshotAirborneOrHanging()`
+is defined later in the same file (next to `isCrawling()`), so a forward
+declaration was added right above `isFirstPerson()` to call it early.
+
+Built successfully (RelWithDebInfo) — only `vr_main.cpp` (transitively
+includes the header) recompiled, clean link, no new warnings.
+
+**NOT yet retested in-headset.** Next step: turn Third Person on, use the
+clawshot (both flying and hanging), and confirm the camera now stays
+first-person there (matching plain first-person-mode behavior) instead
+of going underground. If a similar report ever surfaces for a different
+special-movement state while Third Person is on (swimming, crawling,
+vine-climbing, magnetized, mounted), the same carve-out shape — exempt
+that state's `isXxx()` helper from the Third Person check in
+`isFirstPerson()` — is the template to reuse, since none of those states'
+third-person camera behavior has been independently confirmed either,
+only inferred safe by analogy to Wolf form/cutscenes.
+
+**FOLLOW-UP, same day — first fix insufficient, real state identified,
+fixed, built, NOT yet retested.** User: "Still not fixed... I can see
+link's body disappear, and the camera starts moving backwards and
+downwards. It keeps going under the ground. When aiming up, it goes down
+faster, and when aiming down it slows down. It doesn't stop going under
+the ground until I stop aiming or z target." Asked directly (rather than
+guessing) whether this also happens aiming other items (bow/slingshot/
+boomerang) — **confirmed clawshot-only**, ruling out a general aim-camera
+bug and confirming this is specific to hookshot's own aiming state.
+
+**Real root cause**: the drift happens while actively AIMING the
+clawshot before firing — `PROC_HOOKSHOT_SUBJECT` (standing still,
+pointing it at a target) — a state `isHookshotAirborneOrHanging()`
+deliberately excludes (its own comment: "PROC_HOOKSHOT_SUBJECT...
+deliberately excluded -- neither involves Link's own body leaving its
+normal standing pose" — true for the first-person anchor-calibration
+reasoning that function was built for, but irrelevant to whether the
+THIRD-PERSON fallback camera is safe). Traced `procHookshotSubject()`/
+`procHookshotRoofWait()` (`d_a_alink_hook.inc`): aiming engages the base
+game's own `dCam_getBody()->ChangeModeOK(4)`/`setSubjectMode()` — a
+flatscreen "subject"/aim camera mode never previously exercised by any
+VR work in this project (first-person VR never reads the flatscreen
+camera object while aiming at all). The reported symptom (continuous,
+pitch-correlated drift that never stops until aim/Z-target releases) is
+consistent with this camera mode running an unbounded position
+integration that stays bounded on flatscreen (fed by gradual, capped
+analog-stick aim rates) but runs away under VR's controller-pointing aim
+— `setBodyAngleToCamera()`'s VR branch assigns the ABSOLUTE controller
+angle every frame, not an incremental delta, which can swing the aim
+angle far more abruptly than the camera mode was ever designed to
+absorb.
+
+**Fix**: new `isHookshotAiming(daAlink_c*)` (`vr_link_visibility.hpp`,
+right after `isHookshotAirborneOrHanging()`) — checks
+`PROC_HOOKSHOT_SUBJECT`/`PROC_SWIM_HOOKSHOT_SUBJECT` only. Deliberately
+a SEPARATE helper, not added to `isHookshotAirborneOrHanging()` itself
+or `computeRawEyeAnchor()`'s fallback list — folding it in there would
+also change plain FIRST-PERSON camera behavior while aiming (untested,
+and the user explicitly said "try not to fix first person"). Used ONLY
+in `isFirstPerson()`'s Third Person carve-out, alongside the existing
+`isHookshotAirborneOrHanging()` check: `if (vrThirdPerson &&
+!isHookshotAirborneOrHanging(link) && !isHookshotAiming(link)) return
+false;` — aiming the clawshot now also stays first-person even with
+Third Person on, same as flight/hanging already does, without touching
+plain first-person mode at all.
+
+Built successfully (RelWithDebInfo) — only `vr_main.cpp` (transitively
+includes the header) recompiled, clean link, no new warnings.
+
+**NOT yet retested in-headset.** Next step: Third Person on, aim the
+clawshot (both on land and, if reachable, underwater) without firing,
+confirm the camera stays first-person and the drift is gone, then fire/
+fly/hang to confirm the previous round's fix still holds too. Left the
+underwater `PROC_SWIM_HOOKSHOT_SUBJECT` case included by inference (same
+code shape) but not separately confirmed broken or fixed — flag it if
+that specific case is ever reported differently.
+
+**FOLLOW-UP, same day — model itself decoupled from the camera's
+first-person state, built, NOT yet retested.** User: "The first person
+is fixed, but when in third person the claw shots still track to the
+controllers instead of being restored to link's model." Clarified via
+two rounds of questions (declined the first proposal outright, asked to
+clarify instead) that this happens specifically **while drawing/aiming**
+the clawshot (not flight/hanging), and that the desired fix is: **keep**
+the first-person camera during aiming (avoids the drift bug, already
+confirmed working) but make the grip model itself stop tracking the
+controller and instead follow Link's normal animated hand pose, even
+though the camera is first-person at that moment.
+
+**Why this was even possible as a request**: traced that
+`isFirstPerson()`'s hookshot carve-out (both rounds above) controls TWO
+independent things at once through one shared boolean — the camera
+anchor (`getVrCameraEyeAnchor()`) AND whether the grip tracks the
+controller (`refreshTrackedHookshotMtxLive()`'s gate, plus
+`getLeftItemMatrix()`/`getRightItemMatrix()`'s own tracked-matrix
+substitution, `d_a_alink_link.inc`). Forcing `isFirstPerson()` true for
+the camera's sake was an all-or-nothing switch that also turned hand-
+tracking on as an unintended side effect — before that carve-out
+existed, the camera was broken (drifting) but the grip was very likely
+ALREADY showing correctly on Link's model, since `isFirstPerson()` was
+false during aiming pre-fix.
+
+**Fix**: new `shouldTrackHookshotToHand(daAlink_c*)`
+(`vr_link_visibility.hpp`, right after `isHookshotAiming()`) — the same
+as `isFirstPerson()` except it additionally returns `false` while Third
+Person is on AND `isHookshotAirborneOrHanging()`/`isHookshotAiming()` is
+true (i.e. specifically the states where `isFirstPerson()` was forced on
+only for the camera's benefit). Deliberately NOT folded into
+`isFirstPerson()` itself (would also affect Wolf/cutscene/dialogue) and
+deliberately NOT changing `getLeftItemMatrix()`/`getRightItemMatrix()`'s
+own general gating (still plain `isFirstPerson()` — ~10 unrelated
+consumers read those accessors, none reachable during hookshot aim/fly/
+hang in practice, so not worth touching their shared gate for a
+hookshot-only preference). Wired into two places:
+- `refreshTrackedHookshotMtxLive()`: gate changed from `isFirstPerson(link)`
+  to `shouldTrackHookshotToHand(link)` — stops the real-frame-rate
+  override (and the two tip-resting-transform functions, which derive
+  from the grip's own base transform and so inherit correct behavior for
+  free) during this window.
+- `daAlink_c::applyTrackedHookshotGripTransforms()` (`d_a_alink_hook.inc`,
+  the legacy per-sim-tick call inside `setHookshotPos()`): now checks
+  `dusk::vr::shouldTrackHookshotToHand(this)` (new thin forward,
+  `vr_main.hpp`/`.cpp`, same pattern as `isVrFirstPerson()`) and reads
+  the RAW `mpLinkModel->getAnmMtx(mLeftItemJntNo/mRightItemJntNo)`
+  directly instead of `getLeftItemMatrix()`/`getRightItemMatrix()` when
+  it says no — needed because those accessors are still gated on the
+  broader `isFirstPerson()`, which IS true here, so calling them
+  unguarded would still silently return the tracked matrix regardless of
+  this new narrower decision.
+
+Built successfully (RelWithDebInfo, full rebuild since `vr_main.hpp`
+changed) — `vr_link_visibility.hpp`, `vr_main.hpp`/`.cpp`,
+`d_a_alink_hook.inc` (via `d_a_alink.cpp`) all recompiled, clean link, no
+new warnings.
+
+**NOT yet retested in-headset.** Next step: Third Person on, draw/aim the
+clawshot — camera should still go first-person with no drift (unchanged
+from the previous round), but the grip/tip models should now show
+attached to Link's normal animated hand pose instead of following the
+real controller. Worth a heads-up to the user before/while testing: since
+the camera is first-person but the item is NOT tracked, the item's
+position won't necessarily line up with where their physical controller
+actually is in that view — expected per their own explicit choice, not a
+new bug, but worth confirming it reads as acceptable in practice rather
+than just theoretically correct.
+
+### Aim tied to HMD instead of controller, but ONLY when Third Person is on — CONFIRMED WORKING 2026-08-19
+
+**Goal** (explicit user request: "tie the reticle aim location to the hmd
+ONLY when third person is enabled"). The world-space aim-point marker
+(`drawAimCrosshair()`, the physical red dot) has no independent position
+of its own — it just draws wherever `mSight`/`checkSightLine()` says,
+which is itself driven entirely by `shape_angle.y`/`mBodyAngle.x`, the
+same two fields `setBodyAngleToCamera()`'s VR branch sets from the real
+right controller's pointing direction (`getControllerAimAngles()`,
+"Controller-pointing item aim" feature earlier in this file). So "tie the
+reticle to the HMD" and "tie actual item-aim direction to the HMD" are
+the same change — there's no way to move just the dot independently of
+where the shot/reticle-driving angle actually points.
+
+**Why this makes sense specifically for Third Person**: controller-
+pointing aim assumes the player is looking through the tracked hand's
+own first-person view (the whole reason it feels natural — you point
+where you're looking). With Third Person on, there's no such view to
+visually anchor pointing to, so aiming with the HMD's actual look
+direction instead is the more natural third-person equivalent.
+
+**Fix**: new `dusk::vr::getHeadAimAngles(s16*, s16*)` (`vr_main.hpp`/
+`.cpp`) — yaw reuses `g_headMoveAngleS` directly (identical formula,
+already computed every frame for movement direction), pitch is a new
+`g_headAimPitchS`, computed from the same `computeHeadWorldForward()`
+vector using the same `atan2s(y, horiz)` shape and the same negation
+`g_controllerAimPitchS` needed after in-headset testing — an untested
+assumption that the sign requirement comes from `mBodyAngle.x`'s own
+convention (what both pitches ultimately feed) rather than from which
+vector produced the y-component; flip this sign first if head-based aim
+pitch reads inverted. `setBodyAngleToCamera()`'s VR branch
+(`d_a_alink_link.inc`) now picks between `getHeadAimAngles()` and
+`getControllerAimAngles()` based on
+`dusk::getSettings().game.vrThirdPerson.getValue()` — ordinary
+first-person VR is completely unaffected, still controller-pointing by
+default.
+
+Built successfully (RelWithDebInfo, full rebuild since `vr_main.hpp`
+changed) — `vr_main.hpp`/`.cpp` (via `vr_main.cpp`), `d_a_alink_link.inc`
+(via `d_a_alink.cpp`) recompiled, clean link, no new warnings.
+
+**CONFIRMED WORKING in-headset** ("That works perfectly") — including
+pitch direction, so the sign guess on `g_headAimPitchS` (same negation
+`g_controllerAimPitchS` needed) landed correctly on the first try, no
+flip needed.
 
 ## Key lesson learned this session
 

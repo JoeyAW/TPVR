@@ -78,17 +78,39 @@ UserSettings g_userSettings = {
         .vrDesktopMirror {"game.vrDesktopMirror", true},
         .vrHideBody {"game.vrHideBody", false},
         .vrThirdPerson {"game.vrThirdPerson", false},
-        // 2.0 confirmed correct on Virtual Desktop 2026-08-16 -- applies to
-        // VD/Meta Link/etc. only, NOT SteamVR (which keeps its own
-        // independently-tuned, decoupled baseline -- see vr_xr_submit.hpp's
-        // effectiveGammaExponent()). Not yet tested on Meta Link itself.
-        .vrGammaCompensation {"game.vrGammaCompensation", 2.0f},
-        // CONFIRMED 2026-08-16: user reported the original 1.0/2.2
-        // (~0.4545) brightening baseline made SteamVR look undersaturated
-        // -- 1.0 (no compensation at all) confirmed correct instead. See
-        // settings.h's comment for the full reasoning (SteamVR's old fix
-        // was tuned to match VD/Meta Link's own brightness, which turned
-        // out to be wrong the whole time).
+        // RESET TO 1.0, 2026-08-20 (was 2.0, confirmed correct on Virtual
+        // Desktop 2026-08-16): that tuning was specific to submitting via
+        // the plain non-SRGB native swapchain format, which
+        // vr_xr_submit.hpp's createSwapchain() no longer prefers for these
+        // runtimes -- see its own comment (OpenXR issue #467 investigation)
+        // for why an SRGB-tagged swapchain is now believed to be the more
+        // correct choice for a spec-faithful compositor like Meta's.
+        // **CONFIRMED CORRECT AT 1.0 ON VIRTUAL DESKTOP, same day** -- user:
+        // "the game looks correct at 100 percent." The SRGB-submission fix
+        // alone was sufficient; no further compensation curve needed.
+        // Meta Link not yet separately tested with this same value -- if
+        // it's ever reported off there, retune via the live "VR Gamma
+        // Compensation" slider rather than assuming 1.0 is automatically
+        // right for every runtime this setting covers. Applies to VD/Meta
+        // Link/etc. only, NOT SteamVR (which keeps its own independently-
+        // tuned, decoupled baseline -- see vr_xr_submit.hpp's
+        // effectiveGammaExponent()/isSteamVr_).
+        .vrGammaCompensation {"game.vrGammaCompensation", 1.0f},
+        // THIRD REVERSAL, 2026-08-20 (same day as the second): briefly set
+        // back to ~0.4545 (1.0/2.2) earlier this session after the user
+        // reconsidered and said the original brightening baseline read
+        // SteamVR's colors correctly all along -- then, immediately after
+        // the same-day createSwapchain() SRGB-preference reorder (see
+        // vr_xr_submit.hpp) and confirming Virtual Desktop looks correct at
+        // 1.0/100% with zero compensation, explicit follow-up: "What's the
+        // steamvr compiled default? It should be 1.0 or 100%, not 45%."
+        // Set to 1.0 (no compensation) per that direct instruction. This
+        // value has now flipped three times in one project (section 6 ->
+        // 2026-08-16 "undersaturated" -> this session's "correct after
+        // all" -> this same-day reversal back to 1.0) -- if it's ever
+        // reported wrong again, get a real side-by-side against the
+        // known-correct desktop mirror before changing it a fourth time,
+        // not another memory-based impression.
         .vrGammaCompensationSteamVr {"game.vrGammaCompensationSteamVr", 1.0f},
 
         // Audio

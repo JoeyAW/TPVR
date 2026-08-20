@@ -621,6 +621,14 @@ bool startup() {
         g_rightHandPath = handActions.rightHandPath;
 
         g_ownedSession = std::make_unique<Session>(boot.instance, boot.systemId, session, localSpace, gfx.device, gfx.commandQueue);
+        // Real "is this SteamVR" signal for Session::effectiveGammaExponent()
+        // -- see isSteamVr_'s own comment (vr_xr_submit.hpp) for why this can
+        // no longer be inferred from which swapchain format ended up chosen.
+        // Substring check, not exact match: sysProps.systemName is a
+        // free-form runtime-supplied string ("SteamVR/OpenXR",
+        // "SteamVR/OpenXR : oculus", etc. across driver versions), not a
+        // stable enum.
+        g_ownedSession->setIsSteamVr(std::strstr(sysProps.systemName, "SteamVR") != nullptr);
         // Registers the encoder task type backing encodeEyeCopy()'s Dawn-side
         // copy (see vr_xr_submit.hpp's Session::registerCpuCopyEncoderTask).
         // Must happen before the first endEye()/encodeEyeCopy() call, which

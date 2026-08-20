@@ -90,18 +90,43 @@ inline int64_t toDxgiSwapchainFormat(wgpu::TextureFormat format) {
 //    layout, requires an actual R/B swap per pixel before upload.
 //  - sRGB-ness (UNORM vs UNORM_SRGB) -- a gamma-interpretation flag that
 //    only affects the raw CopyTextureRegion we do (no shader involved,
-//    so the bytes really do pass through unchanged) -- BUT SteamVR's own
-//    compositor later SAMPLES this swapchain image through its own shaders
-//    (lens/distortion correction, reprojection) using an SRV that respects
-//    the SRGB tag. That auto-decodes our already-gamma/display-encoded
-//    bytes as if they were meant to be linearized, and something later in
-//    its pipeline re-applies gamma on top -- net effect: gamma applied
-//    twice. **CONFIRMED WRONG by testing 2026-07-30**: using the SRGB
-//    variant (91/29) made SteamVR's output visibly oversaturated. Do not
-//    reuse this "byte-identical, should be fine" reasoning again -- prefer
-//    a format with NO sRGB semantics at all (see kPreferR10G10B10A2 below)
-//    over an SRGB variant, even though the SRGB variant is a smaller code
-//    change.
+//    so the bytes really do pass through unchanged) -- BUT the runtime's
+//    own compositor later SAMPLES this swapchain image through its own
+//    shaders (lens/distortion correction, reprojection) using an SRV that
+//    respects the SRGB tag, decoding our stored bytes as sRGB-encoded
+//    before doing its own internal linear-space processing. That's
+//    actually the mathematically correct thing to do PROVIDED the stored
+//    bytes really are ordinary gamma-encoded color (true here -- aurora's
+//    whole rendering chain is confirmed non-linear-workflow, plain 8-bit
+//    "display-ready" output) -- per the OpenXR spec's own documented
+//    ambiguity (github.com/KhronosGroup/OpenXR-SDK-Source issue #467),
+//    different runtimes handle this differently: SteamVR apparently
+//    doesn't do a clean decode-then-recompose round trip (needs its own
+//    residual per-runtime correction, still not fully root-caused -- see
+//    the live "VR Gamma Compensation (SteamVR)" slider), while a
+//    spec-faithful runtime (the issue specifically describes this as
+//    Meta's behavior) should round-trip correctly with little or no
+//    further correction needed.
+//
+//    REVISED 2026-08-20 (see this file's gamma-exponent comments for the
+//    full trail): using the SRGB variant on SteamVR alone, UNCOMPENSATED,
+//    does look oversaturated -- confirmed by testing 2026-07-30 -- but
+//    that's a statement about needing a per-runtime exponent ON TOP of the
+//    SRGB format, not evidence the format choice itself is wrong. A prior
+//    version of this comment concluded the opposite ("prefer a format with
+//    NO sRGB semantics") from that same data point -- superseded now that
+//    real testing across all three runtimes shows Virtual Desktop/Meta
+//    Link (submitted via the plain non-SRGB nativeFormat candidate, zero
+//    gamma semantics, no compositor-side decode at all) were ALSO reported
+//    too bright/washed out -- i.e. the non-SRGB candidates were never
+//    actually correct either; they'd just never been paired with a
+//    live-adjustable exponent the way SteamVR's SRGB path had, so the
+//    error went unnoticed for longer. SRGB submission (paired with the
+//    existing per-runtime live gamma-exponent slider, at 1.0/no-op or a
+//    small correction, whichever real testing confirms) is now PREFERRED
+//    over the plain native format for every runtime that supports it, not
+//    just a SteamVR-forced fallback -- see the reordered candidate list
+//    below.
 // Returns 0 if `format` has no such counterpart (e.g. RGBA16Float, which
 // has neither) -- 0 signals "no fallback on this axis" to the caller
 // rather than silently guessing.
@@ -211,15 +236,37 @@ enum class SwapchainPixelConversion {
 // were ALSO too bright the whole time. So SteamVR was tuned to match a
 // reference that was itself wrong. CONFIRMED FIX: 1.0 (no compensation at
 // all) is correct, not this constant's ~0.4545 brightening curve. This
-// constant is now ONLY the seed value for `Session::steamVrGammaExponent_`
-// (immediately overwritten every real frame from `dusk::getSettings()
-// .game.vrGammaCompensationSteamVr`, whose own compiled default is now
-// 1.0, not this constant) -- kept only as a comment/history anchor and as
-// the field's harmless pre-first-frame initializer, not as the actual
-// runtime value anymore. Do not reintroduce this as the effective
-// SteamVR exponent without new evidence -- see the "Key lesson" this
-// project keeps repeating about not trusting a "previously confirmed"
-// tuning indefinitely.
+// constant is now ONLY the seed value for `Session::steamVrGammaExponent_`,
+// immediately overwritten every real frame from `dusk::getSettings()
+// .game.vrGammaCompensationSteamVr` -- kept only as a comment/history
+// anchor and as the field's harmless pre-first-frame initializer, not as
+// the actual runtime value.
+//
+// REVERSED AGAIN, 2026-08-20: the "1.0 is correct" conclusion immediately
+// above was ITSELF wrong. After the createSwapchain() SRGB-preference
+// change (see its own comment) and reading up on the underlying OpenXR
+// spec ambiguity (github.com/KhronosGroup/OpenXR-SDK-Source issue #467,
+// via an outside modder's tip -- see this file's other 2026-08-20 comments),
+// the user reconsidered and confirmed the ORIGINAL ~0.4545 brightening
+// curve (this constant's own value) was reading SteamVR's colors correctly
+// all along -- the "undersaturated" judgment that led to the 1.0 change
+// was a mistake, not a real regression. The actual problem the whole time,
+// per this same reconsideration, was that Virtual Desktop/Meta Link were
+// too bright (see gammaCompensationMultiplier_'s comment) -- not that
+// SteamVR needed correcting away from this constant.
+// `dusk::getSettings().game.vrGammaCompensationSteamVr`'s compiled default
+// (settings.cpp) briefly matched this constant's value, THEN FLIPPED A
+// THIRD TIME the same day: right after the createSwapchain() SRGB-
+// preference reorder confirmed Virtual Desktop correct at 1.0/100% with
+// zero compensation, explicit follow-up -- "It should be 1.0 or 100%, not
+// 45%." The real compiled default (settings.cpp) is 1.0 again, NOT this
+// constant's ~0.4545 -- this constant is purely a pre-first-frame seed, as
+// its own field comment already says; do not trust it as a proxy for the
+// current real default without checking settings.cpp directly. Three
+// flips in one project on this exact value is a strong argument for real
+// skepticism on any future report about it -- get a direct side-by-side
+// against the desktop mirror (known-correct) rather than a memory-based
+// impression before changing it a fourth time.
 //
 // PERFORMANCE (confirmed 2026-07-30): originally applied via a per-pixel
 // CPU LUT lookup in readbackEyeCopy() -- this measurably halved SteamVR's
@@ -357,17 +404,29 @@ public:
     // TextureUsesUnsupportedFormat" -- i.e. SteamVR over-advertises formats
     // its projection-layer compositor path doesn't really accept, so R10G10B10A2
     // is demoted to last resort here despite being gamma-neutral (see its
-    // own comment). Preference order:
-    //   (1) nativeFormat exactly -- no conversion needed.
-    //   (2) its channel-swapped counterpart -- real R/B swap, but still no
-    //       gamma semantics attached, safe.
-    //   (3) its sRGB-toggled counterpart -- what SteamVR actually needs
-    //       and successfully composites with (confirmed working
-    //       end-to-end 2026-07-30, format 91/B8G8R8A8_UNORM_SRGB); does
-    //       visibly oversaturate colors somewhat (still not fully
-    //       root-caused -- see project notes) but is the only option that
-    //       actually gets a frame in front of the user on this runtime.
-    //   (4) both channel-swapped AND sRGB-toggled.
+    // own comment).
+    //
+    // REORDERED 2026-08-20 to prefer SRGB universally (see the big comment
+    // above this function for the full reasoning): SRGB submission is no
+    // longer treated as a SteamVR-only fallback -- real testing found
+    // Virtual Desktop/Meta Link's previous top choice (plain nativeFormat,
+    // zero gamma semantics) was ALSO producing a too-bright/washed-out
+    // image, just never diagnosed as such because nothing was correcting
+    // for it there the way SteamVR's forced SRGB path already was. New
+    // preference order:
+    //   (1) nativeFormat's sRGB-toggled counterpart -- same channel order,
+    //       correct gamma semantics. What SteamVR was already forced onto
+    //       (confirmed working end-to-end 2026-07-30, format 91/
+    //       B8G8R8A8_UNORM_SRGB); now the first choice for every runtime
+    //       that advertises it, not just SteamVR.
+    //   (2) both channel-swapped AND sRGB-toggled -- same gamma correctness,
+    //       different channel order.
+    //   (3) nativeFormat exactly -- fallback if the runtime doesn't
+    //       advertise an SRGB variant at all; no gamma semantics attached
+    //       (the pre-2026-08-20 behavior for every runtime that reached
+    //       this point, VD/Meta Link included).
+    //   (4) its channel-swapped counterpart -- same as (3), different
+    //       channel order.
     //   (5) DXGI_FORMAT_R10G10B10A2_UNORM -- LAST RESORT: gamma-neutral in
     //       theory, but confirmed to fail at actual frame submission on
     //       SteamVR despite being enumerated as supported. Kept as a final
@@ -386,10 +445,10 @@ public:
 
         struct Candidate { int64_t format; SwapchainPixelConversion conversion; };
         const Candidate candidates[] = {
-            {nativeFormat, SwapchainPixelConversion::None},
-            {channelSwapped, SwapchainPixelConversion::ChannelSwap},
             {srgbToggled, SwapchainPixelConversion::None},
             {bothSwapped, SwapchainPixelConversion::ChannelSwap},
+            {nativeFormat, SwapchainPixelConversion::None},
+            {channelSwapped, SwapchainPixelConversion::ChannelSwap},
             {DXGI_FORMAT_R10G10B10A2_UNORM, SwapchainPixelConversion::PackR10G10B10A2},
         };
 
@@ -1037,12 +1096,26 @@ private:
     // must do to the pixel data per-pixel while uploading to match.
     int64_t swapchainDxgiFormat_ = 0;
     SwapchainPixelConversion swapchainPixelConversion_ = SwapchainPixelConversion::None;
-    // True when chosenFormat is B8G8R8A8_UNORM_SRGB/R8G8B8A8_UNORM_SRGB --
-    // used only to pick effectiveGammaExponent()'s per-runtime baseline
-    // (kSteamVrGammaCompensationExponent vs. 1.0) now that the compute pass
-    // itself runs for every runtime -- see useGammaComputePath_ below for
-    // the flag that actually gates the compute-vs-plain-copy choice.
+    // True when chosenFormat is B8G8R8A8_UNORM_SRGB/R8G8B8A8_UNORM_SRGB.
+    // Informational only as of 2026-08-20 -- previously doubled as the
+    // signal for "is this SteamVR" in effectiveGammaExponent(), which broke
+    // once createSwapchain() started preferring SRGB for every runtime, not
+    // just SteamVR (see isSteamVr_ below for the real replacement).
     bool swapchainIsSrgb_ = false;
+
+    // Set once at startup (vr_main.cpp's startup(), right after
+    // xrGetSystemProperties()) from a substring check on the real runtime
+    // name -- the actual "is this SteamVR" signal effectiveGammaExponent()
+    // needs. Added 2026-08-20: swapchainIsSrgb_ used to double for this,
+    // which was correct back when SteamVR was the ONLY runtime that ever
+    // chose an SRGB format (forced, since its compositor rejects the plain
+    // native format for real submission) -- but createSwapchain() now
+    // prefers SRGB universally (see its own comment), so Virtual Desktop/
+    // Meta Link can also end up with swapchainIsSrgb_==true, and routing
+    // them through steamVrGammaExponent_ in that case would be wrong --
+    // they need their own independent gammaCompensationMultiplier_, same as
+    // before, regardless of which format ended up chosen.
+    bool isSteamVr_ = false;
 
     // True for every format the GPU gamma-compensation compute pass can
     // handle -- i.e. everything except the rare PackR10G10B10A2 last-resort
@@ -1070,22 +1143,48 @@ private:
     // there's no genuine concurrent-write hazard, just the same informal
     // single-word-read/write pattern this codebase already relies on
     // elsewhere for per-frame settings reads.
+    //
+    // COMPILED DEFAULT RESET TO 1.0, 2026-08-20 (settings.cpp): the
+    // previously-confirmed `2.0` was tuned specifically for the OLD
+    // scenario where Virtual Desktop/Meta Link submitted via the plain
+    // non-SRGB nativeFormat (a raw, untouched passthrough that the runtime
+    // then apparently treated as needing its OWN gamma-encode for display
+    // -- see createSwapchain()'s big comment for the OpenXR-issue-#467
+    // reasoning). Now that those runtimes prefer an SRGB-tagged swapchain
+    // instead (correctly signaling "this content is already gamma-encoded"
+    // to a spec-faithful compositor), `2.0` is very likely no longer the
+    // right correction -- possibly close to 1.0/no-op if the runtime's own
+    // decode is now accurate, per the OpenXR issue's description of Meta's
+    // behavior specifically. Reset to 1.0 as the new starting point;
+    // NOT yet re-tested in-headset on either runtime with the new SRGB
+    // submission -- retune via the live slider from real feedback, same as
+    // every other constant in this file, rather than assuming 1.0 is
+    // already right.
     float gammaCompensationMultiplier_ = 1.0f;
 
     // Live-adjustable exponent for SteamVR specifically -- added 2026-08-16
     // after the user reported SteamVR looked UNDERSATURATED with the old
-    // compiled kSteamVrGammaCompensationExponent baseline. That baseline
-    // was tuned back in section 6 by comparing SteamVR's own appearance
-    // against VD/Meta Link's -- but THIS session's "too bright"
-    // investigation started because VD/Meta Link were ALSO reported too
-    // bright, meaning the thing SteamVR was tuned to visually MATCH was
-    // itself wrong. **CONFIRMED same day**: 1.0 (no compensation at all)
-    // is correct, not the old ~0.4545 brightening curve -- see the
-    // kSteamVrGammaCompensationExponent comment's "CORRECTED, SAME DAY"
-    // note above for the full trail. The compiled default here
-    // (kSteamVrGammaCompensationExponent) is now only a harmless pre-
-    // first-frame seed -- the real value comes from `dusk::getSettings()
-    // .game.vrGammaCompensationSteamVr`, whose own default is 1.0.
+    // compiled kSteamVrGammaCompensationExponent baseline, which was itself
+    // tuned back in section 6 by comparing SteamVR's own appearance against
+    // VD/Meta Link's. That "UNDERSATURATED" report led to a same-day
+    // "CORRECTED" pass setting the default to 1.0 (no compensation) --
+    // **REVERSED 2026-08-20**, then **REVERSED AGAIN THE SAME DAY**: after
+    // the createSwapchain() SRGB-preference change (see its own comment)
+    // and the OpenXR-issue-#467 investigation that motivated it, the user
+    // first reconsidered and said the ORIGINAL ~0.4545 brightening curve
+    // was correct for SteamVR all along -- but then, right after that same
+    // SRGB-preference reorder also confirmed Virtual Desktop correct at
+    // 1.0/100% with zero compensation, explicit follow-up: "It should be
+    // 1.0 or 100%, not 45%." The compiled default here
+    // (kSteamVrGammaCompensationExponent) is only a harmless pre-first-
+    // frame seed regardless of its own value -- the REAL value comes from
+    // `dusk::getSettings().game.vrGammaCompensationSteamVr`, whose compiled
+    // default (settings.cpp) is 1.0 again, THIRD flip in one project on
+    // this exact value. Do not change it a fourth time without a real
+    // side-by-side against the known-correct desktop mirror, not another
+    // memory-based impression -- this project has already hit "don't trust
+    // a previously-confirmed tuning indefinitely" more than once in this
+    // exact file.
     float steamVrGammaExponent_ = kSteamVrGammaCompensationExponent;
 
 public:
@@ -1096,6 +1195,11 @@ public:
     void setSteamVrGammaCompensationExponent(float exponent) {
         steamVrGammaExponent_ = exponent;
     }
+
+    // Called once at startup (vr_main.cpp) from a substring check on
+    // XrSystemProperties::systemName -- see isSteamVr_'s own comment for
+    // why this can no longer be inferred from the chosen swapchain format.
+    void setIsSteamVr(bool isSteamVr) { isSteamVr_ = isSteamVr; }
 
 private:
     // The actual gammaExponent fed to kGammaComputeShaderSource's Params
@@ -1110,15 +1214,23 @@ private:
     // have pushed it to ~0.909 -- nearly cancelling a correction that was
     // independently confirmed correct back in section 6, on pure
     // untested speculation that the same multiplier applies there too.
-    // So SteamVR was decoupled from this slider entirely -- but SteamVR's
-    // own baseline turned out to need retuning anyway (user report:
-    // "steamvr is undersaturated now" -- see steamVrGammaExponent_'s own
-    // comment for why), so it now gets its own INDEPENDENT live-adjustable
-    // exponent instead of the original hardcoded constant. The two sliders
-    // are deliberately still fully decoupled from each other -- adjusting
-    // one must never move the other.
+    // So SteamVR was decoupled from this slider entirely, getting its own
+    // INDEPENDENT live-adjustable exponent instead of the original
+    // hardcoded constant. The two sliders are deliberately still fully
+    // decoupled from each other -- adjusting one must never move the
+    // other.
+    //
+    // CHANGED 2026-08-20: branches on isSteamVr_ (the real runtime
+    // identity) instead of swapchainIsSrgb_ (which format got chosen).
+    // Those two used to be equivalent -- SteamVR was the only runtime that
+    // ever ended up with an SRGB swapchain -- but createSwapchain() now
+    // prefers SRGB for every runtime that supports it (see its own
+    // comment), so Virtual Desktop/Meta Link can also have
+    // swapchainIsSrgb_==true. Branching on the stale signal would have
+    // silently routed them through SteamVR's own exponent instead of their
+    // own.
     float effectiveGammaExponent() const {
-        if (swapchainIsSrgb_) {
+        if (isSteamVr_) {
             return steamVrGammaExponent_;
         }
         return gammaCompensationMultiplier_;

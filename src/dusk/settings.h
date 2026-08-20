@@ -244,8 +244,14 @@ struct UserSettings {
         // existing SteamVR-only compensation couldn't be the whole story.
         // Live-adjustable via the Debug > Graphics Settings ImGui slider
         // (ImGuiMenuTools.cpp) so it can be dialed in per-headset without a
-        // rebuild each guess. 2.0 confirmed correct on Virtual Desktop;
-        // not yet tested on Meta Link.
+        // rebuild each guess. 2.0 was confirmed correct on Virtual Desktop
+        // 2026-08-16, but RESET to 1.0 as of 2026-08-20 -- that tuning was
+        // specific to submitting via the plain non-SRGB swapchain format,
+        // which vr_xr_submit.hpp's createSwapchain() no longer prefers for
+        // these runtimes (see its own comment for the OpenXR-issue-#467
+        // reasoning behind now preferring an SRGB-tagged swapchain
+        // universally). NOT yet re-tested in-headset against that change on
+        // either VD or Meta Link.
         ConfigVar<float> vrGammaCompensation;
         // Live-adjustable VR gamma-compensation exponent for SteamVR
         // specifically, decoupled from vrGammaCompensation above (see its
@@ -253,13 +259,17 @@ struct UserSettings {
         // structurally different correction than VD/Meta Link's zero-
         // baseline case, so the two must stay independently tunable.
         // Originally defaulted to the section-6 tuned brightening value
-        // (~0.4545 = 1.0/2.2), tuned back then by matching SteamVR's
-        // appearance to VD/Meta Link's -- but VD/Meta Link turned out to
-        // ALSO be too bright the whole time (this whole investigation's
-        // premise), so that reference was itself wrong. CONFIRMED
-        // 2026-08-16: 1.0 (no compensation at all) is correct instead --
-        // the old brightening curve was actively making SteamVR look
-        // undersaturated.
+        // (~0.4545 = 1.0/2.2). A 2026-08-16 report ("undersaturated")
+        // flipped the default to 1.0 (no compensation); a same-day-later
+        // reconsideration flipped it back to ~0.4545; then, immediately
+        // after that same day's createSwapchain() SRGB-preference reorder
+        // (vr_xr_submit.hpp) confirmed Virtual Desktop correct at 1.0/100%
+        // with zero compensation, explicit follow-up: "It should be 1.0 or
+        // 100%, not 45%." Back to 1.0 (no compensation) as the compiled
+        // default -- THIRD flip on this exact value in one project. Treat
+        // any future report about it with real skepticism (a direct
+        // side-by-side against the known-correct desktop mirror, not a
+        // memory-based impression) before changing it a fourth time.
         ConfigVar<float> vrGammaCompensationSteamVr;
 
         // Audio

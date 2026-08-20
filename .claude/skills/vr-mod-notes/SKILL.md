@@ -9935,6 +9935,161 @@ retune from real reports the same way every other constant in this
 section did, rather than assuming they're already correct for a different
 symptom.
 
+### World-space aim-point marker — distance-scaled radius so it stays visible at range — CONFIRMED WORKING 2026-08-19
+
+**Follow-up to the original aim-crosshair feature** (section above, "World-
+space aim-point marker"). User: "make the red aiming reticle... get bigger
+as it gets further from the camera, that way it stays visible." The dot
+had a flat 8-unit world-space radius regardless of range (`drawAimCrosshair()`,
+`vr_stereo_render.hpp`) — fine up close, but this game's ranged items
+(bow/slingshot/hookshot/boomerang) can aim hundreds of units out, where a
+fixed-world-size dot subtends a shrinking, eventually near-invisible angle
+on screen.
+
+**Fix**: `kMinRadiusUnits` (renamed from `kRadiusUnits`) is now a floor,
+not the constant size — `radius = max(kMinRadiusUnits, distance *
+kAngularSizeRatio)`, where `distance` is `-eyeSpacePos.z` (already computed
+for the eye-space transform, no extra work needed) and
+`kAngularSizeRatio = 0.02` (untested guess — roughly a 2.3-degree full
+apparent width once distance exceeds ~400 units, comparable to an ordinary
+crosshair). Below that distance the dot stays exactly its original,
+already-confirmed-correct 8-unit size; beyond it, radius grows
+proportionally to hold a roughly constant apparent size instead of
+shrinking away.
+
+Built successfully (RelWithDebInfo) — only `vr_main.cpp` (transitively
+includes the header) recompiled, clean link, no new warnings.
+
+**CONFIRMED WORKING** — user: "awesome." `kAngularSizeRatio` is the one
+constant to retune if it's ever reported still too small at long range
+(raise) or distractingly large (lower) — untested guess, not derived from
+anything.
+
+### VR gamma — swapchain format preference reordered to prefer SRGB universally, per an outside modder's tip + OpenXR spec research — CONFIRMED WORKING ON VIRTUAL DESKTOP AT 1.0/100% 2026-08-20 (SteamVR default also settled at 1.0 same day, after two more flips; Meta Link not separately tested yet)
+
+**Trigger**: an outside modder who previously worked on a TP VR mod shared
+that they'd fixed a washed-out/gamma issue by forcing a LINEAR (UNORM)
+texture interpretation for the OpenXR swapchain, citing
+`github.com/KhronosGroup/OpenXR-SDK-Source` issue #467 and a commit in
+their own `aurora` fork (`s-ilent/aurora`, commit `5095020`).
+
+**Investigated before touching anything** (per this project's own standing
+practice): fetched and read the actual commit rather than take the tip at
+face value. Their fix is real but architecturally specific to their fork —
+they built native OpenXR support directly into `aurora` (`lib/xr/xr.cpp`),
+rendering each eye via a real GPU render pass that writes DIRECTLY into a
+view of the OpenXR swapchain image. Their bug: writing ordinary
+gamma-encoded shader output into a render target tagged SRGB triggers an
+automatic hardware linear→sRGB *encode* on every write (standard GPU
+semantics for SRGB attachments) — a genuine double-gamma baked into every
+frame. Their fix forces that write-side view to UNORM.
+
+**Confirmed this project's OWN pipeline doesn't have that specific bug**:
+traced the whole chain — aurora's own surface/render format negotiation
+explicitly strips SRGB (`to_linear()`, `extern/aurora/lib/webgpu/gpu.cpp`),
+so the eye is always rendered into a non-SRGB offscreen target; the GPU
+gamma-compensation compute pass reads it via `textureLoad` (bypasses any
+sampler-driven transform); and the final `CopyTextureRegion` into the
+actual XR swapchain image is a raw byte copy (already documented in this
+file as such, and correct per D3D12/DXGI semantics — UNORM/SRGB format
+pairs are byte-identical, only shader reads/writes are affected). So this
+project never had the specific write-time bug the modder's commit targets
+— the fix doesn't transfer directly.
+
+**But the underlying OpenXR-spec-ambiguity DOES apply, at a different
+layer**: fetched and read the actual GitHub issue too. Confirmed root
+cause: `xrEnumerateSwapchainFormats`'s SRGB declaration is genuinely
+ambiguous across runtimes — Meta's compositors always decode-then-
+recompose treating the format tag as an honest signal (a spec-faithful
+round trip, correct for content that really is gamma-encoded, which ours
+is), while Valve/SteamVR's interpretation is murkier (matches this
+project's own multi-round empirical-exponent struggle on SteamVR — see
+the "too bright" section above). Since VD/Meta Link's swapchain format
+candidate order always let them win on the PLAIN non-SRGB native format
+(their very first, always-available candidate), they never got the
+"declare SRGB" signal to their compositor at all — plausible direct
+explanation for why they, too, were reported too bright in the original
+"too bright" investigation.
+
+**User's own real-world correction, which reframed the whole prior
+investigation**: after this research, the user reconsidered and reported
+SteamVR's ORIGINAL brightening exponent (~0.4545, from section 6) was
+actually reading colors correctly the whole time — the 2026-08-16
+"undersaturated" judgment that flipped it to 1.0 was a mistake — and that
+Virtual Desktop/Meta Link were the ones genuinely wrong from the start,
+not "wrong because compared against an already-wrong SteamVR reference"
+as the 2026-08-16 investigation had concluded.
+
+**Fix, three parts**:
+1. `vr_xr_submit.hpp`'s `createSwapchain()`: candidate preference order
+   changed from `[native, channelSwapped, srgbToggled, bothSwapped,
+   R10G10B10A2]` to `[srgbToggled, bothSwapped, native, channelSwapped,
+   R10G10B10A2]` — SRGB is now preferred universally (paired with each
+   runtime's own live gamma-exponent slider), not a SteamVR-only fallback.
+   Safe by construction for runtimes that DON'T support the SRGB variant —
+   they simply fall through to the same candidates as before, in the same
+   relative order among themselves.
+2. New `Session::isSteamVr_` (`vr_xr_submit.hpp`), set once at startup
+   (`vr_main.cpp`'s `startup()`) via a substring check on
+   `XrSystemProperties::systemName` — the real "is this SteamVR" signal
+   `effectiveGammaExponent()` needs now that `swapchainIsSrgb_` (which
+   format got chosen) is no longer synonymous with "is SteamVR" (VD/Meta
+   Link can now also land on an SRGB format). `swapchainIsSrgb_` itself is
+   left in place, informational only.
+3. Settings defaults (`settings.cpp`/`settings.h`):
+   `vrGammaCompensationSteamVr` reverted to `1.0f/2.2f` (~0.4545, the
+   ORIGINAL section-6 value); `vrGammaCompensation` (VD/Meta Link) reset to
+   `1.0f` (a fresh starting point — the previous `2.0` was tuned
+   specifically for the old raw-non-SRGB-passthrough scenario, no longer
+   applicable now that these runtimes will also submit via SRGB).
+
+Built successfully (RelWithDebInfo, full rebuild since `settings.h` is
+widely included — 1200/1200 objects, no errors, no new warnings).
+
+**CONFIRMED WORKING on Virtual Desktop, same day** — user: "the game looks
+correct at 100 percent in virtual desktop, that needs to be the default."
+1.0 was already the compiled default (set in this same round), so no code
+change was needed — just confirmed and the stale "not yet tested" comments
+in `settings.cpp`/`settings.h` updated to reflect it. The hypothesis (SRGB
+submission alone was the actual missing piece, not just needing yet
+another exponent guess) holds: no compensation curve at all is needed on
+VD once the format itself is correct.
+
+**NOT yet separately tested on Meta Link** — sharing the same
+`vrGammaCompensation` setting/default as VD, so plausibly also correct at
+1.0, but this hasn't been independently confirmed there. If it's ever
+reported off on Meta Link specifically, retune via the live slider rather
+than assuming VD's result transfers automatically.
+
+**SteamVR default flipped a THIRD time, same day, immediately after the
+above**: explicit follow-up — "What's the steamvr compiled default? It
+should be 1.0 or 100%, not 45%." (It had briefly been reverted to ~0.4545
+earlier this same session per the user's own prior "SteamVR was correct
+the first time" reconsideration — see the section above.) Set back to 1.0
+(`settings.cpp`'s `vrGammaCompensationSteamVr` default, plus matching
+comment updates in `settings.h` and `vr_xr_submit.hpp`'s
+`kSteamVrGammaCompensationExponent`/`steamVrGammaExponent_` comments).
+Built successfully (RelWithDebInfo), clean link, no new warnings. **This
+value has now flipped three times in one project session-chain**
+(section 6 → 2026-08-16 "undersaturated" → this session's "correct after
+all" → this same-day final reversal to 1.0) — before ever changing it a
+fourth time, get a real side-by-side against the known-correct desktop
+mirror, not another memory-based impression. Not independently re-tested
+in-headset at 1.0 after this specific change (SteamVR's candidate-order
+behavior itself was never touched by the SRGB-preference reorder — it
+already always landed on the SRGB candidate — so this is purely the
+compensation-exponent default changing, same mechanism already proven to
+work via the live slider).
+
+**Third reversal warning, worth internalizing**: `kSteamVrGammaCompensationExponent`/
+`vrGammaCompensationSteamVr` has now flipped between "confirmed correct"
+and "confirmed wrong" TWICE (section 6 → 2026-08-16 "undersaturated" →
+2026-08-20 reconsideration) based on visual judgment calls made from
+memory rather than a direct, controlled comparison. Before changing this
+value a third time, get a real side-by-side against the desktop mirror
+(already established as color-accurate, since it bypasses the whole XR
+submission path) rather than trusting an impression alone.
+
 ## Key lesson learned this session
 
 Don't infer that an uncommitted fix supersedes a nearby disable guard just

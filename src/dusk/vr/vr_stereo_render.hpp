@@ -1197,16 +1197,36 @@ inline void drawAimCrosshair(const cXyz& worldPos) {
     GXSetAlphaCompare(GX_ALWAYS, 0, GX_AOP_OR, GX_ALWAYS, 0);
 
     constexpr int kSegments = 16;
-    constexpr float kRadiusUnits = 8.0f;  // ~8cm at this project's ~100 units/metre scale
+    constexpr float kMinRadiusUnits = 8.0f;  // ~8cm at this project's ~100 units/metre scale -- the original fixed size, already confirmed correct at typical/close aim range; now a FLOOR, not the constant size
     constexpr GXColor kGlowColor = {235, 30, 30, 220};  // red, near-opaque center
+
+    // Distance-scaled radius (2026-08-19 follow-up request: "make the red
+    // aiming reticle... get bigger as it gets further from the camera, that
+    // way it stays visible"). A fixed world-space radius subtends a
+    // shrinking angle on screen as range increases -- fine up close, but
+    // this game's ranged items (bow/slingshot/hookshot/boomerang) can aim
+    // at targets hundreds of units out, where a flat 8-unit dot becomes
+    // imperceptibly small. Scaling the radius proportionally to distance
+    // instead holds a roughly CONSTANT apparent angular size beyond
+    // kMinRadiusUnits's own close-range floor -- eyeSpacePos.z is already
+    // the (negative, camera-forward-is--Z) distance from this eye, no extra
+    // transform needed. kAngularSizeRatio is an untested guess (radius =
+    // distance * ratio once that exceeds the floor; ratio 0.02 -> roughly
+    // atan(0.02) ~= 1.15 degrees half-angle, ~2.3 degrees full width,
+    // comparable to an ordinary crosshair/reticle's visual size) -- retune
+    // if it still reads as too small far away (raise) or grows distractingly
+    // large at long range (lower).
+    constexpr float kAngularSizeRatio = 0.02f;
+    const float distance = -eyeSpacePos.z;
+    const float radius = std::max(kMinRadiusUnits, distance * kAngularSizeRatio);
 
     GXBegin(GX_TRIANGLEFAN, GX_VTXFMT0, kSegments + 2);
     GXPosition3f32(eyeSpacePos.x, eyeSpacePos.y, eyeSpacePos.z);
     GXColor4u8(kGlowColor.r, kGlowColor.g, kGlowColor.b, kGlowColor.a);
     for (int i = 0; i <= kSegments; ++i) {
         const float t = (2.0f * static_cast<float>(M_PI) * static_cast<float>(i)) / static_cast<float>(kSegments);
-        const float dx = kRadiusUnits * std::cos(t);
-        const float dy = kRadiusUnits * std::sin(t);
+        const float dx = radius * std::cos(t);
+        const float dy = radius * std::sin(t);
         GXPosition3f32(eyeSpacePos.x + dx, eyeSpacePos.y + dy, eyeSpacePos.z);
         GXColor4u8(kGlowColor.r, kGlowColor.g, kGlowColor.b, 0);  // transparent edge
     }

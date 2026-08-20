@@ -84,18 +84,25 @@ namespace dusk {
                 // EXCEPT SteamVR, which keeps its own separate, already-
                 // tuned exponent untouched (vr_xr_submit.hpp's
                 // effectiveGammaExponent()). >1.0 darkens further, <1.0
-                // brightens. 2.0 confirmed correct on Virtual Desktop.
+                // brightens. RESET to 1.0 default 2026-08-20 -- the earlier
+                // "2.0 confirmed correct on VD" tuning was specific to a
+                // swapchain-format choice that's since changed (see
+                // settings.h's comment); not yet re-tested against the new
+                // format.
                 dusk::config::ImGuiSliderFloat("VR Gamma Compensation",
                     getSettings().game.vrGammaCompensation, 0.3f, 3.0f, "%.3f");
                 // Independent SteamVR-only slider (2026-08-16 follow-up) --
                 // see settings.h's vrGammaCompensationSteamVr comment for
                 // why SteamVR can't share the slider above. Range covers
                 // both directions already tested historically: 1.0/2.2
-                // (~0.4545, the original brightening fix -- since found to
-                // undersaturate) up through 2.2 (darkening, previously
-                // found "too dark"). CONFIRMED 2026-08-16: 1.0 (no
-                // compensation at all, now the default) is what actually
-                // looks correct.
+                // (~0.4545, the original brightening fix, and per
+                // 2026-08-20's reconsideration the CORRECT default again)
+                // up through 2.2 (darkening, previously found "too dark").
+                // The 1.0 "no compensation" value in between was briefly
+                // believed correct (2026-08-16) but that judgment was later
+                // reversed -- see settings.h's comment for the full
+                // back-and-forth before trusting any single report about
+                // this slider again.
                 dusk::config::ImGuiSliderFloat("VR Gamma Compensation (SteamVR)",
                     getSettings().game.vrGammaCompensationSteamVr, 0.3f, 2.2f, "%.3f");
                 ImGui::EndMenu();

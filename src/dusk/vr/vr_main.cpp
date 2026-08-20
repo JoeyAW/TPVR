@@ -1508,39 +1508,47 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     }
 
     // Scripted-camera facing assist (2026-08-19 request, Third Person VR
-    // setting only, REDESIGNED same day after two rejected attempts -- see
-    // snapScriptedCameraYaw()'s own comment (vr_smooth_turn.hpp) for the
-    // full history/reasoning). Detects a JUMP CUT -- the flatscreen
-    // camera's own facing direction changing by a large amount within a
-    // single frame (a cutscene shot change, or Z-target's camera snapping
-    // in behind Link the instant lock-on engages) -- as opposed to smooth
-    // camera movement (Z-target's continuous orbit as Link/the target
-    // move), which is left completely alone. Only on an actual cut does
-    // this instantly snap g_smoothTurnYawRad to match; the rest of the
-    // time, free-look is untouched. Deliberately scoped to Third Person
-    // mode only (plain first-person VR already anchors the camera to
-    // Link's own head/core, where this wouldn't make sense) and computed
-    // BEFORE the g_headMoveAngleS block right below, so movement direction
-    // stays in sync with whatever yaw this converges to this same frame
-    // rather than reading a one-frame-stale value.
+    // setting only). Two independent mechanisms, split same day per an
+    // explicit follow-up request to treat Z-targeting differently from
+    // cutscenes -- see each block's own comment for why. Both deliberately
+    // scoped to Third Person mode only (plain first-person VR already
+    // anchors the camera to Link's own head/core, where this wouldn't make
+    // sense) and computed BEFORE the g_headMoveAngleS block right below, so
+    // movement direction stays in sync with whatever yaw either one
+    // converges to this same frame rather than reading a one-frame-stale
+    // value.
+
+    // --- Cutscenes: jump-cut detection only ---
+    //
+    // REDESIGNED 2026-08-19 after two rejected continuous-pull attempts --
+    // see snapScriptedCameraYaw()'s own comment (vr_smooth_turn.hpp) for
+    // that history. Detects a JUMP CUT -- the flatscreen camera's own
+    // facing direction changing by a large amount within a single frame
+    // (a cutscene shot change) -- and instantly snaps g_smoothTurnYawRad to
+    // match only then; the rest of the time (including during a real
+    // cutscene between cuts), free-look is completely untouched.
+    //
+    // Z-targeting used to share this same jump-cut path (its initial
+    // engage snap is itself a jump), but was split out into its own block
+    // below per explicit follow-up request: unlike a cutscene, the Z-target
+    // camera's swing INTO its resting position behind Link is a smooth,
+    // continuous transition (never a single-frame jump), so jump-cut
+    // detection alone never tracked that swing -- only the very first
+    // instant of it.
     {
         // Persists across frames/activations -- deliberately NOT reset on
         // a false->true transition, since the "just activated" branch below
         // never reads it (only writes it fresh for the next frame's
         // comparison), and the "still active" branch's very first read
         // after a fresh activation is guarded by that same branch split.
-        static s16 s_scriptedCameraLastTargetYawS = 0;
-        static bool s_scriptedCameraWasActive = false;
+        static s16 s_cutsceneJumpCutLastTargetYawS = 0;
+        static bool s_cutsceneJumpCutWasActive = false;
 
-        bool scriptedCameraActive = false;
-        if (dusk::getSettings().game.vrThirdPerson.getValue()) {
-            if (auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer())) {
-                scriptedCameraActive =
-                    link->checkAttentionLock() || dusk::vr::isRealCutsceneRunning();
-            }
-        }
+        const bool cutsceneActive =
+            dusk::getSettings().game.vrThirdPerson.getValue() &&
+            dusk::vr::isRealCutsceneRunning();
 
-        if (scriptedCameraActive) {
+        if (cutsceneActive) {
             if (view_class* view = dComIfGd_getView()) {
                 const float dx = view->lookat.center.x - view->lookat.eye.x;
                 const float dz = view->lookat.center.z - view->lookat.eye.z;
@@ -1554,9 +1562,9 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
                     // gap automatically (standard BAMS convention, same
                     // trick this engine's own angle-delta code relies on
                     // elsewhere).
-                    const bool isCut = !s_scriptedCameraWasActive ||
+                    const bool isCut = !s_cutsceneJumpCutWasActive ||
                         std::abs(cM_s2rad(static_cast<s16>(
-                            targetYawS - s_scriptedCameraLastTargetYawS))) >=
+                            targetYawS - s_cutsceneJumpCutLastTargetYawS))) >=
                             cM_s2rad(cM_deg2s(dusk::vr::kScriptedCameraJumpCutThresholdDeg));
 
                     if (isCut) {
@@ -1568,12 +1576,117 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
                         dusk::vr::snapScriptedCameraYaw(cM_s2rad(gapS));
                     }
 
-                    s_scriptedCameraLastTargetYawS = targetYawS;
+                    s_cutsceneJumpCutLastTargetYawS = targetYawS;
                 }
             }
         }
 
-        s_scriptedCameraWasActive = scriptedCameraActive;
+        s_cutsceneJumpCutWasActive = cutsceneActive;
+    }
+
+    // --- Z-targeting: track the swing-in, then release to free-look ---
+    //
+    // Explicit follow-up request: "z targeting always makes the camera face
+    // the right way, until it is centered behind link. Once it is behind
+    // Link you should be able to look around, even while targeting. But
+    // the initial camera movement should face him." Unlike the cutscene
+    // block above, this fully snaps g_smoothTurnYawRad to match the
+    // flatscreen Z-target camera EVERY FRAME while that camera is still
+    // visibly swinging into position -- not just once. This is safe/
+    // correct specifically because the source being copied (the flatscreen
+    // camera's own already-smooth swing-in animation) is itself smooth, so
+    // mirroring it frame-by-frame reads as smooth tracking rather than the
+    // earlier rejected continuous-pull design's jitter/fight (that design's
+    // problem was fighting the PLAYER's own head input every frame, not
+    // tracking a smooth source -- this only ever runs during the brief,
+    // one-time swing-in, not for the whole duration of the hold).
+    //
+    // "Settled" (swing-in finished, hand control back to the player) is
+    // detected via TWO independent signals, same "real settle + a bounded
+    // fallback" shape this codebase already uses for the core-anchor
+    // calibration (vr_link_visibility.hpp's computeRawCoreAnchoredEye()):
+    // several consecutive frames where the camera's own per-frame movement
+    // has dropped below a small threshold (it's actually stopped moving),
+    // OR a generous max duration elapses regardless (so ongoing camera
+    // micro-adjustments from the player continuing to move while locked on
+    // -- a normal, expected thing, not part of the initial swing -- can't
+    // indefinitely withhold free-look). Once settled, this state machine
+    // does nothing for the REST of that Z-target hold, even if the
+    // flatscreen camera keeps adjusting afterward (e.g. circling the
+    // target) -- exactly the "once it is behind Link... even while
+    // targeting" free-look guarantee that was asked for. Releasing and
+    // re-engaging Z-target resets back to the tracking phase.
+    {
+        enum class ZTargetTrack : u8 { Idle, Tracking, Settled };
+        static ZTargetTrack s_zTargetTrackState = ZTargetTrack::Idle;
+        static s16 s_zTargetLastTargetYawS = 0;
+        static int s_zTargetSettleStreak = 0;
+        static float s_zTargetTrackElapsedSec = 0.f;
+
+        bool zTargetActive = false;
+        if (dusk::getSettings().game.vrThirdPerson.getValue()) {
+            if (auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer())) {
+                zTargetActive = link->checkAttentionLock();
+            }
+        }
+
+        if (!zTargetActive) {
+            s_zTargetTrackState = ZTargetTrack::Idle;
+            s_zTargetSettleStreak = 0;
+            s_zTargetTrackElapsedSec = 0.f;
+        } else if (view_class* view = dComIfGd_getView()) {
+            const float dx = view->lookat.center.x - view->lookat.eye.x;
+            const float dz = view->lookat.center.z - view->lookat.eye.z;
+            if (std::abs(dx) > 0.0001f || std::abs(dz) > 0.0001f) {
+                const s16 targetYawS = cM_atan2s(dx, dz);
+
+                if (s_zTargetTrackState == ZTargetTrack::Idle) {
+                    // Just engaged this frame -- start tracking and snap
+                    // immediately (no valid "last frame" delta to compare
+                    // against yet, and the player's view was very likely
+                    // facing nothing like the target direction the moment
+                    // before this).
+                    s_zTargetTrackState = ZTargetTrack::Tracking;
+                    s_zTargetSettleStreak = 0;
+                    s_zTargetTrackElapsedSec = 0.f;
+                    const cXyz currentHeadForward = vr_render::computeHeadWorldForward(
+                        hmdPose, dusk::vr::getSmoothTurnYawRad());
+                    const s16 currentYawS =
+                        cM_atan2s(currentHeadForward.x, currentHeadForward.z);
+                    dusk::vr::snapScriptedCameraYaw(
+                        cM_s2rad(static_cast<s16>(targetYawS - currentYawS)));
+                } else if (s_zTargetTrackState == ZTargetTrack::Tracking) {
+                    s_zTargetTrackElapsedSec += pacing.presentation_dt_seconds;
+
+                    const float deltaDeg = std::abs(cM_s2rad(static_cast<s16>(
+                        targetYawS - s_zTargetLastTargetYawS))) * (180.f / 3.14159265358979323846f);
+                    if (deltaDeg < dusk::vr::kZTargetCameraSettleThresholdDeg) {
+                        ++s_zTargetSettleStreak;
+                    } else {
+                        s_zTargetSettleStreak = 0;
+                    }
+
+                    const bool settled =
+                        s_zTargetSettleStreak >= dusk::vr::kZTargetCameraSettleRequiredConsecutiveFrames ||
+                        s_zTargetTrackElapsedSec >= dusk::vr::kZTargetCameraTrackMaxDurationSec;
+
+                    if (settled) {
+                        s_zTargetTrackState = ZTargetTrack::Settled;
+                    } else {
+                        const cXyz currentHeadForward = vr_render::computeHeadWorldForward(
+                            hmdPose, dusk::vr::getSmoothTurnYawRad());
+                        const s16 currentYawS =
+                            cM_atan2s(currentHeadForward.x, currentHeadForward.z);
+                        dusk::vr::snapScriptedCameraYaw(
+                            cM_s2rad(static_cast<s16>(targetYawS - currentYawS)));
+                    }
+                }
+                // ZTargetTrack::Settled -- do nothing; full free-look for
+                // the rest of this Z-target hold.
+
+                s_zTargetLastTargetYawS = targetYawS;
+            }
+        }
     }
 
     // See g_headMoveAngleS's declaration comment for the bug this fixes.

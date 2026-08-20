@@ -138,10 +138,26 @@ inline void updateSmoothTurn(float rightStickX, float dtSeconds) {
 // increases that same cM_atan2s(x, z)-style angle by the same amount (1:1,
 // same sign) -- so simply adding gapRad here converges the gap to exactly
 // zero in one step.
-inline constexpr float kScriptedCameraJumpCutThresholdDeg = 25.f;  // untested guess -- raise if smooth Z-target orbiting is ever misdetected as a cut (unwanted snaps mid-orbit), lower if an actual shot change/Z-target engage doesn't register
+inline constexpr float kScriptedCameraJumpCutThresholdDeg = 25.f;  // untested guess -- raise if smooth Z-target orbiting is ever misdetected as a cut (unwanted snaps mid-orbit), lower if an actual shot change doesn't register
 inline void snapScriptedCameraYaw(float gapRad) {
     g_smoothTurnYawRad += gapRad;
 }
+
+// Z-target swing-in tracking tunables (vr_main.cpp's dedicated Z-target
+// block -- see that block's own comment for the full state machine). All
+// three untested guesses, together determining how "settled" is detected:
+// kZTargetCameraSettleThresholdDeg is the per-frame movement (degrees) the
+// flatscreen Z-target camera has to drop below before a frame counts toward
+// settling; kZTargetCameraSettleRequiredConsecutiveFrames is how many such
+// frames in a row are needed before actually calling it settled (avoids a
+// single noisy near-zero frame ending tracking early, mid-swing); and
+// kZTargetCameraTrackMaxDurationSec is a bounded fallback so an ongoing
+// small camera adjustment (e.g. the player continuing to move while locked
+// on -- normal, not part of the initial swing) can't withhold free-look
+// indefinitely if it happens to never dip below the settle threshold.
+inline constexpr float kZTargetCameraSettleThresholdDeg = 0.5f;
+inline constexpr int kZTargetCameraSettleRequiredConsecutiveFrames = 5;
+inline constexpr float kZTargetCameraTrackMaxDurationSec = 1.5f;
 
 // Rotates an OpenXR-tracking-space vector around the vertical (+Y) axis by
 // yawRad. Explicit parameter rather than reading the global above directly

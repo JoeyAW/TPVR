@@ -9740,7 +9740,7 @@ link, no new warnings. **CONFIRMED WORKING in-headset** — user: "It
 works." No follow-up issues reported (no double-rotation/fighting between
 the two stick inputs).
 
-### Scripted-camera facing assist (Third Person only) — Z-target/cutscene camera reorientation now pulls the VR view to match — built 2026-08-19, NOT yet tested in-headset
+### Scripted-camera facing assist (Third Person only) — Z-target/cutscene camera reorientation now pulls the VR view to match — CONFIRMED WORKING IN-HEADSET 2026-08-19 (three rounds; read the whole section, not just the first attempt below, before touching this again)
 
 **Goal** (explicit user request: "make the camera face the right way for
 scripted camera events that move it" — Z-targeting orbiting behind Link,
@@ -9832,6 +9832,108 @@ it visibly overshoots/oscillates, something is wrong with the sign or
 gap-wrapping logic, not just a rate — re-verify with the same kind of
 real capture this project's other rotation fixes have needed rather than
 retuning blind.
+
+**ROUND 2 — the above design was WRONG (not just undertuned), diagnosed
+correctly from a single real report, redesigned, built.** User: "I can
+look up and down mid cutscene, but not left and right." The 180 deg/s
+bound was never the real problem — this whole function is called EVERY
+FRAME the scripted event is active, and `gapRad` is recomputed each time
+against the CURRENT combined yaw (real HMD rotation + the offset), not a
+target captured once. So any voluntary head turn instantly became new
+"gap" for the function to erase, at up to 180 deg/s — comfortably
+outpacing normal head-turn speed (order 60-150 deg/s sustained), so it
+fought and won against essentially all yaw input every single frame the
+event ran. Pitch was untouched by any of this (this mechanism only ever
+manipulates yaw), which is exactly why it was the one axis still free.
+**First fix attempt**: lowered `kScriptedCameraYawMaxDegPerSec` 180 → 20
+(well below normal head-turn speed, so voluntary turning should clearly
+outpace it). User: "it doesn't feel very good" — a persistent, if weak,
+background tug for the ENTIRE DURATION of every cutscene/Z-target hold is
+still an unwanted constant force; weakening the same continuous mechanism
+didn't fix the underlying wrong *shape* of the fix.
+
+**ROUND 3 — full redesign, per explicit follow-up request ("just move
+the camera whenever a sudden change in direction... like in a jump cut"),
+CONFIRMED WORKING.** Replaced the continuous-pull mechanism entirely.
+`assistScriptedCameraYaw()` was deleted; `snapScriptedCameraYaw(gapRad)`
+(`vr_smooth_turn.hpp`) just does `g_smoothTurnYawRad += gapRad` with no
+rate limiting at all — a genuine instant snap, only ever called when a
+**jump cut** is actually detected: the caller (`vr_main.cpp`) compares
+this frame's flatscreen-camera target yaw against LAST frame's (not the
+player's own view), in s16 BAMS space — a real cut (cutscene shot change)
+changes that by a large amount within one frame; smooth camera movement
+changes it by only a few degrees per frame at VR framerates.
+`kScriptedCameraJumpCutThresholdDeg = 25.f` (untested guess) is the
+cutoff. Between cuts, this does nothing at all — full, permanent
+free-look, not a weakened pull. Matches how snap-turning is already a
+known VR comfort technique elsewhere: a sudden discrete jump is tolerated
+far better than a continuous forced rotation, since the brain already
+expects a full scene discontinuity at a cut.
+
+**Z-targeting split out into its own, separate mechanism same round**,
+per a further explicit follow-up: "z targeting always makes the camera
+face the right way, until it is centered behind link. Once it is behind
+Link you should be able to look around, even while targeting. But the
+initial camera movement should face him." Jump-cut detection alone only
+ever caught the INSTANT Z-target engages (itself a jump) — it could never
+track the base game's own smooth swing-into-position transition
+afterward, since that moves gradually (never a single-frame jump). New,
+independent state machine (`vr_main.cpp`, gated on
+`link->checkAttentionLock()` only, no longer sharing the cutscene block's
+`isRealCutsceneRunning()` condition):
+- **Idle → Tracking** the instant Z-target engages: snap immediately
+  (no valid previous-frame delta to compare against yet), then continue
+  fully snapping to the flatscreen Z-target camera's direction EVERY
+  FRAME while it's still visibly moving. Safe/correct specifically
+  because the source being mirrored (the base game's own already-smooth
+  swing-in animation) is itself smooth — copying an already-smooth value
+  frame-by-frame reads as smooth tracking, not the earlier rejected
+  design's fight-your-input problem (that fought the PLAYER's input every
+  frame; this only ever runs during the brief one-time swing-in).
+- **Tracking → Settled**: detected via two independent signals, same
+  "real settle + a bounded fallback" shape already used for the
+  core-anchor calibration fix (`vr_link_visibility.hpp`'s
+  `computeRawCoreAnchoredEye()`) — several consecutive frames
+  (`kZTargetCameraSettleRequiredConsecutiveFrames = 5`) where the
+  camera's own per-frame movement drops below
+  `kZTargetCameraSettleThresholdDeg = 0.5f`, OR a bounded fallback
+  (`kZTargetCameraTrackMaxDurationSec = 1.5f`) elapses regardless — so an
+  ongoing small camera adjustment from the player continuing to move
+  while locked on (normal, not part of the initial swing) can't withhold
+  free-look indefinitely if it happens to never dip below the settle
+  threshold. All three untested guesses.
+- **Settled**: does nothing for the REST of that Z-target hold, even if
+  the flatscreen camera keeps adjusting afterward (e.g. circling the
+  target) — full free-look, exactly the "once it is behind Link... even
+  while targeting" guarantee that was asked for. Releasing and
+  re-engaging Z-target resets back to Idle, so the next engagement tracks
+  fresh from scratch.
+
+**Real crash hit and fixed mid-investigation, unrelated to the design
+rounds above**: first in-headset test of round 1's design crashed —
+"Exception thrown: read access violation. **this** was nullptr." Real
+call stack: `checkAttentionLock()` → `mAttention->Lockon()` (inlined) →
+`LockonTruth()`, `this` == `mAttention` == null. Root cause:
+`mAttention` (`daAlink_c::create()`, `d_a_alink.cpp`) is only assigned
+partway through Link's own multi-phase async creation — every base-game
+caller of `checkAttentionLock()` only ever runs once gameplay is fully
+up, but this new VR code calls it unconditionally every real frame
+(`dusk::vr::tick()`), so it could observe `dComIfGp_getLinkPlayer()`
+already non-null while `mAttention` was still unassigned. **Fixed** with
+a one-line null guard directly in `checkAttentionLock()` itself
+(`d_a_alink.h`): `mAttention != NULL && mAttention->Lockon()` — protects
+every caller (base-game callers included, though they were never
+actually at risk), not just the new VR call site. Confirmed the crash
+didn't recur in any of the following rounds' testing.
+
+**CONFIRMED WORKING IN-HEADSET, final state** — user: "Works great" (jump
+cut design) and "Works great" again after the Z-target track-until-settled
+split. Closes out this feature. If either mechanism is ever revisited:
+the three Z-target tunables and `kScriptedCameraJumpCutThresholdDeg` are
+all still untested-guess starting points, not derived from anything —
+retune from real reports the same way every other constant in this
+section did, rather than assuming they're already correct for a different
+symptom.
 
 ## Key lesson learned this session
 

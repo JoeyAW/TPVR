@@ -30,9 +30,31 @@ window {
     border-radius: 14dp;
     overflow: hidden;
     border: 2dp #92875B;
-    backdrop-filter: blur(5dp);
+    /* CHANGED from blur(5dp), 2026-08-20: blurring a bright/high-contrast
+       game scene makes it fuzzy but not dark -- loud backgrounds still
+       wash out text even blurred. Darkening (RmlUi's "brightness" filter,
+       registered generically alongside "blur" in Factory.cpp, same
+       property grammar) directly lowers the backdrop's luminance instead,
+       which is what actually improves text contrast. Only affects the
+       flatscreen desktop window -- VR forces backdrop-filter off entirely
+       while its menu billboard is active regardless of which filter is
+       used here (aurora::rmlui::set_force_no_backdrop()), so this has no
+       effect there; VR's own readability instead comes from window's
+       background-color alpha just below (bumped to 98% same session).
+       25% is an untested starting guess -- lower (darker) if backgrounds
+       are still too bright, raise if it reads as too flat/opaque. */
+    backdrop-filter: brightness(25%);
     box-shadow: 0 0 25dp 5dp;
-    background-color: rgba(21, 22, 16, 90%);
+    /* Darkened from the original 90% -- same reason as window tab-bar's
+       and button's own darkening below (VR forces backdrop-filter off
+       while its menu billboard is active, aurora::rmlui::
+       set_force_no_backdrop() -- with nothing left to blur, the
+       remaining alpha let the sharp, unblurred 3D scene show straight
+       through, hurting readability). This is the actual base panel
+       background every pane's text sits directly against (panes
+       themselves have no background-color of their own), so it's the
+       most load-bearing of the three. */
+    background-color: rgba(21, 22, 16, 98%);
     filter: opacity(0);
     transform: scale(0.9);
     transform-origin: center;

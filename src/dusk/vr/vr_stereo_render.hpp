@@ -967,10 +967,93 @@ inline TGXTexObj g_menuBillboardTexObj{};
 inline uint32_t g_menuBillboardTexWidth = 0;
 inline uint32_t g_menuBillboardTexHeight = 0;
 
+// Solid opaque backdrop drawn directly behind the menu billboard --
+// 2026-08-20 follow-up ("darken the background... so it is readable"),
+// after two prior CSS-only attempts (window.rcss's background-color alpha
+// and backdrop-filter) didn't resolve it. The user's own precise report
+// was the key evidence: the SAME menu document, viewed on the flatscreen
+// desktop window and in the headset AT THE SAME TIME, looked dark/opaque
+// on the monitor but bright/transparent in VR. Both consumers were
+// directly re-verified by reading the actual code (not assumed): the
+// flatscreen path (aurora.cpp's end_frame(), g_CopyPremultipliedAlphaPipeline)
+// and this billboard's own draw (GX_BL_ONE/GX_BL_INVSRCALPHA) both
+// correctly implement premultiplied-alpha "src-over" compositing, and both
+// read the exact same aurora::rmlui::get_render_target() texture -- no
+// obvious formula or format mismatch found despite a real look. Rather
+// than keep chasing exactly where the two paths' actual alpha values
+// diverge in practice (would need real GPU-side pixel readback
+// instrumentation to pin down further, not yet built), this sidesteps the
+// question entirely: draw a solid quad at the exact same position/size as
+// the real menu content, immediately BEFORE drawMenuBillboard() so normal
+// draw-order layering puts it behind. Color matches window.rcss's own base
+// panel color (rgba(21, 22, 16, ...)) so it reads as a natural extension
+// of the panel. VR's panel background is now dark/solid BY CONSTRUCTION,
+// not by depending on alpha data matching between two independently-
+// implemented compositing paths.
+//
+// UPDATED same day, two more follow-ups: (1) "add a little bit of
+// transparency" -- was fully opaque (GX_BM_NONE, alpha 255) on the first
+// pass; now a real alpha blend at 235/255 (~92%), see kBackdropColor's own
+// comment. (2) "disable this background just for the main menu only" --
+// the caller (vr_main.cpp) now skips calling this function entirely while
+// dusk::ui::is_prelaunch_open() (the "play/settings/quit + logo" title
+// screen, a completely separate document from every other RmlUi window --
+// its own full-bleed background image, not window.rcss's shared panel
+// styling) is the one showing -- that screen is meant to stay see-through
+// in VR; every other document still gets this solid-ish backdrop.
+inline void drawMenuBillboardBackdrop(float aspectHeightOverWidth) {
+    view_class* view = dComIfGd_getView();
+    assert(view != nullptr && "VR: drawMenuBillboardBackdrop() called outside gameplay?");
+
+    GXSetProjection(view->projMtx, GX_PERSPECTIVE);
+    GXLoadPosMtxImm(cMtx_getIdentity(), GX_PNMTX0);
+    GXSetCurrentMtx(0);
+
+    GXClearVtxDesc();
+    GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
+    GXSetVtxDesc(GX_VA_CLR0, GX_DIRECT);
+    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
+    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
+
+    GXSetNumChans(1);
+    GXSetChanCtrl(GX_COLOR0, GX_DISABLE, GX_SRC_REG, GX_SRC_VTX, GX_LIGHT_NULL, GX_DF_CLAMP, GX_AF_NONE);
+    GXSetNumTexGens(0);
+    GXSetNumTevStages(1);
+    GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD_NULL, GX_TEXMAP_NULL, GX_COLOR0A0);
+    GXSetTevOp(GX_TEVSTAGE0, GX_PASSCLR);
+
+    // Real alpha blend (not GX_BM_NONE) -- 2026-08-20 follow-up request:
+    // "add a little bit of transparency" on top of the guaranteed-solid
+    // fix above (which was fully opaque, 255). kBackdropColor's alpha
+    // below is the only thing that changed in practice; still a plain
+    // GX_BL_SRCALPHA/GX_BL_INVSRCALPHA blend of a single flat, non-
+    // premultiplied color, unrelated to the premultiplied convention
+    // drawMenuBillboard() itself needs for the REAL RmlUi content.
+    GXSetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_SET);
+    GXSetZMode(GX_DISABLE, GX_ALWAYS, GX_DISABLE);
+    GXSetCullMode(GX_CULL_NONE);
+    GXSetAlphaCompare(GX_ALWAYS, 0, GX_AOP_OR, GX_ALWAYS, 0);
+
+    // 235/255 (~92%) -- untested guess for "a little bit of transparency"
+    // starting from the previous fully-opaque 255; retune (lower = more
+    // see-through) from real in-headset feedback.
+    constexpr GXColor kBackdropColor = {21, 22, 16, 235};
+
+    const HudQuadCorners c = computeMenuBillboardPose(aspectHeightOverWidth);
+    GXBegin(GX_QUADS, GX_VTXFMT0, 4);
+    for (int i = 0; i < 4; ++i) {
+        GXPosition3f32(c.x[i], c.y[i], c.z[i]);
+        GXColor4u8(kBackdropColor.r, kBackdropColor.g, kBackdropColor.b, kBackdropColor.a);
+    }
+    GXEnd();
+}
+
 // Call once per eye (like drawHudBillboard()), from vr_main.cpp's tick(),
 // gated on dusk::ui::any_document_visible() -- needs
 // g_menuBillboardTexObj already populated this frame by
 // ensureAndCopyMenuBillboardTexture() (vr_main.cpp, pre-eye-loop window).
+// Draw drawMenuBillboardBackdrop() immediately before this for a
+// guaranteed-opaque panel background (see its own comment).
 inline void drawMenuBillboard(TGXTexObj* menuTex, float aspectHeightOverWidth) {
     view_class* view = dComIfGd_getView();
     assert(view != nullptr && "VR: drawMenuBillboard() called outside gameplay?");

@@ -2029,7 +2029,28 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
         // "VR menu billboard" section comment). aspectHeightOverWidth is
         // now the real RmlUi render-target aspect (updated per frame by
         // ensureAndCopyMenuBillboardTexture()), not a fixed test value.
+        // drawMenuBillboardBackdrop() first -- a guaranteed-opaque solid
+        // quad at the same position/size, drawn behind the real content
+        // (see its own comment: 2026-08-20 fix for VR reading bright/
+        // transparent vs. the flatscreen desktop window's correctly dark/
+        // opaque appearance for the exact same menu document).
+        //
+        // EXCEPT the prelaunch/title screen ("the main menu that says
+        // play, settings, quit... and has the logo"), per explicit
+        // follow-up request: that screen has its own full-bleed background
+        // image (prelaunch.rcss's .background/.gradient, unrelated to
+        // window.rcss's shared panel styling other RmlUi windows use) and
+        // is meant to stay see-through in VR, unlike every other document
+        // -- dusk::ui::is_prelaunch_open() (ui.cpp, already existed) is the
+        // real "is THIS the title screen, not some other document"
+        // signal. Only the solid backdrop is skipped -- the real menu
+        // content (text/logo/buttons) still draws normally via
+        // drawMenuBillboard() below, just without the opaque quad behind
+        // it, so it reads through to the real VR surroundings.
         if (menuVisible) {
+            if (!dusk::ui::is_prelaunch_open()) {
+                vr_render::drawMenuBillboardBackdrop(vr_render::g_menuBillboardAspectHeightOverWidth);
+            }
             vr_render::drawMenuBillboard(&vr_render::g_menuBillboardTexObj,
                                           vr_render::g_menuBillboardAspectHeightOverWidth);
         }

@@ -34,6 +34,7 @@
 // using smooth-turn).
 
 #include <openxr/openxr.h>
+#include <algorithm>
 #include <cmath>
 
 namespace dusk::vr {
@@ -63,6 +64,83 @@ inline void updateSmoothTurn(float rightStickX, float dtSeconds) {
     if (std::abs(rightStickX) < kSmoothTurnStickDeadzone) return;
     constexpr float kDegToRad = 3.14159265358979323846f / 180.f;
     g_smoothTurnYawRad -= kSmoothTurnDegPerSec * kDegToRad * rightStickX * dtSeconds;
+}
+
+// Scripted-camera facing assist (Third Person VR setting only, 2026-08-19
+// request: "make the camera face the right way for scripted camera events
+// that move it" -- Z-targeting orbiting behind Link, or a cutscene camera
+// cut). Third Person mode's VR view orientation is otherwise driven purely
+// by the real HMD pose (+ this same g_smoothTurnYawRad offset) -- it never
+// reads the flatscreen game camera's own rotation at all, so when THAT
+// camera reorients (Z-target, cutscene), only the VR camera's POSITION
+// anchor follows (see isFirstPerson()'s Third Person fallback,
+// vr_link_visibility.hpp); the rendered facing stays wherever the player's
+// head/smooth-turn last left it. This nudges g_smoothTurnYawRad -- the
+// SAME accumulator the right stick/real C-stick already drive -- to close
+// that gap.
+//
+// Deliberately does NOT touch eyePoseToViewMtx's raw-quaternion orientation
+// path directly -- that function's own comment (vr_stereo_render.hpp)
+// explicitly warns against a 2026-08-05 attempt at exactly that, which
+// reversed pitch/yaw entirely and had to be reverted. Routing through this
+// same proven yaw-offset mechanism instead avoids that whole bug class.
+//
+// TWO EARLIER DESIGNS TRIED AND REJECTED, both same day, kept here so a
+// future session doesn't re-attempt either blind:
+// 1. Continuous full convergence (max 180 deg/s, always closing the gap to
+//    exactly zero every frame). This is called EVERY FRAME the scripted
+//    event is active, and the gap is recomputed each time against the
+//    CURRENT combined yaw (real HMD rotation + this offset), not a fixed
+//    target captured once -- so any voluntary head turn immediately became
+//    new "gap" that this function then worked to erase, at up to 180 deg/s
+//    -- comfortably outpacing a normal deliberate head turn (order
+//    60-150 deg/s sustained), so it fought and won against essentially all
+//    yaw input. User report: "I can look up and down mid cutscene, but not
+//    left and right" (pitch is untouched by any of this, only yaw routes
+//    through here).
+// 2. Same mechanism, rate lowered to 20 deg/s (weak enough for voluntary
+//    turning to outpace it) per an explicit follow-up request to make the
+//    HMD direction "INFLUENCED... but not completely controlled." User
+//    report: "it doesn't feel very good" -- a persistent, if weak,
+//    background tug for the entire duration of every cutscene/Z-target
+//    hold is still an unwanted constant force, not what "influenced" was
+//    asking for; weakening the SAME continuous mechanism doesn't fix the
+//    underlying wrong shape.
+//
+// CURRENT DESIGN (jump-cut detection, per explicit follow-up request:
+// "just move the camera whenever a sudden change in direction from the
+// original happens? Like in a jump cut"): stop trying to continuously
+// track the target camera's direction at all. Instead, the caller
+// (vr_main.cpp's tick()) compares this frame's target yaw against LAST
+// frame's target yaw (not the player's own current view) -- a real
+// flatscreen jump cut (a cutscene shot change, or Z-target's camera
+// snapping in behind Link the instant lock-on engages) changes that target
+// by a large amount within a single frame; smooth camera movement (e.g.
+// Z-target's continuous orbit as Link/the target move) only changes it by
+// a few degrees per frame at VR framerates. Only when that single-frame
+// delta exceeds kScriptedCameraJumpCutThresholdDeg does the caller call
+// snapScriptedCameraYaw() below -- an instant, unbounded reorientation,
+// matching how a real jump cut is itself an instantaneous discontinuity on
+// the flatscreen (this is also the same principle behind snap-turning as a
+// VR comfort technique elsewhere: a sudden discrete jump is tolerated far
+// better than a continuous forced rotation, because the brain already
+// expects a full scene discontinuity at a cut). Smooth camera movement is
+// left completely alone -- no pull, no drift, full free-look, all the
+// time, except at the instant of an actual cut.
+//
+// gapRad is the signed angular gap (radians) to close, computed by the
+// caller from two s16 BAMS angles run through the identical
+// cM_atan2s(x, z) convention g_headMoveAngleS already uses for the HMD's
+// own forward direction -- self-consistent by construction regardless of
+// cM_atan2s's own internal sign convention, since both sides of the
+// subtraction go through the same function. Verified numerically (not just
+// derived) that increasing g_smoothTurnYawRad by a given radian amount
+// increases that same cM_atan2s(x, z)-style angle by the same amount (1:1,
+// same sign) -- so simply adding gapRad here converges the gap to exactly
+// zero in one step.
+inline constexpr float kScriptedCameraJumpCutThresholdDeg = 25.f;  // untested guess -- raise if smooth Z-target orbiting is ever misdetected as a cut (unwanted snaps mid-orbit), lower if an actual shot change/Z-target engage doesn't register
+inline void snapScriptedCameraYaw(float gapRad) {
+    g_smoothTurnYawRad += gapRad;
 }
 
 // Rotates an OpenXR-tracking-space vector around the vertical (+Y) axis by

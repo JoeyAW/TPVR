@@ -3520,7 +3520,20 @@ public:
     BOOL checkSmallUpperGuardAnime() const { return checkUpperAnime(dRes_ID_ALANM_BCK_ATDEFS_e); }
     BOOL checkFmChainGrabAnime() const { return checkUpperAnime(dRes_ID_ALANM_BCK_CHAIN_e) || checkUpperAnime(dRes_ID_ALANM_BCK_WL_CHAIN_e); }
 
-    BOOL checkAttentionLock() { return mAttention->Lockon(); }
+    // Null-guarded 2026-08-19: mAttention is only assigned partway through
+    // daAlink_c's own multi-phase create() (dComIfGp_getAttention(),
+    // d_a_alink.cpp), so a caller that runs unconditionally every real
+    // frame regardless of Link's creation-phase state (VR's
+    // dusk::vr::tick(), added for the Third Person scripted-camera-facing
+    // assist) can observe dComIfGp_getLinkPlayer() already non-null while
+    // mAttention is still whatever it was zero-initialized to -- crashed
+    // with a real call stack confirming this exact path
+    // (checkAttentionLock -> Lockon -> LockonTruth, `this` == mAttention ==
+    // nullptr). Every base-game call site of checkAttentionLock() only
+    // ever runs after create() has fully completed, so this guard is a
+    // pure safety net for the new out-of-band caller, not a behavior
+    // change under normal gameplay.
+    BOOL checkAttentionLock() { return mAttention != NULL && mAttention->Lockon(); }
 
     bool checkUpperAnime(u16 i_resIdx) const { return mUpperAnmHeap[UPPER_2].getIdx() == i_resIdx; }
     bool checkUnderAnime(u16 i_resIdx) const { return mUnderAnmHeap[UNDER_2].getIdx() == i_resIdx; }

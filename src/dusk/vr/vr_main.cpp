@@ -1507,6 +1507,75 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
         dusk::vr::updateSmoothTurn(realCStickX, pacing.presentation_dt_seconds);
     }
 
+    // Scripted-camera facing assist (2026-08-19 request, Third Person VR
+    // setting only, REDESIGNED same day after two rejected attempts -- see
+    // snapScriptedCameraYaw()'s own comment (vr_smooth_turn.hpp) for the
+    // full history/reasoning). Detects a JUMP CUT -- the flatscreen
+    // camera's own facing direction changing by a large amount within a
+    // single frame (a cutscene shot change, or Z-target's camera snapping
+    // in behind Link the instant lock-on engages) -- as opposed to smooth
+    // camera movement (Z-target's continuous orbit as Link/the target
+    // move), which is left completely alone. Only on an actual cut does
+    // this instantly snap g_smoothTurnYawRad to match; the rest of the
+    // time, free-look is untouched. Deliberately scoped to Third Person
+    // mode only (plain first-person VR already anchors the camera to
+    // Link's own head/core, where this wouldn't make sense) and computed
+    // BEFORE the g_headMoveAngleS block right below, so movement direction
+    // stays in sync with whatever yaw this converges to this same frame
+    // rather than reading a one-frame-stale value.
+    {
+        // Persists across frames/activations -- deliberately NOT reset on
+        // a false->true transition, since the "just activated" branch below
+        // never reads it (only writes it fresh for the next frame's
+        // comparison), and the "still active" branch's very first read
+        // after a fresh activation is guarded by that same branch split.
+        static s16 s_scriptedCameraLastTargetYawS = 0;
+        static bool s_scriptedCameraWasActive = false;
+
+        bool scriptedCameraActive = false;
+        if (dusk::getSettings().game.vrThirdPerson.getValue()) {
+            if (auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer())) {
+                scriptedCameraActive =
+                    link->checkAttentionLock() || dusk::vr::isRealCutsceneRunning();
+            }
+        }
+
+        if (scriptedCameraActive) {
+            if (view_class* view = dComIfGd_getView()) {
+                const float dx = view->lookat.center.x - view->lookat.eye.x;
+                const float dz = view->lookat.center.z - view->lookat.eye.z;
+                // Skip a degenerate/zero-length lookat direction (e.g. a
+                // stray frame where eye and center coincide) rather than
+                // feeding cM_atan2s(0, 0) an undefined angle.
+                if (std::abs(dx) > 0.0001f || std::abs(dz) > 0.0001f) {
+                    const s16 targetYawS = cM_atan2s(dx, dz);
+
+                    // s16 subtraction wraps to the shortest signed angular
+                    // gap automatically (standard BAMS convention, same
+                    // trick this engine's own angle-delta code relies on
+                    // elsewhere).
+                    const bool isCut = !s_scriptedCameraWasActive ||
+                        std::abs(cM_s2rad(static_cast<s16>(
+                            targetYawS - s_scriptedCameraLastTargetYawS))) >=
+                            cM_s2rad(cM_deg2s(dusk::vr::kScriptedCameraJumpCutThresholdDeg));
+
+                    if (isCut) {
+                        const cXyz currentHeadForward = vr_render::computeHeadWorldForward(
+                            hmdPose, dusk::vr::getSmoothTurnYawRad());
+                        const s16 currentYawS =
+                            cM_atan2s(currentHeadForward.x, currentHeadForward.z);
+                        const s16 gapS = static_cast<s16>(targetYawS - currentYawS);
+                        dusk::vr::snapScriptedCameraYaw(cM_s2rad(gapS));
+                    }
+
+                    s_scriptedCameraLastTargetYawS = targetYawS;
+                }
+            }
+        }
+
+        s_scriptedCameraWasActive = scriptedCameraActive;
+    }
+
     // See g_headMoveAngleS's declaration comment for the bug this fixes.
     // Computed here (once per frame, not per eye) rather than lazily in
     // getHeadMoveAngleS() itself, matching this file's existing pattern for

@@ -9740,6 +9740,99 @@ link, no new warnings. **CONFIRMED WORKING in-headset** — user: "It
 works." No follow-up issues reported (no double-rotation/fighting between
 the two stick inputs).
 
+### Scripted-camera facing assist (Third Person only) — Z-target/cutscene camera reorientation now pulls the VR view to match — built 2026-08-19, NOT yet tested in-headset
+
+**Goal** (explicit user request: "make the camera face the right way for
+scripted camera events that move it" — Z-targeting orbiting behind Link,
+or a cutscene camera cut — "only for third person mode"). Asked the user
+to choose between two designs first (materially different scope/risk):
+always lock VR facing to the flatscreen camera in Third Person (loses
+head free-look) vs. only reorient during actual scripted events, blending,
+with free-look otherwise. **User chose the latter.**
+
+**Root cause confirmed by reading the code (not assumed)**: VR's per-eye
+orientation (`eyePoseToViewMtx()`, `vr_stereo_render.hpp`) is *always*
+built purely from the real HMD quaternion + the smooth-turn yaw offset —
+in every mode, including Third Person. Third Person only changes the
+camera's *position* anchor (`isFirstPerson()`'s fallback to
+`view->lookat.eye`) — nothing anywhere reads the flatscreen camera's
+*rotation*. So Z-targeting/cutscenes reorienting the flatscreen camera
+only ever moved the VR camera's position in Third Person, never its
+facing — matching the report exactly.
+
+**Deliberately NOT a repeat of the reverted 2026-08-09 "sync flatscreen
+camera to headset" experiment**: that was the opposite direction (WRITING
+the HMD's rotation into the shared flatscreen camera object) and was
+reverted specifically because other systems (audio panning, aim/lock-on)
+also read that object and the risk to them was never fully audited. This
+fix only ever *reads* `view->lookat.eye/center` (already read elsewhere
+for the position fallback) — never writes to the shared camera object —
+so it doesn't carry that same risk.
+
+**Also deliberately NOT touching `eyePoseToViewMtx()`'s raw-quaternion
+orientation path directly** — that function's own comment explicitly
+warns against exactly this (a 2026-08-05 attempt reversed pitch/yaw
+entirely, reverted same session). Instead, routes through the **existing,
+already-proven smooth-turn yaw mechanism** (`vr_smooth_turn.hpp`'s
+`g_smoothTurnYawRad`, the same accumulator the right stick/real C-stick
+already drive) — nudging that persistent offset toward closing the gap,
+rather than adding a second, independent rotation path.
+
+**New `dusk::vr::assistScriptedCameraYaw(gapRad, dtSeconds)`**
+(`vr_smooth_turn.hpp`): adds `gapRad` to `g_smoothTurnYawRad`, clamped to
+a bounded rate (`kScriptedCameraYawMaxDegPerSec = 180.f`, untested guess —
+comfort-motivated: an instant snap for a large gap is a known VR nausea
+trigger, so this always converges over time, never jumps). Once the
+scripted event ends, this simply stops being called — the player's own
+free-look/smooth-turn continues from wherever it converged to, no
+separate "blend back" state needed.
+
+**Sign convention verified numerically before writing any game code**
+(same discipline this project's rotation-math history — section 12/14 —
+established the hard way): wrote a standalone Node script reproducing
+`rotateYawQuat`/`eyePoseToViewMtx`'s rotation math exactly, confirmed
+increasing `g_smoothTurnYawRad` by a given radian amount increases the
+`cM_atan2s(headForward.x, headForward.z)`-style angle by the *same*
+amount (1:1, same sign) — so `assistScriptedCameraYaw` can just add the
+gap directly, no negation. The gap itself (`vr_main.cpp`'s call site) is
+computed as `targetYawS - currentYawS`, both sides run through the
+*identical* `cM_atan2s(x, z)` convention `g_headMoveAngleS` already uses
+for the HMD's own forward direction — self-consistent by construction
+regardless of `cM_atan2s`'s own internal sign convention, since both
+operands go through the same function.
+
+**Trigger condition**: `link->checkAttentionLock()` (the real Z-target/
+lock-on engage check, `mAttention->Lockon()` — already public on
+`daAlink_c`) OR `dusk::vr::isRealCutsceneRunning()` (already-existing
+helper, section "Camera anchor going above/below Link" era). Gated on
+`dusk::getSettings().game.vrThirdPerson.getValue()` — plain first-person
+VR is completely untouched (it anchors to Link's own head/core, where
+this wouldn't make sense).
+
+**Call site** (`vr_main.cpp`'s `tick()`): inserted right after the
+existing right-stick/real-C-stick `updateSmoothTurn()` calls and *before*
+the `g_headMoveAngleS` block, so movement direction stays in sync with
+whatever yaw this converges to the same frame rather than reading a
+one-frame-stale value.
+
+Built successfully (RelWithDebInfo) — `vr_smooth_turn.hpp`, `vr_main.cpp`
+recompiled, clean link, no new warnings.
+
+**NOT yet tested in-headset.** Next step for whoever picks this up:
+Third Person on, hold the Z-target/lock-on input near an enemy and turn
+your head away — confirm the view pulls back to face the target/Link from
+behind over roughly half a second to a second (not an instant snap),
+then release and confirm free-look resumes normally from there. Same for
+a cutscene: trigger one while Third Person is on and confirm the view
+reorients to roughly match the authored shot instead of staying wherever
+the HMD was pointed. If the reorientation snaps instead of smoothly
+converging, `kScriptedCameraYawMaxDegPerSec` is undersized for how large
+a gap a Z-target engage or cutscene cut typically produces (raise it); if
+it visibly overshoots/oscillates, something is wrong with the sign or
+gap-wrapping logic, not just a rate — re-verify with the same kind of
+real capture this project's other rotation fixes have needed rather than
+retuning blind.
+
 ## Key lesson learned this session
 
 Don't infer that an uncommitted fix supersedes a nearby disable guard just

@@ -9169,6 +9169,45 @@ isolation) is what found this; several of this whole session's earlier
 rounds (v1-v8.1) never questioned whether `neutralizeVrMenuGamepadState()`'s
 own call site was itself sound, only ever the values it wrote.
 
+### Menu chord re-firing on a sustained hold ("if you don't immediately release it the menu disappears") — CONFIRMED FIXED IN-HEADSET 2026-08-20
+
+**Symptom** (user report, well after the v8 saga above closed out):
+holding the right-trigger+right-stick-click chord too long (past the
+existing 0.5s cooldown window) made the menu close itself, with no
+release/re-press from the player.
+
+**Root cause**: `computeMenuChordGate()`'s cooldown (`kMenuChordCooldownSec`,
+added earlier per an explicit "add a cooldown, it kinda spams" request)
+was a flat 0.5s timer, not a "wait for an actual release" latch. Once the
+chord fired and the timer expired, `physicallyHeld` (tracked completely
+independently of the timer) had usually stayed true the whole time if the
+player kept holding — so the very next frame after the timer hit zero, the
+gate let the chord through AGAIN while still physically held. Since this
+chord is very likely bound as an open/close TOGGLE in
+`dusk::ui::input.cpp` (reusing the same real-gamepad binding physical
+players already use), that second fire closed the menu it had just
+opened — matching the report exactly: hold past ~1.5s total (1.0s
+hold-to-open + 0.5s cooldown) and it silently closes itself.
+
+**Fix**: new `detail::g_menuChordArmed` latch (`vr_menu_gamepad.hpp`).
+Once the chord fires, it stays disarmed for as long as it remains
+physically held, however long that is — only an actual release
+(`physicallyHeld` observed false for at least one real frame) re-arms it.
+The original flat cooldown timer is kept alongside this, still doing its
+original job (absorbing brief jitter right at the trigger instant,
+Analog-trigger-reads-don't-present-as-cleanly-binary-as-a-real-button
+being the reason the cooldown existed in the first place) — the two are
+complementary: the timer handles sub-cooldown-window jitter, the latch
+handles arbitrarily long sustained holds. `outMenuChordHeld` now requires
+BOTH the cooldown having elapsed AND the latch being armed, not just one.
+
+Built successfully (RelWithDebInfo) — only `vr_main.cpp` (transitively
+includes the header) recompiled, clean link, no new warnings.
+
+**CONFIRMED FIXED IN-HEADSET** — user: "fixed." A sustained hold no longer
+re-fires the chord; the latch-until-release fix holds up as designed.
+Closes out this follow-up.
+
 ### New "VR" settings tab in the Dusklight menu — built 2026-08-18, NOT yet confirmed in-headset/on-screen
 
 **Goal** (explicit user request: "add a new VR specific settings menu...

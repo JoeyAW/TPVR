@@ -182,10 +182,26 @@ inline void updateVrMenuGamepadPlayerIndex() {
 // real controller's more binary-feeling digital press. Once the chord is
 // let through once, this forces it fully released (both inputs, not just
 // one -- releasing only one wouldn't drop is_menu_chord()'s AND) for
-// kMenuChordCooldownSec regardless of physical hold state, so at most one
-// open/close toggle can happen per cooldown window.
+// kMenuChordCooldownSec.
+//
+// BUG FOUND 2026-08-20: a flat timer alone isn't sufficient -- it only
+// suppresses an IMMEDIATE double-fire from jitter right at the moment of
+// triggering, but says nothing about a genuinely sustained hold. Report:
+// "if you don't immediately release it the menu disappears" -- i.e. keep
+// holding the chord past the 0.5s cooldown window and it silently
+// re-arms while STILL physically held, re-firing the (very likely
+// open/close TOGGLE) chord and closing the menu it just opened. Fixed
+// with g_menuChordArmed below: once the chord fires, it stays disarmed
+// for as long as the chord remains physically held, no matter how long
+// that is -- only an actual RELEASE (physicallyHeld observed false for at
+// least one real frame) re-arms it for the next deliberate press. The
+// timer above is kept alongside this, still doing its original job
+// (absorbing brief jitter right at the trigger instant) -- the two are
+// complementary, not redundant: the timer handles sub-cooldown-window
+// jitter, the latch handles arbitrarily long sustained holds.
 namespace detail {
 inline float g_menuChordCooldownRemaining = 0.f;
+inline bool g_menuChordArmed = true;
 }  // namespace detail
 inline constexpr float kMenuChordCooldownSec = 0.5f;
 
@@ -497,30 +513,46 @@ inline void resetMenuStickPulseState() {
 inline void computeMenuChordGate(bool menuChordHeld, float triggerChordValue, float dtSeconds,
                                   bool& outMenuChordHeld, float& outTriggerChordValue) {
     // Hold-to-open gate -- see kMenuChordHoldToOpenSec's own comment.
-    // Evaluated BEFORE the cooldown block below: until the chord has been
-    // held continuously for long enough, it's forced fully released here,
-    // which also naturally keeps the cooldown block's own trigger
-    // condition (right below) from ever seeing it as "about to fire."
     const bool physicallyHeld = menuChordHeld && triggerChordValue > 0.5f;
     if (physicallyHeld) {
         detail::g_menuChordHoldElapsed += dtSeconds;
     } else {
         detail::g_menuChordHoldElapsed = 0.f;
+        // Real release, observed this frame -- re-arm regardless of any
+        // still-running cooldown, so the NEXT deliberate press-and-hold
+        // (not a continuation of this same one) can fire again once its
+        // own hold-to-open threshold is met. See g_menuChordArmed's own
+        // comment for the bug this fixes (sustained holds silently
+        // re-firing after the flat cooldown alone expired).
+        detail::g_menuChordArmed = true;
     }
-
-    outMenuChordHeld = physicallyHeld && detail::g_menuChordHoldElapsed >= kMenuChordHoldToOpenSec;
-    outTriggerChordValue = outMenuChordHeld ? triggerChordValue : 0.f;
 
     if (detail::g_menuChordCooldownRemaining > 0.f) {
         detail::g_menuChordCooldownRemaining -= dtSeconds;
-        outMenuChordHeld = false;
-        outTriggerChordValue = 0.f;
-    } else if (outMenuChordHeld && outTriggerChordValue > 0.5f) {
+    }
+
+    // Evaluated BEFORE deciding to fire: until the chord has been held
+    // continuously for long enough, it's forced fully released here, which
+    // also naturally keeps the "about to fire" branch below from ever
+    // seeing it as ready.
+    const bool holdSatisfied = physicallyHeld && detail::g_menuChordHoldElapsed >= kMenuChordHoldToOpenSec;
+
+    // Only actually fires while armed (see g_menuChordArmed's comment) AND
+    // the jitter-debounce cooldown has fully elapsed -- both conditions
+    // together, not either alone. A sustained hold satisfies holdSatisfied
+    // and the cooldown indefinitely but stays disarmed, so it can only
+    // ever fire once per real press-and-release cycle.
+    outMenuChordHeld =
+        holdSatisfied && detail::g_menuChordCooldownRemaining <= 0.f && detail::g_menuChordArmed;
+    outTriggerChordValue = outMenuChordHeld ? triggerChordValue : 0.f;
+
+    if (outMenuChordHeld) {
         // 0.5 roughly matches dusk/ui/input.cpp's own kGamepadAxisPressThreshold
-        // (16384 of 32767) -- only start the cooldown once the chord is
-        // actually about to fire, not on every frame it's merely trending
-        // upward.
+        // (16384 of 32767) -- only relevant as a sanity check now that
+        // outMenuChordHeld already gates on the real threshold above; kept
+        // for clarity, not load-bearing.
         detail::g_menuChordCooldownRemaining = kMenuChordCooldownSec;
+        detail::g_menuChordArmed = false;
     }
 }
 

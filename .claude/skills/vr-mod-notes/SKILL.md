@@ -9707,6 +9707,39 @@ pitch direction, so the sign guess on `g_headAimPitchS` (same negation
 `g_controllerAimPitchS` needed) landed correctly on the first try, no
 flip needed.
 
+### Real gamepad C-stick also drives VR smooth-turn — CONFIRMED WORKING 2026-08-19
+
+**Goal** (explicit user request: "make the c stick function, c left and c
+right, rotate the camera left and right in the same way that moving the
+right stick rotates the hmd direction"). Confirmed via clarifying question
+this means a real physical gamepad's C-stick, used alongside VR motion
+controllers — not a VR-controller input.
+
+**Root cause / why it was missing**: a player with a real gamepad plugged
+in can already push its C-stick left/right to orbit the flatscreen
+third-person camera (`d_camera.cpp`'s "Free Camera" feature reading
+`mDoCPd_c::getSubStickX()`), but that orbit never reached the headset's
+own view rotation — `eyePoseToViewMtx()`'s `yawRad` parameter
+(`vr_stereo_render.hpp`) shows the VR eye's rotation always comes from the
+real HMD pose plus smooth-turn's yaw offset only, never from
+`d_camera.cpp`'s own camera orientation. So the C-stick's effect and the
+headset's actual view were two independent systems.
+
+**Fix** (`vr_main.cpp`, right where the VR right thumbstick already calls
+`dusk::vr::updateSmoothTurn()`): also read the real gamepad's C-stick via
+`mDoCPd_c::getSubStickX(PAD_1)` (added `#include "m_Do/m_Do_controller_pad.h"`)
+and feed it into the SAME `updateSmoothTurn()` call, so both inputs
+advance the same `g_smoothTurnYawRad` accumulator — additive, not
+fighting. `d_camera.cpp`'s own read of the same value (the flatscreen
+orbit) is completely untouched. Skipped during fishing, matching the VR
+right stick's own existing exception there (the C-stick is already doing
+`d_a_mg_rod.cpp` cast-power/steering input on those frames).
+
+Built successfully (RelWithDebInfo, only `vr_main.cpp` recompiled), clean
+link, no new warnings. **CONFIRMED WORKING in-headset** — user: "It
+works." No follow-up issues reported (no double-rotation/fighting between
+the two stick inputs).
+
 ## Key lesson learned this session
 
 Don't infer that an uncommitted fix supersedes a nearby disable guard just

@@ -24,6 +24,7 @@
 
 #include "SSystem/SComponent/c_API_graphic.h"  // cAPIGph_Painter
 #include "SSystem/SComponent/c_math.h"          // cM_atan2s -- getHeadMoveAngleS()
+#include "m_Do/m_Do_controller_pad.h"            // mDoCPd_c::getSubStickX -- real physical gamepad C-stick
 #include "m_Do/m_Do_graphic.h"                  // mDoGph_gInf_c::captureHudBillboard
 #include "f_pc/f_pc_manager.h"                  // fpcM_DrawIterater, fpcM_Draw
 #include "dusk/game_clock.h"                    // dusk::game_clock::MainLoopPacer
@@ -1480,6 +1481,30 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
         }
     } else {
         dusk::vr::updateSmoothTurn(rightStick.x, pacing.presentation_dt_seconds);
+
+        // Real physical gamepad's C-stick (2026-08-19, explicit user
+        // request: "make the c stick function, c left and c right, rotate
+        // the camera left and right in the same way that moving the right
+        // stick rotates the hmd direction"). A player using a real gamepad
+        // alongside VR motion controllers can already push its C-stick
+        // left/right to orbit the flatscreen third-person camera --
+        // mDoCPd_c::getSubStickX(PAD_1) below reads the exact same value
+        // d_camera.cpp's own free-camera-control code reads, untouched by
+        // this change -- but that orbit never reached the HEADSET's own
+        // view rotation, only smooth-turn does: eyePoseToViewMtx's yawRad
+        // parameter (vr_stereo_render.hpp) shows the VR eye's rotation
+        // always comes from the real HMD pose plus smooth-turn's yaw
+        // offset, never from d_camera.cpp's own camera orientation.
+        // Feeding the real C-stick's X axis into the SAME
+        // updateSmoothTurn() the VR right thumbstick already drives closes
+        // that gap -- both inputs advance the same g_smoothTurnYawRad
+        // accumulator, so they add rather than fight. Skipped while
+        // fishing for the same reason the VR right stick is above: the
+        // C-stick is already doing fishing input on those frames (real
+        // hardware feeds d_a_mg_rod.cpp's rod_substick_x/y from this same
+        // getSubStickX() call), so it shouldn't also spin the camera.
+        const float realCStickX = mDoCPd_c::getSubStickX(PAD_1);
+        dusk::vr::updateSmoothTurn(realCStickX, pacing.presentation_dt_seconds);
     }
 
     // See g_headMoveAngleS's declaration comment for the bug this fixes.

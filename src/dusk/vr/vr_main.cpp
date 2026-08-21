@@ -1231,8 +1231,20 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     // anywhere). `triggered` is a one-frame edge (the detector itself
     // enforces a cooldown + must-drop-below-resetSpeed-to-rearm hysteresis so
     // one swing can't repeat-fire).
+    //
+    // "Swap Sword/Shield Hands" VR setting (2026-08-20): when on, the sword
+    // now tracks the RIGHT controller (see vr_link_visibility.hpp's
+    // refreshTrackedItemMtxLive()) -- so the SWING gesture that triggers a
+    // sword attack needs to follow suit and read the RIGHT controller's
+    // motion instead, or the hand actually holding the sword wouldn't be
+    // the one that can swing it. `g_leftSwing`/`g_rightThrust` stay tied to
+    // their ACTIONS (swing->B/attack, thrust->R/bash) regardless -- only
+    // which physical controller's pose feeds each detector swaps.
+    const bool swapSwordShieldHands = dusk::getSettings().game.vrSwapSwordShieldHands.getValue();
+    const XrPosef& swordSwingSourcePose = swapSwordShieldHands ? rightPose : leftPose;
+    const XrPosef& shieldThrustSourcePose = swapSwordShieldHands ? leftPose : rightPose;
     const vr_combat::Pose leftSwingPose{
-        {leftPose.position.x, leftPose.position.y, leftPose.position.z},
+        {swordSwingSourcePose.position.x, swordSwingSourcePose.position.y, swordSwingSourcePose.position.z},
         static_cast<double>(time) * 1e-9};
     const vr_combat::SwingEvent leftSwingEvent = g_leftSwing.update(leftSwingPose);
 
@@ -1279,10 +1291,13 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     // Thrust-gesture -> shield bash, RIGHT hand: added 2026-08-13 per
     // explicit user request ("if you thrust the right controller it should
     // press R basically, as R is shield bash"). Same vr_combat::SwingDetector
-    // machinery as the left-hand sword gesture above, fed rightPose instead
-    // (already located earlier in tick(), same as leftPose).
+    // machinery as the left-hand sword gesture above, fed
+    // shieldThrustSourcePose (rightPose normally, swapped to leftPose when
+    // "Swap Sword/Shield Hands" is on -- see swordSwingSourcePose's own
+    // comment above, same reasoning).
     const vr_combat::Pose rightThrustPose{
-        {rightPose.position.x, rightPose.position.y, rightPose.position.z},
+        {shieldThrustSourcePose.position.x, shieldThrustSourcePose.position.y,
+         shieldThrustSourcePose.position.z},
         static_cast<double>(time) * 1e-9};
     const vr_combat::SwingEvent rightThrustEvent = g_rightThrust.update(rightThrustPose);
 
@@ -1552,9 +1567,28 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
         static s16 s_cutsceneJumpCutLastTargetYawS = 0;
         static bool s_cutsceneJumpCutWasActive = false;
 
-        const bool cutsceneActive =
-            dusk::getSettings().game.vrThirdPerson.getValue() &&
-            dusk::vr::isRealCutsceneRunning();
+        // Gated on the ACTUAL current first/third-person state
+        // (isVrFirstPerson()), not the raw "Third Person" setting value
+        // alone -- as of 2026-08-20, a real cutscene can go third-person
+        // two different ways: the global Third Person setting (what this
+        // used to check exclusively), OR the newer per-cutscene default
+        // (isFirstPerson() returns false for real cutscenes unless the
+        // EXPERIMENTAL "Cutscenes First-Person" toggle is on -- see
+        // isFirstPerson()'s own comment, vr_link_visibility.hpp). Checking
+        // the raw setting alone meant this facing-assist silently stopped
+        // firing for ordinary (non-Third-Person-mode) cutscenes once they
+        // started defaulting to third-person via that second path --
+        // exactly the "camera no longer recenters" regression report this
+        // fixes. Correctly still skips when the EXPERIMENTAL toggle makes
+        // a cutscene first-person instead (isVrFirstPerson() true there),
+        // matching this whole mechanism's original "plain first-person VR
+        // is completely untouched" design intent.
+        bool cutsceneActive = false;
+        if (dusk::vr::isRealCutsceneRunning()) {
+            if (auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer())) {
+                cutsceneActive = !dusk::vr::isVrFirstPerson(link);
+            }
+        }
 
         if (cutsceneActive) {
             if (view_class* view = dComIfGd_getView()) {

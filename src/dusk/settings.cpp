@@ -78,6 +78,22 @@ UserSettings g_userSettings = {
         .vrDesktopMirror {"game.vrDesktopMirror", true},
         .vrHideBody {"game.vrHideBody", false},
         .vrThirdPerson {"game.vrThirdPerson", false},
+        .vrExperimentalCutsceneFirstPerson {"game.vrExperimentalCutsceneFirstPerson", false},
+        .vrSwapSwordShieldHands {"game.vrSwapSwordShieldHands", false},
+        // Key string deliberately kept as the original "game.vrSwapGripMirrorAxis"
+        // (not renamed to match the C++ member) so a value the user already
+        // tuned before the sword/shield split (2026-08-20) carries over
+        // instead of silently resetting to the default.
+        .vrSwapSwordGripMirrorAxis {"game.vrSwapGripMirrorAxis", 0},
+        .vrSwapShieldGripMirrorAxis {"game.vrSwapShieldGripMirrorAxis", 0},
+        .vrSwapSwordExtraFlipAxis {"game.vrSwapSwordExtraFlipAxis", -1},
+        .vrSwapShieldExtraFlipAxis {"game.vrSwapShieldExtraFlipAxis", -1},
+        .vrSwapSwordGripOffsetX {"game.vrSwapSwordGripOffsetX", 0.0f},
+        .vrSwapSwordGripOffsetY {"game.vrSwapSwordGripOffsetY", 0.0f},
+        .vrSwapSwordGripOffsetZ {"game.vrSwapSwordGripOffsetZ", 0.0f},
+        .vrSwapShieldGripOffsetX {"game.vrSwapShieldGripOffsetX", 0.0f},
+        .vrSwapShieldGripOffsetY {"game.vrSwapShieldGripOffsetY", 0.0f},
+        .vrSwapShieldGripOffsetZ {"game.vrSwapShieldGripOffsetZ", 0.0f},
         // RESET TO 1.0, 2026-08-20 (was 2.0, confirmed correct on Virtual
         // Desktop 2026-08-16): that tuning was specific to submitting via
         // the plain non-SRGB native swapchain format, which
@@ -321,6 +337,18 @@ void registerSettings() {
     Register(g_userSettings.game.vrDesktopMirror);
     Register(g_userSettings.game.vrHideBody);
     Register(g_userSettings.game.vrThirdPerson);
+    Register(g_userSettings.game.vrExperimentalCutsceneFirstPerson);
+    Register(g_userSettings.game.vrSwapSwordShieldHands);
+    Register(g_userSettings.game.vrSwapSwordGripMirrorAxis);
+    Register(g_userSettings.game.vrSwapShieldGripMirrorAxis);
+    Register(g_userSettings.game.vrSwapSwordExtraFlipAxis);
+    Register(g_userSettings.game.vrSwapShieldExtraFlipAxis);
+    Register(g_userSettings.game.vrSwapSwordGripOffsetX);
+    Register(g_userSettings.game.vrSwapSwordGripOffsetY);
+    Register(g_userSettings.game.vrSwapSwordGripOffsetZ);
+    Register(g_userSettings.game.vrSwapShieldGripOffsetX);
+    Register(g_userSettings.game.vrSwapShieldGripOffsetY);
+    Register(g_userSettings.game.vrSwapShieldGripOffsetZ);
     Register(g_userSettings.game.vrGammaCompensation);
     Register(g_userSettings.game.vrGammaCompensationSteamVr);
     Register(g_userSettings.game.enableFastIronBoots);

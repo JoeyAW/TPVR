@@ -105,6 +105,55 @@ namespace dusk {
                 // this slider again.
                 dusk::config::ImGuiSliderFloat("VR Gamma Compensation (SteamVR)",
                     getSettings().game.vrGammaCompensationSteamVr, 0.3f, 2.2f, "%.3f");
+                // Debug-only, live-adjustable (2026-08-20) -- see settings.h's
+                // vrSwapSwordGripMirrorAxis/vrSwapShieldGripMirrorAxis
+                // comments. Which local axis (0=X, 1=Y, 2=Z)
+                // mirrorLocalMtxAxis() (vr_link_visibility.hpp) reflects
+                // each item's grip data through when "Swap Sword/Shield
+                // Hands" (VR settings tab) is on -- split into two
+                // independent sliders after the first in-headset test found
+                // one shared axis (0) left the sword "about right" but the
+                // shield "backwards" (showing its straps instead of its
+                // front face) -- the two items need their own axis. Only
+                // matters while that setting is on. Remove once both axes
+                // are confirmed and baked in as the compiled defaults.
+                dusk::config::ImGuiSliderInt("VR Swap Sword Grip Mirror Axis (0=X 1=Y 2=Z)",
+                    getSettings().game.vrSwapSwordGripMirrorAxis, 0, 2);
+                dusk::config::ImGuiSliderInt("VR Swap Shield Grip Mirror Axis (0=X 1=Y 2=Z)",
+                    getSettings().game.vrSwapShieldGripMirrorAxis, 0, 2);
+                // Debug-only, live-adjustable (2026-08-20 same-day
+                // follow-up) -- see settings.h's vrSwapSwordExtraFlipAxis/
+                // vrSwapShieldExtraFlipAxis comments. An ADDITIONAL
+                // 180-degree rotation applied after the mirror above, for
+                // when the mirror gets which face shows right but leaves
+                // the item spun 180 degrees the wrong way around that
+                // face's own normal. -1 = off (the default; most items
+                // likely won't need this second correction).
+                dusk::config::ImGuiSliderInt("VR Swap Sword Extra Flip Axis (-1=off 0=X 1=Y 2=Z)",
+                    getSettings().game.vrSwapSwordExtraFlipAxis, -1, 2);
+                dusk::config::ImGuiSliderInt("VR Swap Shield Extra Flip Axis (-1=off 0=X 1=Y 2=Z)",
+                    getSettings().game.vrSwapShieldExtraFlipAxis, -1, 2);
+                // Debug-only, live-adjustable (2026-08-20 same-day
+                // follow-up) -- see settings.h's vrSwapSwordGripOffsetX/Y/Z
+                // comment. Fixed positional nudge applied to the item's
+                // grip AFTER the mirror/extra-flip above, in that
+                // already-corrected local frame -- compensates for the
+                // shield mesh's own handle attachment sitting off-center
+                // (authored for left-hand use) without touching mesh data.
+                // Units are game world units (100/metre, ~1 = 1cm). 0.0f =
+                // no nudge.
+                dusk::config::ImGuiSliderFloat("VR Swap Sword Grip Offset X",
+                    getSettings().game.vrSwapSwordGripOffsetX, -20.0f, 20.0f, "%.2f");
+                dusk::config::ImGuiSliderFloat("VR Swap Sword Grip Offset Y",
+                    getSettings().game.vrSwapSwordGripOffsetY, -20.0f, 20.0f, "%.2f");
+                dusk::config::ImGuiSliderFloat("VR Swap Sword Grip Offset Z",
+                    getSettings().game.vrSwapSwordGripOffsetZ, -20.0f, 20.0f, "%.2f");
+                dusk::config::ImGuiSliderFloat("VR Swap Shield Grip Offset X",
+                    getSettings().game.vrSwapShieldGripOffsetX, -20.0f, 20.0f, "%.2f");
+                dusk::config::ImGuiSliderFloat("VR Swap Shield Grip Offset Y",
+                    getSettings().game.vrSwapShieldGripOffsetY, -20.0f, 20.0f, "%.2f");
+                dusk::config::ImGuiSliderFloat("VR Swap Shield Grip Offset Z",
+                    getSettings().game.vrSwapShieldGripOffsetZ, -20.0f, 20.0f, "%.2f");
                 ImGui::EndMenu();
             }
 

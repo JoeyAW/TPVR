@@ -235,6 +235,105 @@ struct UserSettings {
         // option that shows link's body and puts the entire game in third
         // person").
         ConfigVar<bool> vrThirdPerson;
+        // EXPERIMENTAL. Default off (added 2026-08-20, explicit user
+        // request). Normal behavior as of this same request: real scripted
+        // CUTSCENES (isRealCutsceneRunning(), vr_link_visibility.hpp --
+        // distinguishes them from plain dialogue and door/treasure
+        // transitions, both unaffected by this setting either way) now
+        // default to THIRD-PERSON while in first-person VR mode, instead of
+        // the previous "first-person whenever Link's own body is actually
+        // drawn in the shot" behavior from the 2026-08-08 fix. Turning this
+        // on restores that exact previous behavior for cutscenes
+        // specifically (still gated by checkPlayerNoDraw() -- a cutscene
+        // that hides/swaps out Link's real body still falls back to third-
+        // person either way) -- see isFirstPerson()'s own final branch.
+        // Labeled EXPERIMENTAL in the UI since forcing first-person into an
+        // authored cutscene camera not designed to be viewed that way can
+        // put the viewer somewhere the shot was never built for (the
+        // original reason this fallback existed as third-person-by-default
+        // in the first place, before the 2026-08-08 request).
+        ConfigVar<bool> vrExperimentalCutsceneFirstPerson;
+        // Swaps which physical controller the sword and shield track when
+        // drawn: sword to the RIGHT hand, shield to the LEFT (opposite of
+        // the base game's own left-handed convention -- sword=
+        // mLeftItemJntNo, shield=mRightItemJntNo, unchanged either way;
+        // only which tracked controller matrix composes with that rig data
+        // changes). Also swaps which controller's swing/thrust gesture
+        // drives the sword-attack/shield-bash combat controls, so the hand
+        // now holding each item is still the one whose gesture triggers its
+        // action. See vr_link_visibility.hpp's refreshTrackedItemMtxLive()
+        // (grip orientation, via a mirror-reflection of the existing rig
+        // data through Link's own body plane -- vrSwapSwordGripMirrorAxis/
+        // vrSwapShieldGripMirrorAxis below are the live-adjustable knobs
+        // for this) and vr_main.cpp's tick() (gesture-to-controller swap).
+        // Does NOT affect the "raise shield" hold control (still left
+        // squeeze, unmentioned by the original request) or any
+        // ranged-weapon aiming hand. Default off (added 2026-08-20,
+        // explicit user request).
+        ConfigVar<bool> vrSwapSwordShieldHands;
+        // Which local axis (0=X, 1=Y, 2=Z) mirrorLocalMtxAxis()
+        // (vr_link_visibility.hpp) reflects the sword's grip data through
+        // when vrSwapSwordShieldHands is on -- see that function's own
+        // comment for the math. Debug-only for now (Debug > Graphics
+        // Settings, ImGuiMenuTools.cpp), NOT exposed in the main VR
+        // settings tab -- this is a one-time internal calibration knob
+        // (which axis is the rig's own sagittal plane), not a per-player
+        // preference. SPLIT from a single shared axis into two independent
+        // ones (this + vrSwapShieldGripMirrorAxis below) 2026-08-20, same
+        // day -- the first in-headset test found one shared axis value
+        // that looked "about right" for the sword but left the shield
+        // showing its back/straps instead of its front face ("backwards"),
+        // proving the two items need their own axis (different item
+        // joints, no reason to assume the same local-frame convention).
+        // Once each is confirmed, update its default to match and remove
+        // the debug sliders, per this project's normal practice.
+        ConfigVar<int> vrSwapSwordGripMirrorAxis;
+        // Shield's counterpart to vrSwapSwordGripMirrorAxis above -- see
+        // that field's comment for the full reasoning behind the split.
+        ConfigVar<int> vrSwapShieldGripMirrorAxis;
+        // Additional 180-degree rotation (0=X, 1=Y, 2=Z; -1 = none) applied
+        // AFTER vrSwapSwordGripMirrorAxis's mirror -- rotate180LocalMtxAxis()
+        // (vr_link_visibility.hpp) for the math. Added 2026-08-20 same-day
+        // follow-up: the mirror alone can get which FACE of an item shows
+        // right while leaving it spun 180 degrees the wrong way around
+        // that face's own normal. -1 default (no extra flip). Debug-only,
+        // same reasoning as the mirror axis settings above.
+        //
+        // A genuine GEOMETRIC mesh mirror (via J3DModel::setBaseScale(),
+        // moving an asymmetric feature like the shield's handle to the
+        // mesh's own mirror-correct side, rather than just repositioning
+        // the rigid attachment the way this setting and
+        // vrSwapSwordGripMirrorAxis do) was also attempted the same day,
+        // but never got the required cull-mode compensation working
+        // despite five separate attempts -- see vr-mod-notes for the full
+        // trail if revisiting this. Removed entirely per explicit user
+        // request rather than left disabled.
+        ConfigVar<int> vrSwapSwordExtraFlipAxis;
+        // Shield's counterpart to vrSwapSwordExtraFlipAxis above.
+        ConfigVar<int> vrSwapShieldExtraFlipAxis;
+        // Fixed positional nudge (game world units, 100 units/metre -- see
+        // kHorseCameraBackUnits's own comment for the same conversion used
+        // elsewhere) applied to the item's grip AFTER the mirror/extra-flip
+        // above, in that already-corrected local frame -- i.e. these move
+        // the item along ITS OWN current local axes, not world axes. Added
+        // 2026-08-20 same-day follow-up: once grip rotation was fixed
+        // (Extra Flip Axis), the remaining shield complaint was purely
+        // positional -- "the hand is still gripping the handle [correctly],
+        // is it possible to move the shield so the hand is on the other
+        // side?" -- i.e. the shield mesh's own handle attachment sits
+        // off-center (authored for left-hand use, per the abandoned
+        // geometric mesh-mirror investigation), so a fixed sideways nudge
+        // compensates without touching mesh data. Debug-only, live-
+        // adjustable (Debug > Graphics Settings, ImGuiMenuTools.cpp), same
+        // reasoning as the axis settings above -- 0.0f default (no nudge)
+        // until confirmed in-headset, then bake in and remove the sliders.
+        ConfigVar<float> vrSwapSwordGripOffsetX;
+        ConfigVar<float> vrSwapSwordGripOffsetY;
+        ConfigVar<float> vrSwapSwordGripOffsetZ;
+        // Shield's counterpart to the sword offsets above.
+        ConfigVar<float> vrSwapShieldGripOffsetX;
+        ConfigVar<float> vrSwapShieldGripOffsetY;
+        ConfigVar<float> vrSwapShieldGripOffsetZ;
         // Live-adjustable VR gamma-compensation exponent for every runtime
         // EXCEPT SteamVR (which keeps its own separate, independently-tuned,
         // decoupled baseline -- see vr_xr_submit.hpp's

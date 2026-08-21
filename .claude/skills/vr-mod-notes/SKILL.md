@@ -10129,6 +10129,1217 @@ value a third time, get a real side-by-side against the desktop mirror
 (already established as color-accurate, since it bypasses the whole XR
 submission path) rather than trusting an impression alone.
 
+### Cutscenes default to third-person again (except dialogue/transitions); EXPERIMENTAL toggle restores the 2026-08-08 first-person-if-loaded behavior — built 2026-08-20, NOT yet tested in-headset
+
+**Goal** (explicit user request): "put cutscenes (except for dialogue, and
+transitions) in THIRD person while in FIRST person mode. Then add a
+toggle that puts every cutscene that has link loaded in (the exact same
+way we have it right now) in first person, but make sure the toggle says
+'EXPERIMENTAL:'" — a deliberate partial reversal of the 2026-08-08 change
+(section 21 above, "Cutscenes now first-person too, when Link's own body
+is actually loaded/drawn"), scoped specifically to real cutscenes, not
+dialogue or door/treasure transitions.
+
+**Distinguishing the three event kinds was already solved**: `TALK_e`
+(dialogue) is already handled by `isFirstPerson()`'s own
+`event->getMode() == dEvt_mode_TALK_e` check (section 19, always
+first-person, untouched). Real cutscenes (`dEvt_type_OTHER_e`/
+`COMPULSORY_e`) vs. door/treasure transitions (`dEvt_type_DOOR_e`/
+`TREASURE_e`) both set the identical `dEvt_mode_DEMO_e`, so telling them
+apart needs `isRealCutsceneRunning()` (`vr_link_visibility.hpp`) — already
+built 2026-08-18 for the "Hide Body" setting's own cutscene carve-out
+(reads the ORIGINAL event type off `dComIfGp_getEvent()->mOrder[mOrderIdx]`,
+set once at `entry()` and stable for the event's whole duration). Reused
+directly rather than re-deriving a second mechanism for the same
+distinction.
+
+**Fix** (`vr_link_visibility.hpp`'s `isFirstPerson()`): the final
+fallback line (previously an unconditional `return
+!link->checkPlayerNoDraw();`, covering BOTH cutscenes and door/transition
+events identically) is now preceded by:
+```cpp
+if (isRealCutsceneRunning() &&
+    !dusk::getSettings().game.vrExperimentalCutsceneFirstPerson.getValue()) {
+    return false;
+}
+return !link->checkPlayerNoDraw();
+```
+Door/transition events (`isRealCutsceneRunning()` false for them) are
+completely unaffected either way — still first-person whenever Link's
+body is drawn, exactly as before. Real cutscenes now default to
+third-person (matching the ORIGINAL pre-2026-08-08 behavior) unless the
+new toggle is on, in which case they fall through to the identical
+`checkPlayerNoDraw()`-gated check the 2026-08-08 fix introduced — "the
+exact same way we have it right now," reproduced faithfully rather than
+reinvented. `isRealCutsceneRunning()` needed a forward declaration added
+above `isFirstPerson()` (alongside the existing
+`isHookshotAirborneOrHanging()`/`isHookshotAiming()` ones), since its own
+definition sits later in the file.
+
+**New setting**: `ConfigVar<bool> game.vrExperimentalCutsceneFirstPerson`
+(`dusk/settings.h`/`.cpp`, default `false`), registered the same way as
+every other settings bool. Also added to the Dusklight menu's VR settings
+tab (`dusk/ui/settings.cpp`), right after "Hide Body" in the "Appearance"
+section — a `config_bool_select` row labeled "EXPERIMENTAL: Cutscenes
+First-Person", same pattern as every other VR tab toggle.
+
+**Interaction with other existing carve-outs, unchanged by this fix**:
+the Third Person global setting's own hookshot exemptions (checked much
+earlier in the function) and the mounted-cutscene third-person carve-out
+(`checkReinRide()`/`checkCanoeRide()`/`checkBoardRide()`, checked right
+before this new block) both still apply exactly as before — a mounted
+cutscene stays third-person regardless of the new toggle, matching "the
+exact same way we have it right now" for that case too, since the
+mounted carve-out already unconditionally returns before this new check
+is ever reached.
+
+Built successfully (RelWithDebInfo) — `settings.h`/`.cpp`,
+`vr_link_visibility.hpp` (via `vr_main.cpp`) all recompiled, clean link,
+no new warnings.
+
+**NOT yet tested in-headset.** Next step for whoever picks this up:
+trigger an ordinary cutscene and confirm it now falls back to
+third-person by default; confirm dialogue and a door/treasure transition
+are both unaffected; then flip "EXPERIMENTAL: Cutscenes First-Person" on
+in the VR settings tab and confirm cutscenes go back to exactly the
+2026-08-08 first-person-if-Link's-body-is-drawn behavior.
+
+### Follow-up, same day — facing-assist gating fixed; transitions-still-third-person investigated, real cause identified, NOT yet fixed (needs a design decision)
+
+**User report after testing the above**: "1. the cutscene direction fix
+from earlier is broken, the camera no longer recenters, and it should
+whether the setting is off or on. 2. Transitions are still third person."
+
+**Issue 1 — CONFIRMED real bug, FIXED, built, NOT yet retested.** The
+scripted-camera facing-assist's cutscene jump-cut block
+(`vr_main.cpp`'s `tick()`, "Scripted-camera facing assist" section) gated
+`cutsceneActive` on the raw `dusk::getSettings().game.vrThirdPerson.getValue()`
+setting directly — a leftover from when that global toggle was the ONLY
+way a cutscene could render third-person. Once cutscenes started
+defaulting to third-person on their own (this same day's earlier change),
+that path bypasses the global setting entirely, so the facing-assist
+silently stopped engaging for ordinary (non-Third-Person-mode) cutscenes.
+**Fix**: gate on `!dusk::vr::isVrFirstPerson(link)` instead (the
+already-existing thin forward to `isFirstPerson()`, built for the earlier
+Third Person investigation) — reflects the ACTUAL current first/third-
+person state regardless of which of the two mechanisms produced it.
+Correctly still skips when the EXPERIMENTAL toggle makes a cutscene
+first-person (no need to recenter a camera that's already head-anchored).
+The Z-target facing-assist block was deliberately left on its original
+raw-setting gate — not reported broken, and Z-targeting's own
+third-person-ness is still entirely controlled by that one global
+setting (Z-target lock isn't a cutscene). Built successfully
+(RelWithDebInfo, only `vr_main.cpp` recompiled), clean link, no new
+warnings. **NOT yet retested in-headset.**
+
+**Issue 2 — investigated via code reading (not yet a code fix, needs a
+decision first).** Confirmed via a real `git diff` review that today's
+cutscene change touches ONLY the `isRealCutsceneRunning()`-true branch of
+`isFirstPerson()` — the door/transition fallback
+(`return !link->checkPlayerNoDraw();`, reached when
+`isRealCutsceneRunning()` is false) is completely untouched, byte-for-
+byte identical to before today's session. So this is NOT a regression
+from today's change. Traced WHY transitions can still end up third-person
+anyway: `doorCheck()` (`d_event.cpp`) for a `DOOR_e`/`TREASURE_e` event
+loads and runs real event data through `dComIfGp_getEventManager().order(
+mEventId)` — the SAME general scripted-camera-command system real
+cutscenes use (`d_camera.cpp`'s large demo-camera-command switch, several
+`hideActor()` call sites at lines ~5861-6636). `hideActor()` — when
+called on the player specifically — sets the exact camera-attention bit
+`checkPlayerNoDraw()` reads (`dComIfGp_onCameraAttentionStatus(0, 2)`,
+`d_camera.cpp:64`). Since door/treasure transitions can invoke this same
+general camera-command machinery, a transition's own scripted camera can
+legitimately hide Link's real body for some or all of its duration (e.g.
+a reveal-pan shot, or an item-get closeup during a treasure-chest open)
+— exactly the same reason cutscenes originally defaulted to third-person
+in the first place (section 21's whole `checkPlayerNoDraw()` gate exists
+because SOME shots, cutscene or transition alike, genuinely aren't
+about/looking-at Link). **Not independently confirmed via an in-headset
+capture** — this is a code-reading conclusion, not a proven root cause,
+per this project's own standing practice; flagged to the user rather
+than treated as certain.
+
+**Resolved via a direct question to the user**: asked whether transitions
+should be forced first-person unconditionally, or left on the existing
+`checkPlayerNoDraw()`-gated fallback. **User chose "leave as-is"** — no
+code change needed. Confirms "except... transitions" in the original
+request meant "don't touch how transitions currently behave," not "make
+transitions always first-person" — closes this out with zero further
+changes; what was reported as "still third person" is expected,
+pre-existing behavior (the transition's own scripted camera legitimately
+hiding Link for part of its duration), not a bug.
+
+### Follow-up, same day — user pushed back on "transitions are pre-existing behavior, leave as-is": direct evidence they were first-person before today. Re-investigated, found a real plausible mechanism, diagnostic logging added, NOT yet confirmed
+
+**User's exact pushback**: "I don't understand why earlier, before the
+cutscene toggle was added, transitions were first person. Why don't they
+work now?" — a concrete, confident claim that directly contradicts the
+"pre-existing, unaffected by today's change" conclusion from the previous
+round (which the user had actually agreed to leave as-is, based on that
+now-questionable claim). Per this project's own standing lesson about
+trusting real evidence over a plausible-sounding theory, re-investigated
+rather than defending the earlier explanation.
+
+**Re-read `d_event.cpp`'s `mOrderIdx`/`order()`/`entry()` machinery much
+more carefully this round** (the earlier pass only skimmed enough to
+confirm the general TALK/DOOR/OTHER distinction, not enough to trust it
+under multiple-pending-orders conditions). Found a real, structural gap in
+`isRealCutsceneRunning()`'s assumption: `mOrderIdx` is set inside
+`dEvt_control_c::order()` (the REQUEST-time function, `d_event.cpp:96-140`)
+-- it points at the HEAD of a priority-sorted linked list of PENDING
+orders at insertion time, inserted via `mNextOrderIdx` chaining. `entry()`
+(the per-frame acceptance pump) walks that list starting from `mOrderIdx`
+via a LOCAL variable (`orderIdx`), trying each candidate's type-specific
+check function (`doorCheck()`/`demoCheck()`/`talkCheck()`/etc.) in turn --
+but never writes back into the `mOrderIdx` MEMBER to reflect which
+list entry actually got accepted, unless that accepted entry happened to
+already be the one `mOrderIdx` was pointing at. If a second, unrelated
+order was ever queued around the same moment (a plausible thing to happen
+in a busy scene -- multiple actors calling `order()` on the same or
+adjacent frames), and the FIRST candidate in the resulting list is not the
+one whose check function ultimately succeeds, `mOrderIdx` keeps pointing
+at a stale/wrong array slot -- meaning `isRealCutsceneRunning()`'s
+`event->mOrder[event->mOrderIdx].mEventType` read is NOT reliably "the
+event actually running right now," just "whatever was at the head of the
+pending-request list at the LAST order() call." `mOrder[]` is a fixed
+8-entry array that's never zeroed between events either, so a stale slot
+can carry a leftover `mEventType` from a completely unrelated, earlier
+event.
+
+**This directly threatens the "confirmed working" claim** from the
+Hide Body investigation (2026-08-18) that this same mechanism was based
+on -- that confirmation was real (the user did test and confirm correct
+behavior for whatever specific transition they tried then), but it was
+never proven robust against the multiple-pending-orders case above, and a
+single successful test doesn't rule out a real, narrower failure mode
+that a DIFFERENT transition (or the same one under different scene
+conditions) can still hit.
+
+**Not yet proven as the actual cause** -- this is the leading, plausible-
+but-unconfirmed theory from a second, more careful code read, not a
+verified root cause. Added temporary `[dusk::vr::cutscenediag]`
+`OutputDebugStringA` logging (`isFirstPerson()`, right before the
+cutscene-third-person check) -- logs `mOrderIdx`, the raw
+`mOrder[mOrderIdx].mEventType`, `event->getMode()`,
+`isRealCutsceneRunning()`'s result, and `checkPlayerNoDraw()`, once per
+detected type change plus every ~45 frames while any non-dialogue event
+stays active (mirrors section 19's own `[dusk::vr::fpdiag]` diagnostic
+shape). `<windows.h>`/`<cstdio>` were already included in this file (the
+still-in-tree `[dusk::vr::coreanchor]` diagnostic from an earlier
+investigation), so no new includes were needed.
+
+Built successfully (RelWithDebInfo) -- only `vr_main.cpp` (transitively
+includes the header) recompiled, clean link, no new warnings.
+
+**Concrete next step**: launch in VR, trigger a door/room transition (or
+whichever kind of "transition" reads as third-person), and paste back the
+`[dusk::vr::cutscenediag]` lines from around that moment. If `rawType`
+reads `1`/`2` (`dEvt_type_OTHER_e`/`COMPULSORY_e`) instead of the real
+door/treasure type during a transition that's rendering third-person,
+that confirms the stale-`mOrderIdx` theory directly, and the fix would be
+to stop trusting `mOrderIdx` for this purpose -- e.g. have `doorCheck()`/
+`demoCheck()`/`talkCheck()` themselves record the ACCEPTED order's type
+into a new, dedicated member the moment they return 1 (real acceptance
+event, not a derived/indirect read), and have `isRealCutsceneRunning()`
+read THAT instead. If `rawType` reads correctly as `3`/`4` (DOOR_e/
+TREASURE_e) the whole time and `isRealCutscene=0` throughout, the
+`mOrderIdx` theory is ruled out and this needs a fresh round of
+investigation, not another guess at the same theory.
+
+### Follow-up, same day — root cause of "door transition renders third-person" confirmed via real capture, fixed, built, NOT yet retested
+
+**User's clarification**: "outside transition" = walking from Ordon
+Village to Ordon Ranch (a region-boundary loading zone), tested in/out
+twice. "The door was def[initely] 3rd person" -- a direct, confident
+contradiction of what the log appeared to show (the DOOR_e segment had
+`isRealCutscene=0`/`noDraw=0` on every logged line, which per the code
+should have rendered first-person the whole time).
+
+**Re-examined the same capture much more carefully rather than accepting
+the apparent contradiction at face value**: the DOOR_e-tagged block
+(`rawType=1`) was NOT actually uniform for its whole duration -- it had a
+real, sustained interruption partway through where `rawType` read `2`
+(`dEvt_type_OTHER_e`) for many consecutive logged lines, WHILE `mode`
+stayed at `2` (`dEvt_mode_DEMO_e`) continuously across the entire
+transition, before settling back to `rawType=1`. That interruption
+(`isRealCutscene=1` for that stretch) is exactly what would force
+third-person mid-sequence -- almost certainly landing on the visually
+significant part of the transition (the actual door-open/room-reveal
+moment), which is why the user's overall impression was "third person"
+even though the diagnostic's OTHER individual samples (captured before/
+after that stretch) correctly read as DOOR_e/first-person.
+
+**Root cause, confirmed by re-reading `dEvt_control_c::order()`/`entry()`
+(`d_event.cpp`) line by line instead of trusting the earlier summary**:
+`mOrderIdx` is set inside `order()` -- the REQUEST-time function -- as the
+head of a priority-linked pending-order list. `entry()` (the per-frame
+acceptance pump) walks that list via a LOCAL variable, never writing back
+into the `mOrderIdx` MEMBER to reflect which specific list entry actually
+got accepted. `entry()` also unconditionally resets `mNum = 0` right
+before walking the list. Net effect: while a door event is still
+genuinely playing, ANY unrelated `order()` call from elsewhere in the
+game (plausible -- plenty of ambient systems speculatively try ordering
+events every frame, most of which get silently rejected) writes its own
+type straight into `mOrder[0]` -- which `mOrderIdx` is very often still
+pointing at, since normally only one event is active at a time --
+corrupting a LIVE re-read of `mOrder[mOrderIdx].mEventType` even though
+the door event itself never stopped running. The earlier version of this
+function's own comment ("mOrderIdx... stays valid for the event's whole
+duration") was wrong -- it had been inferred from a first pass over
+`entry()`, never actually verified against real data, and this capture is
+the first real evidence either way.
+
+**Fix** (`isRealCutsceneRunning()`, `vr_link_visibility.hpp`): stopped
+re-reading `mOrder[mOrderIdx]` on every call. Instead, capture the type
+ONCE, at the moment `event->getMode()` first transitions into
+`dEvt_mode_DEMO_e`/`COMPULSORY_e`, and hold that captured value fixed for
+as long as `mMode` stays in that scripted-event range -- `mMode` is far
+more stable than `mOrder[]`/`mOrderIdx` (confirmed directly: `order()`
+never touches it at all; only `entry()`'s acceptance switch and
+`endProc()` do), so this is immune to the mid-event `mOrder[]` corruption
+demonstrated above for the rest of that event's duration, regardless of
+how many unrelated `order()` calls happen meanwhile. Implemented with two
+function-local `static` variables (`s_typeCaptured`/`s_cachedIsCutscene`)
+-- safe even though this function is called many times per real frame
+from multiple call sites (`isFirstPerson()` itself, plus the separate
+"Hide Body" carve-out in `d_a_alink.cpp`), since `mMode` only changes once
+per `Step()`, not per call -- repeat calls within one frame just
+re-observe the same already-captured state, not a fresh edge.
+
+The `[dusk::vr::cutscenediag]` diagnostic logging is still in the tree
+(not yet confirmed fixed) -- its `isRealCutscene` field now reflects the
+FIXED (cached) decision while `rawType` still shows the raw, potentially-
+still-drifting live read, which makes the next capture directly
+diagnostic: if the fix works, `isRealCutscene` should stay `0` for an
+entire DOOR_e transition even if `rawType` still shows a transient flip
+to `2` mid-event (proving the underlying drift still happens but is now
+correctly ignored).
+
+Built successfully (RelWithDebInfo) -- only `vr_main.cpp` (transitively
+includes the header) recompiled, clean link, no new warnings.
+
+**CONFIRMED FIXED via a real follow-up capture** -- user repeated the same
+in/out door-transition test and pasted back a fresh log. Both `rawType=1`
+(DOOR_e) segments in that capture stayed locked at `isRealCutscene=0`/
+`noDraw=0` for their ENTIRE duration this time -- no more mid-event drift
+into `2` (OTHER_e) the way the earlier capture showed. The
+mode-transition-edge capture-and-hold fix holds up under real data.
+Diagnostic scaffolding removed (`[dusk::vr::cutscenediag]`, the whole
+block right before the door/transition-vs-cutscene branch in
+`isFirstPerson()`) per this project's normal practice, now that the fix
+is confirmed. Rebuilt clean (`vr_main.cpp` only), verified via a second
+successful build. **This closes out the door/treasure-transition
+first-person regression entirely** -- both issues from the original
+2026-08-20 report (facing-assist gating, transitions-still-third-person)
+are now fully resolved.
+
+**Separate, still-open item, needs the user's input**: the "outside
+transition" (region-boundary loading zone, e.g. Ordon Village ↔ Ordon
+Ranch) is genuinely tagged `dEvt_type_COMPULSORY_e`/`OTHER_e` by the
+engine itself -- the SAME type real story cutscenes use. There is no
+field on the event that distinguishes "a real story beat" from "a
+scripted area-transition that happens to reuse the same camera/demo
+system," so `isRealCutsceneRunning()` cannot currently tell them apart at
+all -- forcing this kind of transition third-person too, by design, not a
+bug. **User's answer**: "It's ok, you can save it for future reference"
+-- explicitly deferred, not asking for a fix right now. Left as-is
+(third-person, matching the engine's own classification). If this ever
+needs picking up: would need a different, more specific signal than
+event type -- e.g. matching against a known `mEventId`/`mUnkEventId` set,
+or some other property specific to area-transition events -- not yet
+investigated.
+
+### "Swap Sword/Shield Hands" VR setting — mirror-math grip approach, built 2026-08-20, NOT yet tested in-headset
+
+**Goal** (explicit user request): a VR setting that, when on, draws the
+sword in the right hand and shield in the left (the base game always has
+Link hold the sword in his left hand -- standard Zelda left-handed
+convention, section 16), and swaps which hand's swing/thrust gesture
+triggers a sword attack vs. shield bash to match. User explicitly asked to
+have the implementation OPTIONS compared and explained before picking one,
+flagging two known risks themselves: a plain swap would look "backwards"
+(wrong grip orientation), and mirroring the model outright "might mess up
+the controls."
+
+**Options compared, presented to the user**:
+1. **Plain swap** (just feed the sword the right controller's tracked pose
+   instead of the left, no other change) -- rejected: the game's rig data
+   for "how the sword sits in a fist" was authored specifically for the
+   left hand; the right hand's own tracking calibration is a SEPARATE,
+   independently-tuned set of numbers (confirmed back in section 12 -- the
+   meshes are mirrored and the two hands' calibrations don't share a
+   simple relationship), so combining the two mismatched pieces produces
+   exactly the "backwards" look the user predicted.
+2. **Mirror the model/matrix directly** (negative-determinant reflection)
+   -- rejected: flips mesh winding, typically renders inside-out unless
+   compensated for, and breaks the "every transform in this pipeline is a
+   proper rotation" assumption several other parts of the tracked-item
+   math quietly rely on. Real risk for a fiddly gain.
+3. **Empirically-tuned fixed offset** (skip rig data and math entirely,
+   hand-tune a constant grip offset live in-headset) -- kept as the
+   documented fallback; this is literally how the LEFT hand's original
+   tracked-hand rotation calibration was done (section 12), successfully,
+   with less effort than the right hand's math-derived approach.
+4. **Mirror-math (CHOSEN)**: reflect the EXISTING grip data through Link's
+   own left-right body plane using a reflection-conjugation technique
+   (`M*R*M`) already used successfully once before in this exact codebase
+   (the stereo eye-alignment fix, section 14's "F*R*F") -- produces a
+   mathematically valid PROPER rotation (no mesh/winding risk) representing
+   a plausible mirror-image grip, reusing real rig data instead of
+   guessing constants from scratch. Only unknown: which local axis is the
+   correct mirror (sagittal) plane -- needs one round of in-headset
+   comparison across 3 candidates, same "test the 3 possible single-axis
+   planes" methodology that closed out section 12's hardest bug.
+
+**User chose option 4** (with option 3 available as a fallback layer if
+the mirror axis guess needs help beyond a simple retune).
+
+**Implementation** (`vr_link_visibility.hpp`):
+- `mirrorLocalMtxAxis(dest, src, axis)` -- new, general-purpose. For a
+  LOCAL-frame rigid transform (already expressed relative to a joint's own
+  axes, e.g. the relativeOffset `computeTrackedItemMtx()` already
+  computes), reflects it through local axis `axis` (0=X/1=Y/2=Z). Derived
+  directly (not guessed): for a diagonal reflection matrix M with
+  `M[axis][axis]=-1`, `(M*R*M)[r][c] = sign(r)*sign(c)*R[r][c]` -- negate a
+  rotation entry iff EXACTLY ONE of its row/col equals `axis` (leave the
+  diagonal and everything not touching `axis` alone), negate a translation
+  entry iff its own row equals `axis`. Generalizes section 14's
+  Z-axis-only fix to any single axis.
+- `computeTrackedItemMtx()` gained a 5th parameter, `mirrorAxis = -1`
+  (every pre-existing call site unaffected by the default) -- when >= 0,
+  mirrors the computed relativeOffset via the function above BEFORE
+  composing with `trackedHandMtx`. `applyTrackedItemMtxIfAttached()`
+  threads the same parameter straight through (same default).
+- `refreshTrackedItemMtxLive()` (the real, live per-frame sword/shield
+  tracking function): when the new `vrSwapSwordShieldHands` setting is on,
+  swaps WHICH tracked-hand matrix (`detail::s_leftHandMtx`/
+  `s_rightHandMtx`) composes with each item -- sword now gets the RIGHT
+  hand's tracked matrix, shield the LEFT -- while `leftItemJointMtx`/
+  `rightItemJointMtx` (the actual rig data read) are DELIBERATELY left
+  unswapped, since there's no "sword in right hand" rig data to swap TO;
+  only which controller's tracked pose the existing rig data composes
+  with changes, with `kSwapGripMirrorAxis` (a local constant, currently
+  `0`/X, an untested starting guess) applied via the new mirrorAxis
+  parameter whenever the swap is active.
+
+**Combat gesture swap** (`vr_main.cpp`'s `tick()`): `g_leftSwing`
+(sword-swing->B) and `g_rightThrust` (shield-thrust->R) stay tied to their
+ACTIONS regardless of the setting -- only WHICH controller's pose feeds
+each detector swaps (`swordSwingSourcePose`/`shieldThrustSourcePose`,
+`rightPose`/`leftPose` swapped when `vrSwapSwordShieldHands` is on).
+Deliberately does NOT touch the "raise shield" hold control (still bound
+to left squeeze regardless of the setting -- unmentioned by the original
+request, and not visually tied to hand assignment the way the gesture
+triggers are) or any ranged-weapon aiming hand (out of scope -- the
+request was specifically "when the sword and shield are equipped").
+
+**New setting**: `ConfigVar<bool> game.vrSwapSwordShieldHands`
+(`dusk/settings.h`/`.cpp`, default `false`). Added to the Dusklight menu's
+VR settings tab (`dusk/ui/settings.cpp`) as a new "Combat" section
+(between "Appearance" and "Brightness"), one `config_bool_select` labeled
+"Swap Sword/Shield Hands".
+
+Built successfully (RelWithDebInfo, full rebuild since `settings.h`
+changed) -- clean link, no new warnings.
+
+**NOT yet tested in-headset.** Next step for whoever picks this up: turn
+the setting on, draw the sword and shield, and confirm (a) sword tracks
+the right controller, shield the left, (b) the GRIP orientation looks
+correct, not mirrored-wrong or rotated -- if it looks off, retune
+`kSwapGripMirrorAxis` (0→1 or 2) and rebuild, same one-line change either
+way, (c) swinging the hand now holding the sword still attacks, and
+thrusting the hand now holding the shield still bashes. If the mirror-math
+grip still doesn't look right after trying all 3 axes, fall back to
+layering a small hand-tuned constant offset on top (option 3 from the
+comparison above) rather than re-deriving the math.
+
+### "Swap Sword/Shield Hands" — first in-headset test, mirror axis wrong; converted to a live-adjustable debug setting instead of a hardcoded constant, built, NOT yet retested
+
+**User's first test result** (with screenshots): "they are tracked
+correctly and the motion controls work, however they are misplaced in the
+actual hand" -- rotation/tracking and the swing/thrust gesture swap both
+confirmed working, but the sword and shield sit visibly offset/floating
+away from the fist rather than gripped in it. Screenshots showed the
+shield disconnected from any strap point near the fist, and the sword's
+hilt offset from where the fist actually grips.
+
+**Diagnosis**: this is consistent with `kSwapGripMirrorAxis`'s starting
+guess (0/X) being the WRONG local axis -- since `mirrorLocalMtxAxis()`
+applies the identical axis choice to both the rotation AND translation
+components of the grip offset (verified this is mathematically correct:
+for a reflection `M = diag(-1,1,1)`, the translation term is `M*t`, i.e.
+negate only that axis's own component -- matches what's implemented, no
+formula bug found), a wrong axis choice would produce exactly this
+symptom: an orientation that might look passably close (not obviously
+flagged) while the translation offset is clearly wrong (much more
+visually obvious as "floating away from the hand"). Per the plan already
+communicated to the user, the next step is trying the other 2 candidate
+axes (1=Y, 2=Z).
+
+**Efficiency improvement made before retesting**: rather than requiring a
+full rebuild+relaunch per axis guess (3 possible round trips), converted
+`kSwapGripMirrorAxis` from a hardcoded `constexpr int` into a real,
+live-adjustable `ConfigVar<int> vrSwapGripMirrorAxis` (`settings.h`/`.cpp`,
+default 0) with a Debug > Graphics Settings slider ("VR Swap Grip Mirror
+Axis (0=X 1=Y 2=Z)", `ImGuiMenuTools.cpp`, using the pre-existing
+`dusk::config::ImGuiSliderInt` helper -- already used elsewhere, e.g. the
+VR gamma-compensation float sliders, so no new plumbing needed). This
+lets all 3 candidates be tried in ONE headset session instead of three
+separate rebuild cycles. Debug-only, deliberately NOT added to the main
+VR settings tab -- this is a one-time internal calibration knob (which
+axis is the rig's own sagittal plane), not a per-player preference; once
+the correct axis is confirmed, the plan is to update the `ConfigVar`'s
+compiled default to match and remove the debug slider, per this
+project's normal practice.
+`refreshTrackedItemMtxLive()` (`vr_link_visibility.hpp`) now reads
+`dusk::getSettings().game.vrSwapGripMirrorAxis.getValue()` instead of the
+hardcoded constant when the swap setting is on.
+
+Built successfully (RelWithDebInfo) -- `settings.h`/`.cpp`,
+`vr_link_visibility.hpp` (via `vr_main.cpp`), `ImGuiMenuTools.cpp` all
+recompiled, clean link, no new warnings.
+
+**NOT yet retested in-headset.** Next step for whoever picks this up:
+with "Swap Sword/Shield Hands" on, open Debug > Graphics Settings, cycle
+the "VR Swap Grip Mirror Axis" slider through 0/1/2 while looking at the
+drawn sword/shield, and report which value (if any) makes the grip sit
+correctly in the fist. If NONE of the 3 axes produce a correct-looking
+grip, that would mean the mirror-math approach's underlying assumption
+doesn't hold for this rig (see the feature's own original comparison
+write-up above for why this could happen -- the body rig's local hand-
+joint axis convention and the tracked-hand matrix's own, separately
+calibrated convention aren't guaranteed to correspond via a simple
+mirror) -- fall back to option 3 from that comparison (a small
+hand-tuned constant offset, layered on top of or instead of the mirror)
+rather than re-deriving the math further.
+
+### Follow-up, same day — sword axis found ("about right"), shield needed its own independent axis (was "backwards"), split into two debug settings, built, NOT yet retested
+
+**User's second test result** (screenshot): "The sword looks about right
+but the shield is backwards" -- showing the shield's back/strap side
+facing the viewer instead of its front heraldic face, with one shared
+mirror axis value applied to both items.
+
+**Diagnosis**: sword and shield are different item joints
+(`mLeftItemJntNo`/`mRightItemJntNo`) with no reason to share the same
+local-frame convention -- the axis that happens to look right for the
+sword's grip has no guarantee of also being right for the shield's, and a
+"showing the wrong face" symptom is exactly the kind of error a
+wrong-axis single-plane mirror produces (not a translation/position bug
+this time, a rotation one).
+
+**Fix**: split the single `vrSwapGripMirrorAxis` setting into two
+independent ones -- `vrSwapSwordGripMirrorAxis` and
+`vrSwapShieldGripMirrorAxis` (`settings.h`/`.cpp`), each with its own
+Debug > Graphics Settings slider (`ImGuiMenuTools.cpp`). The sword's
+`ConfigVar` deliberately KEPT the original JSON key string
+(`"game.vrSwapGripMirrorAxis"`, not renamed to match the new C++ member
+name) specifically so the axis value the user already tuned to "about
+right" for the sword carries over automatically instead of silently
+resetting to the default -- only the shield's slider starts fresh at 0.
+`refreshTrackedItemMtxLive()` (`vr_link_visibility.hpp`) now reads each
+item's own setting independently instead of one shared `swapMirrorAxis`.
+
+Built successfully (RelWithDebInfo) -- `settings.h`/`.cpp`,
+`vr_link_visibility.hpp` (via `vr_main.cpp`), `ImGuiMenuTools.cpp` all
+recompiled, clean link, no new warnings.
+
+**NOT yet retested in-headset.** Next step: with "Swap Sword/Shield
+Hands" on, leave the sword slider alone (already carried over from the
+previous test) and cycle ONLY the new "VR Swap Shield Grip Mirror Axis"
+slider through 0/1/2 to find the value that shows the shield's correct
+front face. If none of the 3 fix the facing (as opposed to just not being
+tried yet), that would mean a single-axis mirror genuinely can't correct
+the shield's orientation and a different approach (e.g. an additional
+180° rotation layered on top, or the hand-tuned-offset fallback from the
+original comparison) is needed -- don't keep guessing axes past all 3
+without new evidence.
+
+### Follow-up, same day — shield facing fixed (axis 2), new "wraps the wrong side of the forearm" symptom, second live-adjustable correction added, built, NOT yet retested
+
+**User's third test result** (screenshot): "Both the sword and shield
+look correct when it is set to 2. However it seems the shield needs to be
+mirrored, as the shield is blocking the inside of my forearm, rather than
+the outside of my forearm."
+
+**Diagnosis, confirmed sound**: axis=2 fixed WHICH FACE of the shield is
+visible (chirality), but a mirror through the correct axis doesn't
+automatically also pin down the item's in-plane SPIN around that face's
+own normal -- two genuinely independent degrees of freedom a single
+reflection doesn't fully resolve, the same general shape of residual-
+calibration problem section 12's hand-rotation saga hit (axis mapping
+fixed first, a separate static-offset pass still needed after).
+
+**Fix**: added `rotate180LocalMtxAxis()` (`vr_link_visibility.hpp`) -- a
+PROPER 180-degree rotation (does not undo the mirror's chirality fix,
+unlike composing a second mirror would) around a chosen local axis,
+composed AFTER the existing mirror. Derived directly: the rotation BLOCK
+transforms with the IDENTICAL sign(r)*sign(c) pattern as the mirror
+(a diagonal +-1 matrix's off-diagonal product pattern only depends on
+which entries differ, not their sign), but the TRANSLATION rule is
+OPPOSITE the mirror's (negate the two components NOT equal to the axis,
+instead of just the axis's own component). `computeTrackedItemMtx()`/
+`applyTrackedItemMtxIfAttached()` both gained a second parameter,
+`extraFlipAxis` (default -1 = off, every pre-existing call site
+unaffected), applied after `mirrorAxis`'s reflection -- both helpers are
+element-wise so applying in place (no extra scratch buffer) is safe.
+
+**New live-adjustable settings** (same debug-only, no-main-UI pattern as
+the mirror axes): `vrSwapSwordExtraFlipAxis`/`vrSwapShieldExtraFlipAxis`
+(`settings.h`/`.cpp`, default -1/off), with matching Debug > Graphics
+Settings sliders (`ImGuiMenuTools.cpp`, range -1 to 2). `refreshTrackedItemMtxLive()`
+reads both independently per item, same shape as the mirror-axis
+settings.
+
+Built successfully (RelWithDebInfo) -- `settings.h`/`.cpp`,
+`vr_link_visibility.hpp` (via `vr_main.cpp`), `ImGuiMenuTools.cpp` all
+recompiled, clean link, no new warnings.
+
+**NOT yet retested in-headset.** Next step: with "Swap Sword/Shield
+Hands" on and the shield's mirror axis already at 2 (confirmed correct
+for facing), cycle ONLY the new "VR Swap Shield Extra Flip Axis" slider
+through 0/1/2 (leave at -1/off first to confirm the baseline still
+matches this description) to find the value that wraps the shield around
+the correct (outside) side of the forearm without breaking the
+now-correct front-face texture. If some combination of mirror axis +
+extra flip axis STILL doesn't produce a fully correct result across all
+of position/facing/spin simultaneously, that's real evidence the
+single-mirror-plus-single-180-rotation model is insufficient for this
+rig and the hand-tuned-constant-offset fallback (option 3 from the
+feature's original comparison) should be reached for instead of adding a
+third correction knob blind.
+
+### Follow-up, same day — user reframed the problem as a MESH asymmetry, not a pose issue; genuine geometric mesh-mirror added, built, NOT yet retested
+
+**User's fourth message, a real reframing, not another pose-tuning
+round**: "The issue isn't that the grip location is wrong, the hand holds
+onto the handle correctly. The actual issue is the mesh itself is
+designed for left handed use, and needs to actually [be] mirrored so the
+handle is on the right side of the shield, not the left. This could be
+fixed by mirroring it along the axis from the back of the shield to the
+front of the shield."
+
+**Why this changes everything about the approach**: every correction so
+far (`mirrorLocalMtxAxis()`, `rotate180LocalMtxAxis()`) only ever
+repositions/reorients the RIGID transform that attaches an unchanged mesh
+to a tracked hand -- a rigid transform can never move an asymmetric
+feature (a handle sculpted onto one specific side of the mesh) to the
+opposite side of the model's own silhouette, no matter how it's rotated
+or mirrored at the pose level. Only a genuine reflection of the mesh's
+own vertex geometry can do that.
+
+**Implementation** (`vr_link_visibility.hpp`): new `applyMeshMirror(model,
+axis, cachedCullMode[8], cullModeCached[8])` -- applies a real
+per-axis negative scale via `J3DModel::setBaseScale()` (confirmed, by
+reading `J3DModel::calcAnmMtx()`, that this scales the joint tree in the
+model's own LOCAL space, before `mBaseTransformMtx` -- i.e. it mirrors
+the mesh itself, not just where the whole rigid body sits). A
+negative-determinant scale like this flips face winding, which would
+normally make backface culling remove the WRONG triangles -- rather than
+try to get a compensating cull-mode FLIP direction exactly right (real
+risk of getting it backwards), disables culling entirely
+(`J3DMaterial::setCullMode(GX_CULL_NONE)`) for the mirrored model's
+materials while mirrored, trivial extra cost for one small item model.
+Real precedent for cull-mode-based mirroring already existed in this
+codebase: `d_a_mirror.cpp`'s `dMirror_packet_c::modelDraw()` (the Mirror
+of Twilight actor) already flips cull mode to compensate for its own
+negative-scale reflection, via a manual per-draw GX state bracket in its
+own fully custom draw loop -- this feature reuses the same underlying
+technique but via the material's own PERSISTENT cull-mode state
+(`J3DMaterial::setCullMode()`) instead, since sword/shield draw through
+the normal shared J3D pipeline rather than a custom one this VR code can
+easily bracket. Original cull mode per material is cached once per model
+(regardless of whether the mirror is ever used) so it can be restored
+exactly when turned back off -- never assumed to be any particular
+default.
+
+**New live-adjustable settings** (same debug-only pattern as the earlier
+two correction pairs): `vrSwapSwordMeshMirrorAxis`/
+`vrSwapShieldMeshMirrorAxis` (`settings.h`/`.cpp`, default -1/off), with
+matching Debug > Graphics Settings sliders (`ImGuiMenuTools.cpp`, range
+-1 to 2). Applied every real frame in `refreshTrackedItemMtxLive()`
+regardless of hand-attached vs. resting branch (the mesh needs to look
+right in both states), and safe to call even while "Swap Sword/Shield
+Hands" is off entirely (axis forced to -1 in that case, which restores
+real cached cull mode + identity scale).
+
+**Deliberately left the existing pose-level corrections
+(`vrSwapXGripMirrorAxis`/`vrSwapXExtraFlipAxis`) untouched and still
+active** rather than guessing whether to strip them out now that a
+"real" fix exists -- the shield's current combination (grip axis
+tuned, extra-flip=2) already produces correct FACING, and it's not yet
+known whether that's still needed alongside a true mesh mirror or would
+become redundant/conflicting. Left for the user to determine via testing
+which combination actually looks correct, rather than a blind
+simplification.
+
+Built successfully (RelWithDebInfo) -- `settings.h`/`.cpp`,
+`vr_link_visibility.hpp` (via `vr_main.cpp`), `ImGuiMenuTools.cpp` all
+recompiled, clean link, no new warnings. `GX_CULL_NONE`/`J3DMaterial`
+APIs resolved without needing any new includes (already transitively
+available via this file's existing `J3DModelData.h` include).
+
+**NOT yet retested in-headset.** Next step: with "Swap Sword/Shield
+Hands" on, try the "VR Swap Shield Mesh Mirror Axis" slider (0/1/2) --
+the user specifically suggested "the axis from the back of the shield to
+the front" as the one to mirror along, though it's not yet confirmed
+which of the 3 axis indices that actually corresponds to in this rig's
+local frame, so all 3 are still worth trying live. Report whether the
+handle visibly moves to the correct (right) side of the shield, and
+separately whether the shield now needs LESS pose-level correction than
+before (i.e. try setting the grip-mirror-axis/extra-flip-axis sliders
+back toward -1/0 once the mesh mirror is active, to see if the simpler
+combination is now sufficient) -- don't assume the answer, let the
+in-headset result decide which knobs actually need to stay engaged.
+
+### Follow-up, same day — mesh-mirror axis confirmed correct (2/2/off/off/off/2), but cull-mode approach was structurally broken; real fix found by reading J3DMaterial.cpp, built, NOT yet retested
+
+**User's fifth message, with the confirmed-working slider combination**
+(screenshot): Sword Grip=2, Shield Grip=2, both Extra Flip=-1/off, Sword
+Mesh Mirror=-1/off, Shield Mesh Mirror=2 -- "These were the correct
+values, it seems lined up now, but the actual shield mesh is inside out.
+Like the textures are on the inside and I can see right through from the
+outside." Real progress: the GEOMETRY is now genuinely correct (handle on
+the right side, confirmed) -- the remaining problem is purely a rendering
+artifact from the mirror.
+
+**Root cause, found by reading `J3DMaterial.cpp` directly rather than
+trusting the earlier assumption that `setCullMode()` alone would work**:
+`GXSetGenMode` (which bundles cull mode) is only ever issued from
+`J3DMaterial::makeDisplayList_private()`, called by `makeDisplayList()`/
+`makeSharedDisplayList()` -- i.e. cull mode is BAKED into a compiled GX
+display list ONCE, at model setup time (`J3DModel::makeDL()`, itself
+called once per material during `J3DModel::entryModelData()`), not
+re-read every real frame the way the base transform is.
+`J3DMaterial::load()` -- the function that DOES run on every real draw --
+never touches genmode/cull state at all. So the first version's
+`setCullMode()` call updated the material's live field but had ZERO
+effect on what actually got drawn: the OLD, pre-mirror cull direction
+(correct for the UNMIRRORED mesh) stayed baked in, which after mirroring
+the geometry now culls the wrong (now-front-facing) side -- exactly
+"see-through from the outside."
+
+**Fix**: after changing a material's cull mode, also call
+`J3DModel::makeDL()` -- a real, public, per-INSTANCE API (confirmed by
+reading it directly: iterates every material via
+`j3dSys.setMatPacket(&mMatPacket[i])` + `makeDisplayList()`) that rebuilds
+this model's own display lists with the new state baked in. Only actually
+called when the desired cull mode differs from what's currently baked
+(tracked via a new `appliedCullMode[8]` cache, separate from the
+already-existing `cachedCullMode[8]` "original value to restore"
+cache) -- avoids rebuilding a display list every frame once the mirror
+setting has settled, only on real transitions (first activation, or the
+user toggling the debug slider).
+
+`applyMeshMirror()`'s signature grew a 4th array parameter
+(`appliedCullMode`); two new `detail::` state arrays added
+(`s_swordAppliedCullMode`/`s_shieldAppliedCullMode`), both call sites in
+`refreshTrackedItemMtxLive()` updated to match. `J3DModel::makeDL()`
+confirmed public via a direct header check (no access-specifier gate
+between `public:` and its declaration).
+
+Built successfully (RelWithDebInfo) -- only `vr_main.cpp` (transitively
+includes the header) recompiled, clean link, no new warnings.
+
+**NOT yet retested in-headset.** Next step: with the exact same slider
+combination the user already confirmed correct (Sword Grip=2, Shield
+Grip=2, both Extra Flip off, Sword Mesh Mirror off, Shield Mesh
+Mirror=2), confirm the shield now renders solid/opaque from the outside
+instead of see-through, with the handle still on the correct side. If
+this works, the confirmed values should be baked in as the compiled
+defaults and every debug slider removed, per this project's normal
+practice -- but only once BOTH sword and shield are independently
+reconfirmed with the final code (the sword's values were established
+before this cull-mode fix landed, so worth a quick re-glance at the
+sword too, not just the shield, even though it wasn't reported as having
+the inside-out problem).
+
+### Follow-up, same day — makeDL() fix confirmed insufficient (still see-through, whole shield), real cause found: the material packets are LOCKED, built, NOT yet retested
+
+**User's follow-up, asked to clarify before guessing again**: "still see
+through, whole shield" -- ruling out the two alternate theories
+(curvature/depth-only issue, or a partial/localized defect) that had been
+raised as possibilities. Confirms the `makeDL()` fix from the previous
+round had ZERO effect, not partial effect.
+
+**Real root cause, found by reading one level deeper into the same
+J3D call chain**: `J3DMaterial::makeDisplayList()`'s own body is gated on
+`if (!j3dSys.getMatPacket()->isLocked())` -- and
+`J3DModel::createMatPacket()` (`J3DModel.cpp`) calls `matPacket->lock()`
+on EVERY material packet whenever the model data uses a shared display
+list (`getModelDataType()==1` -- plausible for a pre-baked equipment
+asset like a shield, though not independently confirmed by a direct
+read of that specific flag's value for this model). So the previous
+round's `model->makeDL()` call was silently a no-op for these locked
+packets the entire time -- it looked like a real fix (compiled, ran,
+matched the exact mechanism found by reading `J3DMaterial.cpp`) but
+never actually executed the rebuild it was supposed to trigger.
+
+**Fix**: `applyMeshMirror()` now brackets the `makeDL()` rebuild with
+`J3DModel::unlock()` immediately before and `J3DModel::lock()`
+immediately after (both confirmed public, same per-instance-scoped shape
+as `makeDL()` itself) -- restores the model to the same locked state it
+started in once the rebuild is done, rather than leaving it permanently
+unlocked as a side effect of a VR-only feature.
+
+Built successfully (RelWithDebInfo) -- only `vr_main.cpp` (transitively
+includes the header) recompiled, clean link, no new warnings.
+
+**NOT yet retested in-headset.** This is now the SECOND fix attempt for
+the see-through symptom -- if this one also turns out insufficient, the
+next thing to verify directly (not guess a third time) is whether
+`isLocked()` is actually returning true here at all (a real diagnostic
+log on entry to the `changed` branch, printing `matPacket->isLocked()`
+for material 0 before/after the unlock/lock bracket, would settle it
+in one capture) rather than assuming the lock theory a second time
+without evidence.
+
+### Follow-up, same day — GX_CULL_NONE approach itself proven wrong via multi-angle screenshots; switched to a real cull-direction flip, built, NOT yet retested
+
+**User's follow-up, with 6 screenshots from multiple angles**: "Still
+inside out... they are on the inside of the mesh" -- but this time real
+visual evidence made the actual mechanism identifiable, not just another
+restatement. Front-on views looked correct (crest visible, opaque); views
+from behind/the side showed the front-face texture visibly bleeding
+through where the back/strap structure should be opaque.
+
+**Real root cause of THIS round's failure**: `GX_CULL_NONE` (the previous
+fix's approach -- disable culling entirely, draw both faces) was itself
+the wrong mechanism, not just wrongly-applied. This shield model has
+SEPARATE front (decorative) and back (structural/strap) surface layers,
+not a single-sided shell -- making BOTH layers double-sided at once lets
+each show through the other from any viewing angle, exactly matching the
+screenshots (front view looks fine because the front layer's texture
+happens to be on top; from behind, the now-also-double-sided front layer
+bleeds through where the back layer should be the only thing visible).
+
+**Fix**: replaced `GX_CULL_NONE` with a genuine cull-DIRECTION flip
+(FRONT<->BACK, relative to whatever each material's own actual original
+mode was -- not a hardcoded assumption) -- the real, mathematically
+correct compensation for a single-axis mirror's winding reversal. This is
+exactly what `d_a_mirror.cpp`'s own precedent does (`GX_CULL_FRONT`,
+opposite of this engine's normal `GX_CULL_BACK`) -- the earlier fix had
+deliberately avoided this "to avoid the risk of getting the direction
+backwards," but computing it RELATIVE to each material's own cached
+original mode (FRONT->BACK, BACK->FRONT, NONE stays NONE) removes that
+risk entirely -- there's no direction to guess, just an unconditional
+swap of whichever two cull states are being used.
+
+Built successfully (RelWithDebInfo) -- only `vr_main.cpp` (transitively
+includes the header) recompiled, clean link, no new warnings.
+
+**NOT yet retested in-headset.** This is the THIRD real fix attempt for
+the see-through/bleed-through symptom (1: setCullMode alone, no rebuild;
+2: rebuild via makeDL() but silently no-op'd by the packet lock; 3: this
+round, GX_CULL_NONE replaced with a real direction flip) -- if this
+STILL doesn't look right, get a fresh multi-angle screenshot set again
+before guessing a 4th time, same discipline that actually cracked this
+round (the front-on-only screenshots from earlier rounds couldn't reveal
+the real mechanism; the from-behind angles could).
+
+### Follow-up, same day — user pointed at the game's own existing "Mirror Mode" feature; investigated, found it's a 2D screen-flip (not a mesh mirror, doesn't transfer); real diagnostic added instead of a 4th blind guess
+
+**User's question**: "The game has an option called mirror mode, how does
+that handle mirroring the models, specifically sword and shield? It
+doesn't work in vr but might help you." Investigated directly rather than
+assuming -- found `dusk::getSettings().game.enableMirrorMode`'s real
+implementation in `m_Do_graphic.cpp`: it's a **whole-screen 2D
+post-process flip** -- captures the ENTIRE rendered frame to a texture
+(`GXCopyTex`) and redraws it as a flipped orthographic quad, not a 3D
+transform on any individual model. This is mathematically valid for a
+symmetric-perspective monoscopic camera (negating screen-space X after
+projection is equivalent to negating camera-space X before projection,
+for a standard symmetric FOV) -- meaning Link's sword APPEARING in his
+right hand under Mirror Mode is a pure emergent side effect of flipping
+the whole final image (his body, the world, everything), not the result
+of any per-item mesh-mirroring code anywhere. This directly explains why
+the user's own recollection is right that "it doesn't work in VR" -- a
+2D full-screen flip is fundamentally incompatible with stereo rendering
+(each eye's flip would scramble depth/parallax cues, and VR doesn't even
+render through this flatscreen 2D orthographic pass to begin with) -- but
+it also means this feature has NO reusable technique for our actual
+problem (mirroring ONE hand-held item's own mesh while leaving Link's
+body, the camera, and the world completely normal) -- it never had to
+solve that narrower problem at all.
+
+**Given three straight fix attempts (setCullMode alone; +makeDL();
++unlock/lock/makeDL(); then a real FRONT<->BACK flip) all produced
+visually IDENTICAL results per the user's own words** ("looks the exact
+same as the previous shots"), treated that as a real, informative data
+point rather than continuing to theorize: round 2 (force `GX_CULL_NONE`)
+and round 3 (flip FRONT<->BACK, leaving `GX_CULL_NONE` untouched) can
+ONLY look identical if the material's REAL original cull mode was
+already `GX_CULL_NONE` -- in which case round 3's "flip" is a silent
+no-op (nothing to flip), which would fully explain the identical result
+without needing a new theory. Rather than guess a 4th fix blind, added a
+one-time diagnostic log (`[dusk::vr::meshmirror]`, `applyMeshMirror()`)
+printing each material's real cached original cull mode
+(0=NONE/1=FRONT/2=BACK/3=ALL) the first time it's ever read, for both
+sword and shield. If the shield's materials come back already
+`GX_CULL_NONE`, that would mean the whole cull-mode theory has been a
+red herring for all three previous rounds, and the real "see-through"
+mechanism is something else entirely (leading unverified guess: a
+double-sided, single-texture-layer mesh showing the SAME front texture
+from both sides by design, independent of any cull-mode state -- would
+need a completely different fix, not more GX state tuning).
+
+Built successfully (RelWithDebInfo) -- only `vr_main.cpp` (transitively
+includes the header) recompiled, clean link, no new warnings.
+
+**NOT yet retested in-headset.** Next step: reproduce the swapped
+shield's see-through appearance once more, then paste back the
+`[dusk::vr::meshmirror]` lines for `shield` (and `sword`, for
+comparison) from the Output window. This settles, with real data,
+whether the cull-mode theory was ever right to begin with, rather than
+attempting a 4th guess at the same mechanism.
+
+### Follow-up, same day — captured log ruled out the "already NONE" theory (both materials confirmed original GX_CULL_BACK), expanded diagnostic added to see the actual decision/rebuild, built, NOT yet retested
+
+**Log analysis**: `[dusk::vr::meshmirror]` showed sword (2 materials) and
+shield (1 material) all with `origCullMode=2` (`GX_CULL_BACK`) -- a
+completely ordinary default, NOT already `GX_CULL_NONE` as the previous
+round's leading theory guessed. This rules that theory out cleanly: the
+round-3 FRONT<->BACK flip was NOT a silent no-op after all, since there
+was a real BACK value to flip. This means either (a) the flip logic has
+a real bug, (b) the rebuild (unlock/makeDL/lock) isn't actually
+executing despite `changed` being true, or (c) cull mode was never the
+true mechanism behind the "see-through" symptom to begin with, and
+something else entirely is going on -- the existing diagnostic only
+logged the CACHED ORIGINAL value once, never the actual decision
+(`desired`) or whether the rebuild branch was reached, so it couldn't
+distinguish between these.
+
+**Expanded diagnostic** (`applyMeshMirror()`, both still gated on the
+existing `debugName` parameter): `[dusk::vr::meshmirrordiag]` now logs
+every real cull-mode TRANSITION (`from=... to=...` plus the `axis` value
+that drove it) the instant `appliedCullMode[i]` is about to change, and a
+separate line confirming the `unlock()`/`makeDL()`/`lock()` rebuild
+branch was actually reached. This should settle definitively whether the
+flip computed the expected `BACK(2)->FRONT(1)` transition and whether the
+rebuild path executed at all, rather than continuing to infer either from
+indirect evidence.
+
+Built successfully (RelWithDebInfo) -- only `vr_main.cpp` (transitively
+includes the header) recompiled, clean link, no new warnings.
+
+**NOT yet retested in-headset.** Since `appliedCullMode`/`cullModeCached`
+are runtime-only (reset every launch, not persisted), and the "Swap
+Sword/Shield Hands" + mesh-mirror-axis settings themselves ARE persisted
+from the previous session, a fresh launch alone should be enough to
+retrigger these new transition logs without needing to actively toggle
+anything mid-session -- next step: launch, look at the shield (should
+already be in its swapped/mirrored state from the persisted setting),
+and capture a fresh log with the `[dusk::vr::meshmirrordiag]` lines
+included.
+
+### Follow-up, same day — abandoned the persistent-material-cull-mode approach entirely (4 straight rounds failed despite confirmed-correct execution); built a fully custom immediate-mode draw path instead, modeled on d_a_mirror.cpp's own proven technique, NOT yet tested
+
+**User's explicit choice, when asked how to proceed**: "Try a different
+approach entirely" -- after 4 straight rounds of trying to make a
+PERSISTENT `J3DMaterial` cull-mode change take effect through the shared,
+cached-display-list draw pipeline all failed despite two real diagnostic
+captures confirming the code was executing exactly as designed (the
+`BACK->FRONT` transition really happened, the display-list rebuild really
+ran) -- strong evidence the shared pipeline has some deeper caching layer
+(never fully identified -- `J3DModel::entry()`'s deferred joint-registration
+mechanism was traced partway before the scope of understanding it fully
+became too large for continued code-only investigation) that isn't
+picking up the change, not that the flip logic itself was wrong.
+
+**New approach, avoiding the shared pipeline's caching entirely**: found
+`daAlink_c::modelDraw()` → `mDoExt_modelUpdateDL()` is the ONE, single,
+shared entry point ALL of Link's models (body, hands, sword, shield, held
+items) funnel through for their real per-eye VR draw (established back in
+section 20) -- meaning any fix needs to either work WITH that shared path
+or cleanly route around it for just these two models. Found a real,
+already-shipping precedent for the latter: `d_a_mirror.cpp`'s
+`dMirror_packet_c::modelDraw()` (the Mirror of Twilight portal effect)
+draws its own reflected geometry via a FULLY CUSTOM, immediate-mode loop
+that completely bypasses the shared, deferred, display-list-caching
+system -- for each material, it calls `material->load()` +
+`matPacket->callDL()` (replay the material's own, UNMODIFIED baked
+display list) then issues a RAW `GFSetGenMode2(...)` cull-mode override
+directly AFTER that replay and BEFORE the actual shape draw -- since GX is
+a state machine, this override is simply the LAST state change before the
+polygon draw, so it wins regardless of whatever the display list itself
+just set, with zero dependency on any caching/locking mechanism.
+
+**New function**: `drawItemModelWithCullOverride(J3DModel* model)`
+(`vr_link_visibility.hpp`) -- closely modeled on `d_a_mirror.cpp`'s
+material loop (skipping ONLY that function's own reflection-plane
+clipping check and ambient-color override, both specific to portal
+rendering, not to the cull-override technique itself), computing the
+flip relative to each material's REAL, unmodified, freshly-read cull mode
+every call (never caches or mutates persistent material state at all this
+time, avoiding the whole class of bug the last 4 rounds got stuck on).
+Also calls `model->viewCalc()` first -- confirmed via reading
+`J3DModel::prepareShapePackets()` (called from `viewCalc()`) that this is
+what correctly primes each shape packet's base-matrix pointer
+(`mpBaseMtxPtr`) before `drawFast()` will use the model's own
+already-computed joint matrices correctly; `model->calc()` itself is NOT
+called here since VR's own live-refresh (`refreshTrackedItemMtxLive()`)
+already calls it earlier the same real frame.
+
+**Wiring**: `applyMeshMirror()` simplified back down to JUST the
+confirmed-working geometric scale-mirror (`setBaseScale()`) -- all the
+persistent cull-mode logic (setCullMode/unlock/makeDL/lock, all 4 rounds
+of it) removed entirely, since it's now superseded by the draw-time
+override and would otherwise double-flip on top of it.
+`detail::s_swordMeshMirrorActive`/`s_shieldMeshMirrorActive` (bool,
+replacing the old per-material cull-mode-cache arrays) track whether each
+item's mesh mirror is active THIS real frame, set inside
+`refreshTrackedItemMtxLive()`. New thin forwards
+(`dusk::vr::isSwordMeshMirrorActive()`/`isShieldMeshMirrorActive()`/
+`drawItemModelWithCullOverride()`, `vr_main.hpp`/`.cpp`) let
+`daAlink_c::modelDraw()` (`d_a_alink.cpp`, base-game shared code) check
+per-model whether to route through the new custom draw instead of the
+normal `mDoExt_modelUpdateDL()` -- scoped narrowly (only fires for
+`i_model == mSwordModel/mShieldModel` AND that item's mirror axis active
+AND a real VR eye pass is open; every other model, and the legacy
+flatscreen draw path, are completely untouched).
+
+New includes added to `vr_link_visibility.hpp`:
+`JSystem/J3DGraphBase/J3DDrawBuffer.h` (`J3DMatPacket`/`J3DShapePacket`),
+`JSystem/J3DGraphBase/J3DMaterial.h`, `<gf/GFGeometry.h>`
+(`GFSetGenMode2`) -- all three already used together for exactly this
+purpose in `d_a_mirror.cpp`, confirming they're the right set.
+
+Built successfully (RelWithDebInfo, full rebuild since `vr_main.hpp`
+changed) -- `vr_link_visibility.hpp`, `vr_main.hpp`/`.cpp`,
+`d_a_alink.cpp` and dependents all recompiled, clean link, no new
+warnings, all new symbols (`GFSetGenMode2`, `J3DMatPacket`,
+`J3DShapePacket`, etc.) resolved without further include hunting needed.
+
+**NOT yet tested in-headset -- this is a materially bigger, riskier
+change than any of the previous 4 rounds** (real base-game rendering-code
+modification, a hand-written immediate-mode draw sequence assembled from
+reading two different existing call sequences rather than calling one
+proven function outright). Next step: confirm (a) the shield (and sword,
+if its own mesh-mirror axis is ever turned on) now render correctly
+opaque with the handle on the correct side and the correct face
+showing -- the actual bug this whole sub-investigation has been chasing
+-- and (b) no NEW regressions were introduced -- watch specifically for
+double-drawn/z-fighting geometry (would indicate the custom path isn't
+fully replacing the normal one), a wrong/stale matrix (model floating
+away from the tracked hand, would indicate the `viewCalc()`-without-
+`calc()` assumption was wrong), or a crash (would indicate a missing
+piece of state this hand-written draw sequence didn't replicate from the
+normal pipeline). If this STILL doesn't produce correct rendering despite
+being a completely different, independently-reasoned technique, that
+would be strong evidence the root cause is somewhere even deeper than
+believed (worth reconsidering the RenderDoc option at that point, even
+though declined this round).
+
+### Mesh-mirror sub-feature fully reverted (same day) — the custom cull-override draw path still didn't fix the shield; user asked to remove ALL mesh-mirror code and go back to the pose-only "misaligned but correctly rendering" state
+
+**User's test result on the custom immediate-mode draw path**: "the shield
+is still inside out, i would undo that change. is it possible to just
+remove all of the mirror code we tried to get working and go back to when
+it was misaligned, then properly place it another time." Five separate,
+independently-reasoned attempts at a genuine mesh-level mirror (persistent
+material cull-mode: setCullMode alone, +makeDL(), +unlock/lock, a real
+FRONT<->BACK flip; then a fully custom immediate-mode draw path modeled on
+d_a_mirror.cpp's own proven technique) all failed to fix the "handle on
+the wrong side of the mesh" / "see-through" symptom despite each being
+confirmed executing exactly as designed. Per explicit user request, fully
+REMOVED rather than left disabled behind an off-by-default setting.
+
+**Removed entirely** (`vr_link_visibility.hpp`): `applyMeshMirror()` (the
+`setBaseScale()`-based geometric mirror) and `drawItemModelWithCullOverride()`
+(the custom immediate-mode draw with the raw cull-mode override) --
+both functions, all their comments/history, and the
+`detail::s_swordMeshMirrorActive`/`s_shieldMeshMirrorActive` state they
+fed. The now-unused includes added specifically for this
+(`JSystem/J3DGraphBase/J3DDrawBuffer.h`, `JSystem/J3DGraphBase/J3DMaterial.h`,
+`<gf/GFGeometry.h>`) were removed too, confirmed via grep that nothing
+else in the file used them. `refreshTrackedItemMtxLive()`'s call sites
+into these functions were removed, replaced with a short comment pointing
+future work at this section of vr-mod-notes instead of re-attempting
+blind.
+
+**Removed from `vr_main.hpp`/`.cpp`**: the `isSwordMeshMirrorActive()`/
+`isShieldMeshMirrorActive()`/`drawItemModelWithCullOverride()` thin
+forwards.
+
+**Reverted in `d_a_alink.cpp`**: `daAlink_c::modelDraw()`'s branch back to
+its original, pre-mesh-mirror form -- exactly the `isEyePassOpen() ?
+mDoExt_modelUpdateDL() : mDoExt_modelEntryDL()` shape from before any of
+this sub-investigation, no sword/shield-specific routing at all anymore.
+
+**Removed settings** (`settings.h`/`.cpp`, `ImGuiMenuTools.cpp`):
+`vrSwapSwordMeshMirrorAxis`/`vrSwapShieldMeshMirrorAxis` (`ConfigVar`s,
+registrations, debug sliders) all deleted. `vrSwapSwordGripMirrorAxis`/
+`vrSwapShieldGripMirrorAxis` and `vrSwapSwordExtraFlipAxis`/
+`vrSwapShieldExtraFlipAxis` (the POSE-level corrections, unrelated to the
+mesh-level work) were deliberately LEFT ALONE -- these are the "misaligned
+but correctly rendering" state the user asked to return to, still fully
+functional.
+
+Built successfully (RelWithDebInfo, full rebuild since `vr_main.hpp`
+changed) -- clean link, no new warnings, confirmed via grep that zero
+references to any removed symbol remain anywhere in `src/`.
+
+**Current state of "Swap Sword/Shield Hands"**: fully functional for
+position/orientation (sword and shield correctly track the swapped
+tracked hand, with correct front-facing texture via the pose-level
+mirror+extra-flip axes already tuned to 2/2 for grip and 2/-1 for extra
+flip) -- the ONE known remaining imperfection is that the shield's handle
+sits on the mesh's originally-authored (left-handed) side rather than the
+true mirror-correct side, a cosmetic-only issue with no rendering
+corruption. If revisited: five different techniques for the geometric
+mesh-mirror have now been tried and ruled out (all in this section and
+the several above it) -- a RenderDoc capture (declined this round, but
+still this project's own standard next step whenever code-reading stalls
+on a rendering mystery) is the natural next move rather than a 6th blind
+guess.
+
+### Follow-up, same day — the remaining shield defect precisely re-described: a pure grip-rotation issue, not the mesh handedness problem; live-testing the already-existing Extra Flip Axis slider, no code change yet
+
+**User's follow-up, with close-up screenshots**: after the mesh-mirror
+revert, described the remaining issue much more precisely than "wrong
+side of forearm" -- "the sword [grip bar] is on the inside of my hand,
+where my fingers are and my palm is facing... I need it to be moved to
+the other side, so the back of my hand faces the inside metal part of
+the shield." This describes the fist rotated 180 degrees the wrong way
+around the grip bar's own axis (palm facing the shield's inner/strap
+side instead of the back of the hand) -- a plain rotation problem, not
+the mesh-chirality/handle-placement problem the abandoned mesh-mirror
+work was chasing.
+
+**No code change made this round** -- `vrSwapShieldExtraFlipAxis` (the
+180-degree-rotation debug slider, kept during the mesh-mirror revert
+since it's a pose-level correction, not mesh-level) is exactly the
+existing tool for this: a discrete 3-way axis choice (0/1/2, plus -1/off)
+already proven capable of fixing an analogous "spun 180 the wrong way"
+symptom for the shield's FACING earlier the same day. Current confirmed
+state: Shield Grip Mirror Axis=2, Shield Extra Flip Axis=2 (fixed
+facing, but evidently not this specific grip-rotation detail -- that
+combination was judged correct from overall/crest-facing impressions,
+not by specifically checking hand rotation the way these new close-up
+screenshots do). Asked the user to live-cycle Extra Flip Axis through 0
+and 1 (Grip Mirror Axis held at 2) to find a value that fixes the grip
+rotation specifically, checking BOTH that and the crest-facing together
+this time. If none of the 3 extra-flip values work with grip-mirror-axis
+fixed at 2, the next step is also varying grip-mirror-axis (0/1) --
+noted as the fallback, not yet needed.
+
+### Follow-up, same day — `rotate180LocalMtxAxis()` had a real conjugation bug: it translated instead of rotating in place; fixed 2026-08-20
+
+**User's report after live-cycling Extra Flip Axis as suggested above**:
+"I need it actually rotated 180 degrees, not just translated." Cycling the
+slider moved the shield's apparent grip position around instead of
+spinning the fist in place around the grip bar's axis.
+
+**Root cause**: `rotate180LocalMtxAxis()` was implemented as a
+conjugation (`D*R*D`-style: negate a rotation entry iff exactly one of
+row/col == axis, and negate the translation component on the other two
+axes). That's mathematically "rotate the whole local frame around its own
+ORIGIN" -- correct only for an item whose pivot IS the origin. The
+shield's item joint is offset from the hand joint's origin, so
+conjugating it moves the offset to its point-reflection through the
+origin, which reads as a translation, not a rotation, of the visible mesh
+-- exactly the reported symptom.
+
+**Fix**: changed to a post-multiplication (`R_new = R * D`, D =
+diag(+1 at axis, -1, -1)), which rotates the item in its own local/child
+frame -- i.e. in place around wherever it currently sits -- and leaves
+the translation column completely untouched. Post-multiplying by a
+diagonal D scales each COLUMN of R by D's matching diagonal entry, so the
+new rule is: negate every row of the two columns that are NOT `axis`,
+leave the `axis` column unchanged. Still a proper rotation (det=+1: two
+sign-flipped orthonormal columns cancel). Built clean (RelWithDebInfo,
+7/7 steps, no dusklight.exe lock conflict).
+
+**Not yet retested in-headset.** Because the corrected math produces
+different results than the old buggy one, the Extra Flip Axis value that
+looked "correct" under the old (wrong) formula may no longer be right --
+user needs to re-cycle 0/1/2 (Grip Mirror Axis still held at 2) under the
+new code, checking both grip/palm orientation AND crest-facing together.
+
+### Follow-up, same day — retest confirmed the rotation fix (Extra Flip Axis=1), plus a new, separate positional request: nudge the shield so the grip sits on the mesh's correct side
+
+**Confirmed**: Extra Flip Axis=1 (Grip Mirror Axis still 2) fixed the
+grip/palm orientation under the corrected math -- user confirmed "that
+worked."
+
+**New follow-up request, close-up screenshot**: "the hand is still
+gripping the handle. is it possible to move the shield so that the hand
+is on the other side?" -- grip attachment itself is correct (the fist
+follows the handle bar properly, this isn't a repeat of the rotation
+bug), but the screenshot shows the handle sitting well off-center on the
+shield face -- the known consequence of the shield mesh being authored
+for left-hand use (same root fact as the abandoned geometric mesh-mirror
+attempt earlier this section, but addressed here as a POSITION problem,
+not a mesh-chirality one) -- so the visible geometry doesn't read as
+naturally right-handed even though the joint math is now all correct.
+
+**Fix**: added a fixed positional nudge, NOT a mesh change --
+`computeTrackedItemMtx()` (`vr_link_visibility.hpp`) now takes
+`offsetX/offsetY/offsetZ` (default 0.0f each), added to the offset
+matrix's translation column AFTER the mirror/extra-flip steps -- i.e. the
+nudge moves the item along ITS OWN already-corrected local axes, not
+world axes. New live-adjustable debug settings (Debug > Graphics
+Settings): `vrSwapSwordGripOffsetX/Y/Z` and `vrSwapShieldGripOffsetX/Y/Z`
+(settings.h/settings.cpp/ImGuiMenuTools.cpp), range -20..20 game world
+units (~1 unit = 1cm, same 100-units/metre convention as
+`kHorseCameraBackUnits`), 0.0f default, gated by `vrSwapSwordShieldHands`
+same as the axis settings. Threaded through
+`applyTrackedItemMtxIfAttached()` and both sword/shield call sites in
+`refreshTrackedItemMtxLive()`. Built clean (full rebuild since
+settings.h touched many translation units -- expected, not a sign of a
+problem).
+
+**Not yet tested in-headset.** All 6 offset sliders start at 0.0f (no
+visual change yet) -- next step is asking the user to live-cycle the
+shield's X/Y/Z offsets to find the value(s) that center the grip
+correctly, the same "tune live, then bake in the default and remove the
+sliders" workflow used for the axis settings above.
+
+### Follow-up, same day — CONFIRMED WORKING end to end ("good enough"), feature closed out for the night
+
+User tested the offset sliders in-headset and confirmed: "Yup good
+enough." No further code change requested -- just asked to document and
+stop for the night. Live-tuned values weren't stated in chat, so read
+directly from the saved config
+(`%APPDATA%\TwilitRealm\Dusklight\config.json`):
+
+- `vrSwapSwordGripMirrorAxis`/`vrSwapShieldGripMirrorAxis` = **2** (both).
+- `vrSwapShieldExtraFlipAxis` = **1**; `vrSwapSwordExtraFlipAxis` = **-1**
+  (sword never needed the extra flip).
+- `vrSwapShieldGripOffsetX/Y/Z` = **-16.97 / -0.91 / 3.18** (game world
+  units). `vrSwapSwordGripOffsetX` = **-0.15** (negligible/not needed),
+  Y/Z untouched.
+- `vrSwapSwordShieldHands` itself is currently **false** in the saved
+  config -- the user turned the feature off before signing off, not a
+  regression signal.
+- A stale `vrSwapShieldMeshMirrorAxis` key is still sitting in
+  config.json from the abandoned/removed mesh-mirror attempt earlier
+  this section -- no code reads it anymore, harmless leftover, safe to
+  ignore or delete.
+
+**This closes out the "Swap Sword/Shield Hands" feature end to end**:
+position tracking, grip mirror/facing, the 180-degree rotate-in-place
+fix, and the positional nudge to compensate for the mesh's off-center
+handle all confirmed working together. The genuine geometric mesh-mirror
+(actually relocating the handle vertices to the mesh's mirror-correct
+side, rather than compensating with a rigid-transform nudge) remains the
+one deliberately deferred, unsolved piece -- not attempted again this
+session, still an open "properly place it another time" per the user's
+own earlier words, and now genuinely lower priority since the pose+offset
+compromise reads as correct in-headset.
+
+**Left open for a future session, per this project's own normal
+practice**: the mirror-axis/extra-flip-axis/offset settings are all still
+live DEBUG sliders (Debug > Graphics Settings) with compiled defaults
+that do NOT match the confirmed values above (`settings.cpp` still has
+0/-1/0.0f -- only this user's saved `config.json` carries the real tuned
+values). Next session: update `settings.cpp`'s compiled defaults to the
+confirmed values above, then remove the 10 now-unnecessary debug sliders
+from `ImGuiMenuTools.cpp`, matching how every earlier tuning pass in this
+project (gamma compensation, menu-stick pulse cadence, etc.) was closed
+out once confirmed. Not done tonight -- user asked only to document and
+stop, not to keep editing/rebuilding.
+
 ## Key lesson learned this session
 
 Don't infer that an uncommitted fix supersedes a nearby disable guard just

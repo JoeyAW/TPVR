@@ -898,10 +898,12 @@ inline bool s_kanteraRestingValid = false;
 // head position worth anchoring the camera to in that case anyway.
 // Forward declarations -- isHookshotAirborneOrHanging()/isHookshotAiming()
 // (below, next to isCrawling()) are needed by isFirstPerson()'s own Third
-// Person carve-out right below, but are themselves defined further down
-// this same file.
+// Person carve-out right below, and isRealCutsceneRunning() (below, right
+// after isFirstPerson() itself) is needed by its cutscene-third-person
+// check -- all three are themselves defined further down this same file.
 inline bool isHookshotAirborneOrHanging(daAlink_c* link);
 inline bool isHookshotAiming(daAlink_c* link);
+inline bool isRealCutsceneRunning();
 
 inline bool isFirstPerson(daAlink_c* link) {
     if (!link || link->checkWolf()) return false;
@@ -985,8 +987,25 @@ inline bool isFirstPerson(daAlink_c* link) {
         return false;
     }
 
-    // Cutscene / door-transition event: first-person too, but only while
-    // Link's real body is actually loaded/drawn in this shot.
+    // Door/treasure-chest transition event: unaffected by the cutscene
+    // change right below (isRealCutsceneRunning() is false for these --
+    // see its own comment) -- still first-person whenever Link's real body
+    // is actually loaded/drawn in this shot, same as before.
+    //
+    // Real scripted CUTSCENE (2026-08-20, explicit user request: "put
+    // cutscenes (except for dialogue, and transitions) in third person
+    // while in first person mode"): defaults to third-person now, reverting
+    // the 2026-08-08 "every cutscene that has link loaded" change for
+    // cutscenes specifically -- dialogue (handled above) and door/
+    // transition events keep that first-person-when-loaded behavior
+    // unchanged. The EXPERIMENTAL vrExperimentalCutsceneFirstPerson setting
+    // restores the exact 2026-08-08 behavior for cutscenes too, when on --
+    // see its own settings.h comment for why it's labeled EXPERIMENTAL.
+    if (isRealCutsceneRunning() &&
+        !dusk::getSettings().game.vrExperimentalCutsceneFirstPerson.getValue()) {
+        return false;
+    }
+
     return !link->checkPlayerNoDraw();
 }
 
@@ -994,29 +1013,88 @@ inline bool isFirstPerson(daAlink_c* link) {
 // COMPULSORY_e) from plain dialogue (dEvt_type_TALK_e -- already handled
 // separately via getMode()==dEvt_mode_TALK_e above) and from door/
 // treasure-chest transitions (dEvt_type_DOOR_e/TREASURE_e). All three set
-// the exact same dEvt_mode_DEMO_e once running -- see this function's own
-// citations of demoCheck()/doorCheck() above -- so getMode() alone can't
-// tell them apart; only the ORIGINAL event TYPE recorded on the accepted
-// dEvt_order_c still carries that distinction once the event is actually
-// running. dComIfGp_getEvent()'s mOrder[8]/mOrderIdx are both public
-// members (d_event.h) -- mOrderIdx is set once, in entry(), when an order
-// is accepted and starts running, and nothing in Step() (the per-frame
-// event pump) touches it again until the event ends, so it stays valid
-// for the event's whole duration, not just at the instant it started.
+// the exact same dEvt_mode_DEMO_e once running (COMPULSORY_e events use
+// dEvt_mode_COMPULSORY_e instead, set directly by entry()'s own
+// dEvt_type_COMPULSORY_e case, bypassing doorCheck()/demoCheck()
+// entirely) -- so getMode() alone can't tell DOOR_e/TREASURE_e apart from
+// OTHER_e; only the ORIGINAL event TYPE recorded on the accepted
+// dEvt_order_c carries that distinction.
+//
+// CORRECTED 2026-08-20 -- the previous version of this function re-read
+// event->mOrder[event->mOrderIdx].mEventType fresh on every single call,
+// on the assumption (stated in an earlier version of this comment, never
+// actually verified against real data) that mOrderIdx stays valid for an
+// event's whole duration once entry() accepts it. A real in-headset
+// capture (user report: "the door was def[initely] 3rd person", directly
+// contradicting what a live re-read reported for that same test) proved
+// this false: mOrderIdx is set at ORDER-REQUEST time, inside
+// dEvt_control_c::order() (d_event.cpp) -- NOT reassigned by entry() to
+// point at whichever specific order ultimately got accepted. entry() also
+// unconditionally resets mNum=0 right before walking the pending list, so
+// ANY unrelated order() call from elsewhere in the game arriving WHILE a
+// door/cutscene event is still playing (common -- plenty of ambient
+// systems speculatively try ordering events every frame) writes its own
+// type straight into mOrder[0], which mOrderIdx is very often still
+// pointing at (only one event is normally active) -- silently corrupting
+// a live re-read even though the original event never actually stopped
+// running. The capture showed exactly this: a real DOOR_e (type 1)
+// sequence reading stable for many frames, mode unchanged the whole
+// time, then flipping mid-event to read OTHER_e (type 2) for a stretch
+// before settling back -- forcing third-person for part of a sequence
+// that was never anything but a door transition.
+//
+// FIX: capture the type ONCE, at the moment this event's mMode first
+// transitions into DEMO_e/COMPULSORY_e, and hold that captured value
+// fixed for as long as mMode stays in that scripted-event range --
+// mMode is far more stable than mOrder[]/mOrderIdx (order() never
+// touches it at all; only entry()'s acceptance switch and endProc() do),
+// so this is immune to any mOrder[]/mOrderIdx drift for the rest of the
+// event's duration, no matter how many unrelated order() calls happen
+// meanwhile. Local statics are safe here even though this function is
+// called many times per real frame from several call sites
+// (isFirstPerson() itself, plus dusk::vr::isRealCutsceneRunning()'s
+// separate "Hide Body" call site in d_a_alink.cpp) -- mMode only changes
+// once per Step(), not per call, so repeat calls within one frame just
+// re-observe the same already-captured state (a no-op), not a fresh edge.
 //
 // Added 2026-08-18 for the "Hide Body" VR setting's own cutscene carve-
 // out (see dusk::vr::isRealCutsceneRunning(), vr_main.hpp/.cpp, and its
 // call site in d_a_alink.cpp) -- explicit user request, after confirming
 // the base "hide body at all times" behavior worked: "show his body when
 // in a cutscene? Not dialogue, not transition or doors, just cutscenes."
+// Also used directly by isFirstPerson() itself as of 2026-08-20, to
+// default real cutscenes to third-person (see that function's own
+// comment) -- forward-declared above isFirstPerson() for this reason.
 inline bool isRealCutsceneRunning() {
-    if (!dComIfGp_event_runCheck()) return false;
+    static bool s_typeCaptured = false;
+    static bool s_cachedIsCutscene = false;
+
+    if (!dComIfGp_event_runCheck()) {
+        s_typeCaptured = false;
+        return false;
+    }
     dEvt_control_c* event = dComIfGp_getEvent();
-    if (!event) return false;
-    const s8 idx = event->mOrderIdx;
-    if (idx < 0 || idx >= 8) return false;
-    const u16 type = event->mOrder[idx].mEventType;
-    return type == dEvt_type_OTHER_e || type == dEvt_type_COMPULSORY_e;
+    if (!event) {
+        s_typeCaptured = false;
+        return false;
+    }
+
+    const u8 mode = event->getMode();
+    const bool inScriptedEvent =
+        (mode == dEvt_mode_DEMO_e || mode == dEvt_mode_COMPULSORY_e);
+    if (!inScriptedEvent) {
+        s_typeCaptured = false;
+        return false;
+    }
+
+    if (!s_typeCaptured) {
+        const s8 idx = event->mOrderIdx;
+        const u16 type = (idx >= 0 && idx < 8) ? event->mOrder[idx].mEventType : 0xFFFF;
+        s_cachedIsCutscene = (type == dEvt_type_OTHER_e || type == dEvt_type_COMPULSORY_e);
+        s_typeCaptured = true;
+    }
+
+    return s_cachedIsCutscene;
 }
 
 // Crawling has no single MODE_FLG bit the way swimming has MODE_SWIMMING
@@ -1533,6 +1611,103 @@ inline bool mtxNearlyEqual(MtxP a, MtxP b) {
     return true;
 }
 
+// Reflects a LOCAL-frame rigid transform (already expressed relative to a
+// joint's own local axes -- e.g. computeTrackedItemMtx()'s relativeOffset
+// below) through one of that joint's own local axes (0=X, 1=Y, 2=Z),
+// producing a mathematically valid PROPER rotation (determinant +1, not a
+// mesh-breaking reflection) representing the mirror-image grip -- same
+// conjugate-through-a-reflection-matrix technique ("M*R*M") already used
+// successfully in this codebase for the stereo eye-alignment fix
+// (eyePoseToViewMtx()'s "F*R*F", vr-mod-notes section 14). Worked out
+// directly: for a diagonal reflection matrix M with M[axis][axis]=-1 and
+// every other diagonal entry +1, (M*R*M)[r][c] = sign(r)*sign(c)*R[r][c]
+// -- which negates a rotation entry iff EXACTLY ONE of its row/column
+// equals `axis` (leaves the diagonal and every entry not touching `axis`
+// alone), and negates a translation entry (M*t) iff its OWN row equals
+// `axis`. This generalizes section 14's fix (which hardcoded Z as the
+// mirrored axis) to any single axis.
+//
+// Added 2026-08-20 for the "Swap Sword/Shield Hands" VR setting -- the
+// base game has no rig data for "sword held in the right hand" (Link is
+// always left-handed), so there's nothing to directly reuse for that
+// case. Reflecting the EXISTING left-hand sword grip through Link's own
+// left-right body plane derives a plausible right-hand mirror-image grip
+// instead, assuming (a reasonable approximation for a game character) the
+// body/grip biomechanics are themselves bilaterally symmetric. Which
+// local axis IS the sagittal (left-right) plane in this joint's own
+// authored local frame is not something that can be read from the rig
+// data directly -- kSwapGripMirrorAxis (refreshTrackedItemMtxLive()'s own
+// comment) is a starting guess, to be confirmed/retuned via one round of
+// in-headset comparison across the 3 candidates, the same "test the
+// possible single-axis planes directly" methodology that closed out this
+// project's hardest hand-rotation bug (section 12).
+inline void mirrorLocalMtxAxis(Mtx dest, MtxP src, int axis) {
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            const bool negate = (r == axis) != (c == axis);
+            dest[r][c] = negate ? -src[r][c] : src[r][c];
+        }
+        dest[r][3] = (r == axis) ? -src[r][3] : src[r][3];
+    }
+}
+
+// Rotates a LOCAL-frame rigid transform 180 degrees around local axis
+// `axis` (0=X, 1=Y, 2=Z) -- a PROPER rotation (determinant +1, does NOT
+// flip chirality, unlike mirrorLocalMtxAxis() above), for composing on
+// TOP of an already-correct mirror when the mirror alone gets WHICH FACE
+// is visible right but leaves the item spun 180 degrees the wrong way
+// around that face's own normal.
+//
+// Added 2026-08-20 same-day follow-up: user confirmed axis=2 fixed the
+// shield's facing ("both the sword and shield look correct") but flagged
+// a SEPARATE remaining problem -- "the shield is blocking the inside of
+// my forearm, rather than the outside" -- i.e. it wraps around the wrong
+// side of the arm despite showing the right texture. This is exactly the
+// class of residual error a single mirror can leave behind: getting the
+// FACING (chirality) axis right doesn't automatically also get the
+// in-plane spin right, since those are two independent degrees of
+// freedom a lone reflection doesn't fully pin down (the same general
+// shape of problem as section 12's hand-rotation saga needing an axis
+// mapping fix AND a separate residual static-offset pass).
+//
+// Derivation: the rotation BLOCK transforms with the IDENTICAL
+// sign(r)*sign(c) pattern as mirrorLocalMtxAxis()'s (a diagonal +-1
+// matrix's off-diagonal product pattern only depends on WHICH entries
+// differ from the others, not their absolute sign, so a 180-degree
+// rotation about axis `a` -- diag with +1 at `a`, -1 elsewhere -- and a
+// mirror through axis `a` -- diag with -1 at `a`, +1 elsewhere --
+// negate the exact same set of rotation entries). They differ only in
+// TRANSLATION: a mirror negates just the axis's OWN component (see
+// mirrorLocalMtxAxis()); a 180-degree rotation negates the two
+// components NOT equal to `axis`, leaving that axis's own translation
+// alone -- the opposite rule.
+// BUG FIX 2026-08-20: this used to be a conjugation (D*R*D-style: negate
+// entries where exactly one of row/col == axis, and negate the translation
+// component on the other two axes). That rotates the whole local frame
+// around its own ORIGIN (the hand joint's origin) -- for an item like the
+// shield whose grip is offset from that origin, conjugation moves the
+// item's apparent position to a different nearby point (a reflection of
+// its offset through the origin) instead of spinning it in place. Reported
+// by the user as "rotated 180 degrees, not just translated" while tuning
+// vrSwapShieldExtraFlipAxis: the fist visibly moved instead of just
+// flipping palm/back-of-hand orientation.
+//
+// Fix: rotate the item IN PLACE by post-multiplying the rotation block by
+// D = diag(+1 at axis, -1, -1) (R_new = R * D), which applies the 180
+// rotation in the item's own local/child frame, and leave translation
+// completely untouched. Post-multiplying by a diagonal D scales each
+// COLUMN c of R by D[c][c]: negate every row of the two columns that are
+// NOT axis, leave the axis column unchanged. Still a proper rotation
+// (det=+1: negating 2 of 3 orthonormal columns flips sign twice).
+inline void rotate180LocalMtxAxis(Mtx dest, MtxP src, int axis) {
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            dest[r][c] = (c == axis) ? src[r][c] : -src[r][c];
+        }
+        dest[r][3] = src[r][3];  // translation unchanged -- rotate IN PLACE
+    }
+}
+
 // itemJointMtx/handJointMtx: this frame's mpLinkModel->getAnmMtx(mXxxItemJntNo)
 // / getAnmMtx(mXxxHandJntNo) for one side, evaluated by the caller.
 // itemJointMtx doubles as the gate (compare against the model's current
@@ -1550,15 +1725,47 @@ inline bool mtxNearlyEqual(MtxP a, MtxP b) {
 // tracked hand pose. Returns false only if MTXInverse fails (should not
 // happen for a well-formed rigid joint matrix, but its return value is
 // trusted over assuming success).
+//
+// mirrorAxis (added 2026-08-20, default -1 = no mirror, every existing
+// call site untouched): when >= 0, mirrorLocalMtxAxis() reflects the
+// computed relativeOffset through that local axis BEFORE composing with
+// trackedHandMtx -- see that function's own comment for why and when this
+// is used (the "Swap Sword/Shield Hands" VR setting).
+// extraFlipAxis (added 2026-08-20, same-day follow-up, default -1 = no
+// extra flip): when >= 0, rotate180LocalMtxAxis() additionally rotates
+// the (already-mirrored, if mirrorAxis >= 0) offset 180 degrees around
+// that local axis -- see that function's own comment for why (fixes the
+// item's in-plane spin without undoing the mirror's chirality fix).
+// Applied AFTER the mirror, on whatever the mirror step produced.
 inline bool computeTrackedItemMtx(
-    Mtx dest, MtxP itemJointMtx, MtxP handJointMtx, MtxP trackedHandMtx)
+    Mtx dest, MtxP itemJointMtx, MtxP handJointMtx, MtxP trackedHandMtx,
+    int mirrorAxis = -1, int extraFlipAxis = -1,
+    float offsetX = 0.0f, float offsetY = 0.0f, float offsetZ = 0.0f)
 {
     Mtx handInv;
     if (!MTXInverse(handJointMtx, handInv)) return false;
 
-    Mtx relativeOffset;
-    MTXConcat(handInv, itemJointMtx, relativeOffset);
-    MTXConcat(trackedHandMtx, relativeOffset, dest);
+    Mtx offset;
+    MTXConcat(handInv, itemJointMtx, offset);
+
+    // Both helpers are element-wise (each dest[r][c] only ever reads the
+    // matching src[r][c]/src[r][3]) -- safe to apply in place, no separate
+    // scratch buffer needed between the two steps.
+    if (mirrorAxis >= 0) {
+        mirrorLocalMtxAxis(offset, offset, mirrorAxis);
+    }
+    if (extraFlipAxis >= 0) {
+        rotate180LocalMtxAxis(offset, offset, extraFlipAxis);
+    }
+    // Fixed positional nudge, applied LAST in this already mirror/flip-
+    // corrected local frame -- i.e. along the item's own current local
+    // axes, not world axes. See settings.h's vrSwapSwordGripOffsetX/Y/Z
+    // comment for why (compensates for the shield mesh's own off-center
+    // handle attachment without touching mesh data).
+    offset[0][3] += offsetX;
+    offset[1][3] += offsetY;
+    offset[2][3] += offsetZ;
+    MTXConcat(trackedHandMtx, offset, dest);
     return true;
 }
 
@@ -1608,13 +1815,19 @@ inline bool applyTrackedItemMtxOne(
 // between those two read points, not a bug in the comparison). No amount of
 // caching fixes a comparison against a value that's legitimately stale by
 // construction -- the real flag sidesteps the whole problem.
+// mirrorAxis/extraFlipAxis: threaded straight through to
+// computeTrackedItemMtx() -- see its own comment (both default -1, every
+// pre-existing call site unaffected).
 inline bool applyTrackedItemMtxIfAttached(
-    J3DModel* model, bool attached, MtxP itemJointMtx, MtxP handJointMtx, MtxP trackedHandMtx)
+    J3DModel* model, bool attached, MtxP itemJointMtx, MtxP handJointMtx, MtxP trackedHandMtx,
+    int mirrorAxis = -1, int extraFlipAxis = -1,
+    float offsetX = 0.0f, float offsetY = 0.0f, float offsetZ = 0.0f)
 {
     if (!model || !attached || !detail::s_handMtxValid) return false;
 
     Mtx trackedMtx;
-    if (!computeTrackedItemMtx(trackedMtx, itemJointMtx, handJointMtx, trackedHandMtx))
+    if (!computeTrackedItemMtx(trackedMtx, itemJointMtx, handJointMtx, trackedHandMtx,
+                                mirrorAxis, extraFlipAxis, offsetX, offsetY, offsetZ))
         return false;
 
     model->setBaseTRMtx(trackedMtx);
@@ -1786,8 +1999,87 @@ inline void refreshTrackedItemMtxLive() {
     const bool swordAttached = link->checkItemSwordEquip();
     const bool shieldAttached = link->checkShieldHandAttached();
 
+    // SWORD/SHIELD HAND SWAP -- "Swap Sword/Shield Hands" VR setting
+    // (2026-08-20, explicit user request). itemJointMtx/handJointMtx are
+    // DELIBERATELY left unswapped below -- still each item's own authored
+    // rig data (mLeftItemJntNo for the sword, mRightItemJntNo for the
+    // shield, exactly as always) -- there's no "sword held in the right
+    // hand" rig data anywhere in the base game to swap TO. Only WHICH
+    // tracked controller matrix composes with that rig data changes
+    // (trackedHandMtx below), plus vrSwapGripMirrorAxis reflects the rig
+    // data through Link's own left-right body plane first so the result
+    // reads as a natural mirror-image grip instead of a left-hand grip
+    // pasted onto a right-hand orientation ("backwards" per the user's own
+    // prediction) -- see mirrorLocalMtxAxis()'s comment for the technique
+    // and computeTrackedItemMtx()'s mirrorAxis parameter for the plumbing.
+    //
+    // vrSwapSwordGripMirrorAxis/vrSwapShieldGripMirrorAxis (settings.h) are
+    // LIVE-ADJUSTABLE settings, not hardcoded constants -- the correct
+    // mirror axis depends on how this rig's local joint frames are
+    // authored, not something derivable without an in-headset look. The
+    // first in-headset test (one shared axis, 0/X) found the SWORD "about
+    // right" but left the shield showing its back/straps instead of its
+    // front face ("backwards") -- proving the two items need independently
+    // tunable axes (different item joints, no reason to assume the same
+    // local-frame convention), hence the split into two separate settings.
+    // Debug > Graphics Settings has a live slider for each
+    // (ImGuiMenuTools.cpp) so candidates can be tried in-headset without a
+    // rebuild per guess -- same "test the candidate planes directly"
+    // methodology that closed out this project's hardest hand-rotation bug
+    // (vr-mod-notes section 12). Once each is confirmed, update its
+    // ConfigVar's compiled default and remove the debug sliders.
+    //
+    // vrSwapXExtraFlipAxis (same-day follow-up): axis=2 fixed the shield's
+    // FACING (which texture side shows) but left it "blocking the inside
+    // of my forearm, rather than the outside" -- spun 180 degrees the
+    // wrong way around that face's own normal. rotate180LocalMtxAxis()
+    // (its own comment has the full derivation) composes an ADDITIONAL
+    // proper 180-degree rotation on top of the mirror, fixing the in-plane
+    // spin without undoing the mirror's chirality correction. -1 = no
+    // extra flip (the default -- most items may not need this second
+    // correction at all).
+    const bool swapHands = dusk::getSettings().game.vrSwapSwordShieldHands.getValue();
+    MtxP swordTrackedHandMtx = swapHands ? detail::s_rightHandMtx : detail::s_leftHandMtx;
+    MtxP shieldTrackedHandMtx = swapHands ? detail::s_leftHandMtx : detail::s_rightHandMtx;
+    const int swordMirrorAxis =
+        swapHands ? dusk::getSettings().game.vrSwapSwordGripMirrorAxis.getValue() : -1;
+    const int shieldMirrorAxis =
+        swapHands ? dusk::getSettings().game.vrSwapShieldGripMirrorAxis.getValue() : -1;
+    const int swordExtraFlipAxis =
+        swapHands ? dusk::getSettings().game.vrSwapSwordExtraFlipAxis.getValue() : -1;
+    const int shieldExtraFlipAxis =
+        swapHands ? dusk::getSettings().game.vrSwapShieldExtraFlipAxis.getValue() : -1;
+    // Fixed positional nudge, same-day follow-up -- see settings.h's
+    // vrSwapSwordGripOffsetX/Y/Z comment. 0.0f (no-op) whenever the swap
+    // setting is off, same gating as the axis settings above.
+    const float swordOffsetX = swapHands ? dusk::getSettings().game.vrSwapSwordGripOffsetX.getValue() : 0.0f;
+    const float swordOffsetY = swapHands ? dusk::getSettings().game.vrSwapSwordGripOffsetY.getValue() : 0.0f;
+    const float swordOffsetZ = swapHands ? dusk::getSettings().game.vrSwapSwordGripOffsetZ.getValue() : 0.0f;
+    const float shieldOffsetX = swapHands ? dusk::getSettings().game.vrSwapShieldGripOffsetX.getValue() : 0.0f;
+    const float shieldOffsetY = swapHands ? dusk::getSettings().game.vrSwapShieldGripOffsetY.getValue() : 0.0f;
+    const float shieldOffsetZ = swapHands ? dusk::getSettings().game.vrSwapShieldGripOffsetZ.getValue() : 0.0f;
+
+    // NOTE: a genuine GEOMETRIC mesh mirror (via J3DModel::setBaseScale())
+    // was attempted here 2026-08-20 to fix the shield's handle sitting on
+    // the mesh's authored (left-handed) side, but never got the required
+    // cull-mode compensation working correctly despite five separate
+    // attempts (a persistent material-state change across four rounds,
+    // then a fully custom immediate-mode draw path modeled on
+    // d_a_mirror.cpp's own proven technique) -- every attempt either had
+    // no effect or left the mesh rendering see-through/inside-out. Per
+    // explicit user request, fully removed rather than left disabled --
+    // "remove all of the mirror code we tried to get working and go back
+    // to when it was misaligned, then properly place it another time."
+    // Only the pose-level corrections above (swordMirrorAxis/
+    // shieldMirrorAxis, swordExtraFlipAxis/shieldExtraFlipAxis) remain --
+    // these correctly position/orient the item in the tracked hand, just
+    // without the handle moving to the mesh's mirror-correct side. If
+    // this is revisited, vr-mod-notes has the full trail of what was
+    // tried and ruled out, worth reading before attempting a 6th guess.
+
     const bool swordUpdated = applyTrackedItemMtxIfAttached(
-        swordModel, swordAttached, leftItemJointMtx, leftHandJointMtx, detail::s_leftHandMtx);
+        swordModel, swordAttached, leftItemJointMtx, leftHandJointMtx, swordTrackedHandMtx,
+        swordMirrorAxis, swordExtraFlipAxis, swordOffsetX, swordOffsetY, swordOffsetZ);
     if (swordModel) {
         if (!swordUpdated) {
             refreshRestingPoseSmoothed(swordModel, detail::s_swordRestingTick, detail::s_swordRestingValid,
@@ -1796,7 +2088,8 @@ inline void refreshTrackedItemMtxLive() {
         markModelJointsLive(swordModel);
     }
     const bool shieldUpdated = applyTrackedItemMtxIfAttached(
-        shieldModel, shieldAttached, rightItemJointMtx, rightHandJointMtx, detail::s_rightHandMtx);
+        shieldModel, shieldAttached, rightItemJointMtx, rightHandJointMtx, shieldTrackedHandMtx,
+        shieldMirrorAxis, shieldExtraFlipAxis, shieldOffsetX, shieldOffsetY, shieldOffsetZ);
     if (shieldModel) {
         if (!shieldUpdated) {
             refreshRestingPoseSmoothed(shieldModel, detail::s_shieldRestingTick, detail::s_shieldRestingValid,

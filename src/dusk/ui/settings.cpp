@@ -916,6 +916,29 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                             "rather not see your own body. Has no effect while \"Third "
                             "Person\" above is on."
             });
+        config_bool_select(leftPane, rightPane, getSettings().game.vrExperimentalCutsceneFirstPerson,
+            {
+                .key = "EXPERIMENTAL: Cutscenes First-Person",
+                .helpText = "By default, scripted cutscenes play in third person while "
+                            "you're otherwise in first-person VR (dialogue and door/"
+                            "loading transitions are unaffected and always stay first "
+                            "person). Turn this on to force first person during cutscenes "
+                            "too, whenever Link's own body is actually the thing drawn in "
+                            "the shot. EXPERIMENTAL: many cutscene cameras were never "
+                            "authored to be viewed this way and can put your view somewhere "
+                            "the shot wasn't designed for. Off by default."
+            });
+
+        leftPane.add_section("Combat");
+        config_bool_select(leftPane, rightPane, getSettings().game.vrSwapSwordShieldHands,
+            {
+                .key = "Swap Sword/Shield Hands",
+                .helpText = "Draws the sword in your right hand and the shield in your left "
+                            "(the base game always has Link hold the sword in his left hand). "
+                            "Also swaps which hand's swing/thrust gesture triggers a sword "
+                            "attack vs. a shield bash, so the hand actually holding each item "
+                            "is the one that uses it. Off by default."
+            });
 
         leftPane.add_section("Brightness");
         config_percent_select(leftPane, rightPane, getSettings().game.vrGammaCompensation,

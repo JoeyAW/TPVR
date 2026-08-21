@@ -84,16 +84,21 @@ UserSettings g_userSettings = {
         // (not renamed to match the C++ member) so a value the user already
         // tuned before the sword/shield split (2026-08-20) carries over
         // instead of silently resetting to the default.
-        .vrSwapSwordGripMirrorAxis {"game.vrSwapGripMirrorAxis", 0},
-        .vrSwapShieldGripMirrorAxis {"game.vrSwapShieldGripMirrorAxis", 0},
+        // BAKED IN 2026-08-20, all six below: values confirmed in-headset
+        // ("Yup good enough") after the full grip-mirror/extra-flip/offset
+        // tuning pass -- see vr-mod-notes for the full derivation. Only
+        // take effect while vrSwapSwordShieldHands (still default off,
+        // opt-in preference) is on.
+        .vrSwapSwordGripMirrorAxis {"game.vrSwapGripMirrorAxis", 2},
+        .vrSwapShieldGripMirrorAxis {"game.vrSwapShieldGripMirrorAxis", 2},
         .vrSwapSwordExtraFlipAxis {"game.vrSwapSwordExtraFlipAxis", -1},
-        .vrSwapShieldExtraFlipAxis {"game.vrSwapShieldExtraFlipAxis", -1},
-        .vrSwapSwordGripOffsetX {"game.vrSwapSwordGripOffsetX", 0.0f},
+        .vrSwapShieldExtraFlipAxis {"game.vrSwapShieldExtraFlipAxis", 1},
+        .vrSwapSwordGripOffsetX {"game.vrSwapSwordGripOffsetX", -0.15f},
         .vrSwapSwordGripOffsetY {"game.vrSwapSwordGripOffsetY", 0.0f},
         .vrSwapSwordGripOffsetZ {"game.vrSwapSwordGripOffsetZ", 0.0f},
-        .vrSwapShieldGripOffsetX {"game.vrSwapShieldGripOffsetX", 0.0f},
-        .vrSwapShieldGripOffsetY {"game.vrSwapShieldGripOffsetY", 0.0f},
-        .vrSwapShieldGripOffsetZ {"game.vrSwapShieldGripOffsetZ", 0.0f},
+        .vrSwapShieldGripOffsetX {"game.vrSwapShieldGripOffsetX", -16.97f},
+        .vrSwapShieldGripOffsetY {"game.vrSwapShieldGripOffsetY", -0.91f},
+        .vrSwapShieldGripOffsetZ {"game.vrSwapShieldGripOffsetZ", 3.18f},
         // RESET TO 1.0, 2026-08-20 (was 2.0, confirmed correct on Virtual
         // Desktop 2026-08-16): that tuning was specific to submitting via
         // the plain non-SRGB native swapchain format, which

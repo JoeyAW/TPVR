@@ -6559,6 +6559,86 @@ RETURN), unchanged from every round above. If the chain is ever reported
 looking wrong, that's expected/known, not a regression — start with this
 section's own scoping notes rather than re-investigating from scratch.
 
+### Boomerang crash ("read access violation" in J3DJoint::recursiveCalc while holding it) — FIXED 2026-09-05, CONFIRMED IN-HEADSET
+
+**Symptom** (user-reported crash with a real call stack): access violation
+deep inside `J3DJoint::recursiveCalc()` — reading a garbage/null pointer —
+called from `J3DModel::calc()` → `[Inline Frame] vr_link::
+refreshTrackedBoomerangMtxLive()` → `dusk::vr::tick()`. Reproduced by
+using the boomerang in Forest Temple; the crash's underlying pointer
+value changed between two reports (`0xFFFFFFFFFFFFFFBF` garbage, then a
+clean `nullptr`), which turned out to be two separate real bugs in the
+same function, both in the item-tracking work described in the
+`refreshTrackedBoomerangMtxLive()` sections above.
+
+**Bug 1 (fixed first, reduced the crash but didn't close it) — actor
+type confusion**: `daAlink_c::getBoomerangActor()` falls through to
+`mItemAcKeep.getActor()` — a generic "currently held item" actor cache
+shared by EVERY held item, not boomerang-specific.
+`daPy_actorKeep_c::getActor()` (`d_a_player.h`) is a plain cached raw
+pointer with no re-validation on read, so it can transiently hold a
+stale/wrong-type actor for one real VR frame (mid item-switch, or right
+after the real boomerang actor was deleted but before the next ~30Hz sim
+tick clears the cache) even while `mEquipItem` still reads BOOMERANG —
+this VR code runs every real frame, faster than whatever keeps those two
+fields in sync. Blindly `static_cast`ing whatever was cached to
+`daBoomerang_c*` and calling `->calc()` on `mp_boomModel`/
+`mp_shippuModel`/`mp_setboomEfModel` then read garbage struct offsets as
+`J3DModel*`. **Fix**: guarded with the exact idiom already used at ~40
+other call sites across this codebase for a cached actor pointer of
+uncertain type — `fopAc_IsActor(actor) && fopAcM_GetName(actor) ==
+fpcNm_BOOMERANG_e` — before trusting it, e.g. `d_a_e_bug.cpp`/
+`d_a_e_mf.cpp`/`d_a_obj_toby.cpp`.
+
+**Bug 2 (the actual remaining crash after bug 1) — calc() called on a
+model the base game never calc()s in this state**: with bug 1 fixed, the
+crash persisted (same line, now a clean `nullptr` instead of garbage —
+proof the actor really is a genuine boomerang this time, just still
+crashing). Traced `daBoomerang_c::draw()` and grepped the whole codebase
+for every call site that ever calls `->calc()` on `mp_shippuModel` — the
+base game does so ONLY from `setMoveMatrix()`, which runs exclusively
+while the boomerang is actually thrown/flying (`procMove`). While just
+*held* (exactly the state `refreshTrackedBoomerangMtxLive()`'s own gate
+targets — "kept, not thrown"), `draw()` only conditionally DRAWS
+`mp_shippuModel`/`mp_setboomEfModel` (an if/else-if: `fopAcM_GetParam(
+this) != 0` for shippu, the boomerang-lock-on status bit
+`dComIfGp_checkPlayerStatus0(0, 0x80000)` for setboomEf — never both),
+and drawing (`mDoExt_modelEntryDL`/`mDoExt_modelUpdateDL`) never calls
+`calc()` itself (already established by section 20's investigation
+elsewhere in this file). So while holding an ORDINARY boomerang
+(param==0, no lock-on), nothing in the base game had EVER exercised
+`calc()` on `mp_shippuModel` in that combination of states —
+`refreshTrackedBoomerangMtxLive()` was the first and only thing doing so,
+unconditionally, every real frame, which is what actually crashed.
+
+**Fix**: narrowed `refreshTrackedBoomerangMtxLive()`
+(`vr_link_visibility.hpp`) to mirror `draw()`'s own exact if/else-if
+gating — only `calc()`+`markModelJointsLive()` `mp_shippuModel` when
+`fopAcM_GetParam(boomerang) != 0`, only do the same for
+`mp_setboomEfModel` when the lock-on status bit is set. `mp_boomModel`
+(always drawn/needed unconditionally by the base game) is untouched,
+still refreshed every real frame regardless of state.
+
+**Built successfully both rounds** (RelWithDebInfo) — only
+`vr_main.cpp` needed recompiling each time (transitively includes the
+header), clean link, no new warnings.
+
+**CONFIRMED FIXED IN-HEADSET** — user tested (holding/using the
+boomerang, the original Forest Temple repro) and reported "seems fixed."
+**Reusable lesson**: when a "fixed" crash immediately recurs at the exact
+same source line but with a DIFFERENT faulting pointer value (garbage vs.
+clean null), that's a strong signal the first fix was real but
+insufficient — a second, genuinely separate bug at the same call site —
+rather than evidence the first fix didn't work at all; worth digging for
+bug 2 rather than re-deriving bug 1 a second time. Also worth remembering
+for future item-tracking `calc()`/`markModelJointsLive()` additions in
+this file: before unconditionally calc()'ing every model a `getXModel()`
+accessor exposes, grep whether the BASE GAME itself ever calc()s that
+specific model in the state being targeted — mirroring `draw()`'s own
+conditions (as several other item-tracking fixes in this file already do,
+e.g. `checkShieldHandAttached()`) is cheaper and safer than assuming every
+model is always calc()-safe.
+
 ### Item-tracking status summary (as of 2026-08-12, end of session)
 
 Quick reference for what's confirmed vs. still open across everything

@@ -2506,7 +2506,31 @@ inline void refreshTrackedBoomerangMtxLive() {
     if (link->getThrowBoomerangAcKeep()->getID() != fpcM_ERROR_PROCESS_ID_e) return;
 
     fopAc_ac_c* boomActor = link->getBoomerangActor();
-    if (!boomActor) return;
+    // Crash fix (2026-09-05): getBoomerangActor() falls through to
+    // mItemAcKeep.getActor() here -- the generic "currently held item"
+    // actor cache shared by EVERY held item, not boomerang-specific (see
+    // daAlink_c::getBoomerangActor()). daPy_actorKeep_c::getActor()
+    // (d_a_player.h) is a plain cached raw pointer with no re-validation
+    // on read, so it can transiently hold a stale/wrong-type actor for a
+    // real VR frame (mid item-switch, or right after the real boomerang
+    // actor was deleted but before the next ~30Hz sim tick clears the
+    // cache) even while mEquipItem still reads BOOMERANG -- this VR code
+    // runs every real frame, faster than whatever keeps those two fields
+    // in sync, so it can observe that inconsistent window. Blindly
+    // static_cast'ing that to daBoomerang_c* and calling calc() on
+    // mp_boomModel/mp_shippuModel/mp_setboomEfModel then reads garbage
+    // struct offsets as J3DModel pointers, crashing deep inside
+    // J3DJoint::recursiveCalc() on a garbage pointer -- reported as a
+    // crash "using the boomerang in Forest Temple". Guarded the same way
+    // ~40 other call sites across this codebase already guard a cached
+    // actor pointer before trusting its type (fopAc_IsActor() +
+    // fopAcM_GetName() == fpcNm_BOOMERANG_e, e.g. d_a_e_bug.cpp/
+    // d_a_e_mf.cpp/d_a_obj_toby.cpp) -- an established idiom, not
+    // invented for this fix.
+    if (!boomActor || !fopAc_IsActor(boomActor) ||
+        fopAcM_GetName(boomActor) != fpcNm_BOOMERANG_e) {
+        return;
+    }
 
     daBoomerang_c* boomerang = static_cast<daBoomerang_c*>(boomActor);
     boomerang->applyTrackedKeepTransforms();
@@ -2515,13 +2539,36 @@ inline void refreshTrackedBoomerangMtxLive() {
         m->calc();
         markModelJointsLive(m);
     }
-    if (J3DModel* m = boomerang->getShippuModel()) {
-        m->calc();
-        markModelJointsLive(m);
-    }
-    if (J3DModel* m = boomerang->getSetboomEfModel()) {
-        m->calc();
-        markModelJointsLive(m);
+
+    // Crash fix (2026-09-05), continued: mp_shippuModel/mp_setboomEfModel
+    // are only ever DRAWN conditionally -- daBoomerang_c::draw() gates
+    // them behind an if/else-if (fopAcM_GetParam(this)!=0 for shippu, the
+    // boomerang-lock-on status bit for setboomEf -- never both), and a
+    // whole-codebase grep found NO base-game call site anywhere that ever
+    // calls calc() on mp_shippuModel except setMoveMatrix() (the
+    // THROWN/flying state, procMove) -- draw()'s own
+    // mDoExt_modelEntryDL()/mDoExt_modelUpdateDL() calls don't call
+    // calc() themselves (see section 20's finding on this exact pair of
+    // functions). So while just HOLDING an ordinary boomerang
+    // (param==0, no lock-on), nothing in the base game has ever
+    // exercised calc() on mp_shippuModel in that combination of states --
+    // this VR code was the first and only thing ever doing so
+    // unconditionally, every real frame, which is the likely actual
+    // cause of a crash deep inside J3DJoint::recursiveCalc() (reading a
+    // null J3DMtxCalc*) that survived the actor-type-confusion fix above
+    // unchanged. Narrowed to mirror draw()'s own exact gating instead of
+    // blindly calc()'ing both every frame regardless of whether the base
+    // game would ever touch them in the current state.
+    if (fopAcM_GetParam(boomerang) != 0) {
+        if (J3DModel* m = boomerang->getShippuModel()) {
+            m->calc();
+            markModelJointsLive(m);
+        }
+    } else if (dComIfGp_checkPlayerStatus0(0, 0x80000)) {
+        if (J3DModel* m = boomerang->getSetboomEfModel()) {
+            m->calc();
+            markModelJointsLive(m);
+        }
     }
 }
 

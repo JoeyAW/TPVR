@@ -59,7 +59,6 @@
 #include "res/Object/Alink.h"
 #include <cstring>
 #include <helpers/string.hpp>
-#include <Windows.h>  // OutputDebugStringA -- TEMP DIAGNOSTIC, remove alongside it once root-caused
 #endif
 
 static int daAlink_Create(fopAc_ac_c* i_this);
@@ -10181,6 +10180,18 @@ void daAlink_c::setSpeedAndAngleNormal() {
         }
     }
 
+    // VR "Attach Body Rotation to Headset" -- rounds 1-3 of this fix lived
+    // HERE (only reached while not Z-targeting/item-throwing/hookshot-
+    // moving, see this function's own call site) and are documented in
+    // vr-mod-notes; round 3 (instant-snap to mMoveAngle while the stick is
+    // deflected, else raw head yaw) is still not confirmed correct. Per
+    // explicit user request ("just force it in all gameplay... I want it
+    // to work for z targeting and everything else"), ROUND 4 moved the
+    // whole mechanism to the very tail of daAlink_c::execute() instead --
+    // the one place guaranteed to run after every proc's own facing logic
+    // (including setSpeedAndAngleAtn()/Z-targeting) every single sim tick.
+    // See that override for the current implementation.
+
     setNormalSpeedF(speed, mpHIO->mMove.m.mDeceleration);
 }
 
@@ -18997,6 +19008,81 @@ int daAlink_c::execute() {
     }
     #endif
 
+    // VR "Attach Body Rotation to Headset" -- ROUND 4 (moved here per
+    // explicit user request: "just force link's body direction to the
+    // headset in all gameplay when not in a cutscene... I want it to work
+    // for z targeting and everything else as well"). Rounds 1-3 lived
+    // inside setSpeedAndAngleNormal() -- see that function's own comment
+    // for the full history -- which is only ever reached outside
+    // Z-targeting/item-throwing/hookshot-moving, so it could never affect
+    // those states no matter how it was tuned. This is the one place in
+    // the whole class guaranteed to run every single sim tick, AFTER
+    // every proc's own facing logic for the tick (the entire per-proc
+    // dispatch, `(this->*mpProcFunc)()`, already ran earlier in this same
+    // function, and this is the function's only `return`) -- so an
+    // unconditional assignment here wins over setSpeedAndAngleAtn()
+    // (Z-targeting), item-throw aiming, and everything else in one place.
+    //
+    // ROUND 4.1 (this one) -- round 4 forced BOTH current.angle.y AND
+    // shape_angle.y to the headset yaw, which broke ordinary movement:
+    // current.angle.y is what actual translation is computed from
+    // (cM_ssin/cM_scos(current.angle.y) in the movement code above and
+    // throughout this file) -- forcing it to head yaw regardless of stick
+    // input meant "forward" always meant "wherever I'm looking," so
+    // holding left/right on the stick just walked slightly-left/right-
+    // of-forward instead of strafing, and holding back fought the game's
+    // own turn-before-you-can-reverse logic (cLib_distanceAngleS(mMoveAngle,
+    // current.angle.y) > 0x7800 branch, setSpeedAndAngleNormal()) since
+    // current.angle.y could never actually point away from the headset to
+    // satisfy it. shape_angle.y, in contrast, is purely the VISUAL body
+    // orientation -- confirmed by reading setMatrix() (this file), which
+    // builds the actual rendered model transform from shape_angle.x/y/z,
+    // never current.angle -- so forcing ONLY shape_angle.y here (leaving
+    // current.angle.y under the normal, unmodified movement/steering
+    // logic that already ran earlier this tick) gives exactly what was
+    // asked: Link moves/strafes/backs up normally in response to the
+    // stick, while his drawn body always visually faces the headset.
+    //
+    // Excluded states (magne boots, vine climb, mounted, swimming,
+    // hookshot aim/fly/hang, crawling, any active event) are all checked
+    // via dusk::vr::isVrForcingBodyYawToHeadset() -- the SAME shared gate
+    // applyVrBodyYawOffset() (vr_link_visibility.hpp) uses for its own
+    // real-per-eye-rate lag-compensation pass, factored into one place so
+    // the tick-rate override here and the real-frame-rate correction
+    // there can't drift onto two different definitions of "should the
+    // body be forced to face the headset right now" -- see that shared
+    // function's own comment for exactly why each state is excluded.
+    if (dusk::vr::isRenderingToHeadset() && dusk::vr::isVrForcingBodyYawToHeadset(this)) {
+        coIt nst s16 freshHeadYawS = dusk::vr::getHeadMoveAngleS();
+        // ROOT CAUSE (found 2026-09-11 via a real debugger session):
+        // setMatrix() already ran earlier THIS SAME execute() call (see its
+        // call sites above in this function) and baked mpLinkModel's actual
+        // rendered rotation from shape_angle.y as it stood BEFORE this
+        // override -- meaning the rendered body was always one full tick
+        // stale relative to whatever shape_angle.y gets set to right here.
+        // Confirmed via Immediate Window: this->getBodyModel()->getModelData()
+        // ->getFlag() & 0x10 != 0 (body uses ConcatView, same buffer class as
+        // hands/sword/shield -- ruling out a getDrawMtxPtr()-vs-getAnmMtx()
+        // mismatch as the cause, unlike the analogous bug once found for
+        // hands). Fix: correct the ALREADY-BAKED transform in place, using
+        // applyVrBodyYawOffset()'s already-verified left-multiply Ry(delta)
+        // math (rotation-only, translation untouched) -- called with
+        // shape_angle.y still holding the stale pre-override value the
+        // baked transform actually used, giving the exact right delta --
+        // THEN advance shape_angle.y for next tick's setMatrix() call.
+        // Deliberately called exactly ONCE per tick, here, not per real
+        // frame: the abandoned "live" (vr_main.cpp tick()) call site for
+        // this same function had no way to know how much of its correction
+        // was already baked in, so it re-applied nearly the same delta
+        // against the same (tick-rate-only) shape_angle.y on every real
+        // frame within a tick, compounding well past the intended
+        // rotation instead of converging -- see vr-mod-notes for the full
+        // trail. Calling it once here, synchronized with setMatrix() and
+        // shape_angle.y's own update, avoids that entirely.
+        dusk::vr::applyVrBodyYawOffset(mpLinkModel, freshHeadYawS);
+        shape_angle.y = freshHeadYawS;
+    }
+
     return 1;
 }
 
@@ -19874,8 +19960,28 @@ int daAlink_c::draw() {
         // so the legacy pass calling it too is wasteful but harmless, and
         // it's confirmed working in-headset already; touching it isn't
         // warranted without a demonstrated bug there.
+        // CORRECTED 2026-09-10: this whole isEyePassOpen() gate never
+        // actually opens. Per the SAME [dusk::vr::eyepasscheck] full-
+        // session capture that already proved this exact draw()/
+        // fapGm_Execute() call path never coincides with a real VR eye
+        // pass (see refreshTrackedHandDrawMtxLive()'s own comment,
+        // vr_link_visibility.hpp) -- isEyePassOpen() is only ever true
+        // inside a real beginEye()/endEye() bracket, which this legacy,
+        // per-sim-tick call site never is. A zero-[dusk::vr::bodyrotdiag]-
+        // lines capture during a real session where "Attach Body Rotation
+        // to Headset" was demonstrably active confirmed this call site is
+        // simply never reached, not merely producing a wrong result. The
+        // REAL, live fix now runs from vr_main.cpp's tick() instead --
+        // dusk::vr::refreshVrBodyOffsetsLive(), called once per real frame
+        // alongside refreshTrackedHandDrawMtxLive()/refreshTrackedItemMtxLive()
+        // and friends. Left in place, inert, rather than removed --
+        // matches this file's existing convention for applyTrackedItemMtx()
+        // just above (a dead-but-harmless legacy call site kept rather
+        // than deleted, since a future change to isEyePassOpen()'s own
+        // scoping could theoretically make it live again).
         if (dusk::vr::isEyePassOpen()) {
             dusk::vr::applyVrBodyPositionOffset(mpLinkModel);
+            dusk::vr::applyVrBodyYawOffset(mpLinkModel, dusk::vr::getHeadMoveAngleS());
         }
 #endif
 

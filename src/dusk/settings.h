@@ -235,6 +235,24 @@ struct UserSettings {
         // option that shows link's body and puts the entire game in third
         // person").
         ConfigVar<bool> vrThirdPerson;
+        // Attaches Link's body rotation to the headset's own yaw. Without
+        // this, current.angle.y/shape_angle.y (daAlink_c::
+        // setSpeedAndAngleNormal(), d_a_alink.cpp) only ease toward
+        // mMoveAngle (which already includes the HMD's yaw -- see
+        // getHeadMoveAngleS(), the 2026-08-07 movement-direction fix) at
+        // the base game's normal walking turn rate -- meaning a fast real
+        // head turn while standing still visibly lags behind before the
+        // body catches up. With this on, current.angle.y/shape_angle.y are
+        // snapped directly to the HMD's yaw every real sim tick instead
+        // (no turn-rate smoothing), so Link's body always faces exactly
+        // where the player is looking. Scoped to setSpeedAndAngleNormal()
+        // only, which is already never called while Z-targeting/locked-on,
+        // throwing an item, or hookshot-moving (see that function's own
+        // call site) -- exactly the states where "always face the
+        // headset" would fight with more appropriate existing facing
+        // logic, so those are unaffected either way. Default ON per
+        // explicit user request (added 2026-09-08).
+        ConfigVar<bool> vrAttachBodyRotationToHead;
         // EXPERIMENTAL. Default off (added 2026-08-20, explicit user
         // request). Normal behavior as of this same request: real scripted
         // CUTSCENES (isRealCutsceneRunning(), vr_link_visibility.hpp --
@@ -370,6 +388,35 @@ struct UserSettings {
         // side-by-side against the known-correct desktop mirror, not a
         // memory-based impression) before changing it a fourth time.
         ConfigVar<float> vrGammaCompensationSteamVr;
+        // Camera-only 6DOF: real head TRANSLATION (leaning, ducking,
+        // side-stepping) now offsets the VR camera (and, so hands don't
+        // visually desync from a leaning head, the tracked-hand anchor too
+        // -- both read the same getVrCameraEyeAnchor(), vr_link_visibility.hpp)
+        // relative to a calibrated reference position, on top of the
+        // existing rigid core/head-joint anchor. Does NOT move Link's
+        // actual in-game position/collision -- see vrPositionalTrackingRadius
+        // below for the clamp, and getVrCameraEyeAnchor()'s own comment for
+        // the calibration-on-activation + rotate-by-smooth-turn-yaw math
+        // (reuses the exact same rotateYawXr()/VR_SCALE_FACTOR conversion
+        // already proven for tracked hands). Default ON (added 2026-09-11,
+        // explicit user request: "6 degrees of freedom so the headset can
+        // move horizontally and vertically from its position" -- scoped to
+        // camera-only for now; moving Link's own body/collision with it is
+        // an explicitly deferred phase 2, to be picked up once the ongoing
+        // body-rotation investigation is resolved). NOT yet tested in
+        // headset as of this addition.
+        ConfigVar<bool> vrPositionalTracking;
+        // Maximum real-world distance (metres) the head-translation offset
+        // above is allowed to move the camera from its calibrated
+        // reference position, in any direction -- clamped by magnitude
+        // (not per-axis) so leaning further than this just stops moving
+        // the camera rather than producing an unbounded offset if someone
+        // stands up fully or walks away from their calibrated spot.
+        // Untested starting guess, not derived from anything -- the first
+        // thing to retune (Debug > Graphics Settings slider,
+        // ImGuiMenuTools.cpp) if leaning/ducking feels too restrictive or
+        // lets the camera drift uncomfortably far.
+        ConfigVar<float> vrPositionalTrackingRadius;
 
         // Audio
         ConfigVar<bool> noLowHpSound;

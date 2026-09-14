@@ -78,6 +78,7 @@ UserSettings g_userSettings = {
         .vrDesktopMirror {"game.vrDesktopMirror", true},
         .vrHideBody {"game.vrHideBody", false},
         .vrThirdPerson {"game.vrThirdPerson", false},
+        .vrAttachBodyRotationToHead {"game.vrAttachBodyRotationToHead", true},
         .vrExperimentalCutsceneFirstPerson {"game.vrExperimentalCutsceneFirstPerson", false},
         .vrSwapSwordShieldHands {"game.vrSwapSwordShieldHands", false},
         // Key string deliberately kept as the original "game.vrSwapGripMirrorAxis"
@@ -133,6 +134,8 @@ UserSettings g_userSettings = {
         // known-correct desktop mirror before changing it a fourth time,
         // not another memory-based impression.
         .vrGammaCompensationSteamVr {"game.vrGammaCompensationSteamVr", 1.0f},
+        .vrPositionalTracking {"game.vrPositionalTracking", true},
+        .vrPositionalTrackingRadius {"game.vrPositionalTrackingRadius", 0.75f},
 
         // Audio
         .noLowHpSound {"game.noLowHpSound", false},
@@ -342,6 +345,7 @@ void registerSettings() {
     Register(g_userSettings.game.vrDesktopMirror);
     Register(g_userSettings.game.vrHideBody);
     Register(g_userSettings.game.vrThirdPerson);
+    Register(g_userSettings.game.vrAttachBodyRotationToHead);
     Register(g_userSettings.game.vrExperimentalCutsceneFirstPerson);
     Register(g_userSettings.game.vrSwapSwordShieldHands);
     Register(g_userSettings.game.vrSwapSwordGripMirrorAxis);
@@ -356,6 +360,8 @@ void registerSettings() {
     Register(g_userSettings.game.vrSwapShieldGripOffsetZ);
     Register(g_userSettings.game.vrGammaCompensation);
     Register(g_userSettings.game.vrGammaCompensationSteamVr);
+    Register(g_userSettings.game.vrPositionalTracking);
+    Register(g_userSettings.game.vrPositionalTrackingRadius);
     Register(g_userSettings.game.enableFastIronBoots);
     Register(g_userSettings.game.canTransformAnywhere);
     Register(g_userSettings.game.fastRoll);

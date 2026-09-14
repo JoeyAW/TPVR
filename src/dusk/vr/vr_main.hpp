@@ -263,6 +263,49 @@ void refreshTrackedHookshotMtxLive();
 // reasoning as the functions above.
 void applyVrBodyPositionOffset(J3DModel* bodyModel);
 
+// VR "Attach Body Rotation to Headset" -- shared gating condition (thin
+// forward to vr_link::isVrForcingBodyYawToHeadset(link),
+// vr_link_visibility.hpp), used by both daAlink_c::execute()'s tick-rate
+// override (d_a_alink.cpp) and applyVrBodyYawOffset() below, so the two
+// can't drift onto two different definitions of "should the body be
+// forced to face the headset right now."
+bool isVrForcingBodyYawToHeadset(daAlink_c* link);
+
+// Real-per-eye-rate compensation for the residual body-facing lag between
+// execute()'s once-per-sim-tick override and the player's continuously-
+// changing real head yaw -- see vr_link::applyVrBodyYawOffset()'s own
+// comment for the full derivation. `freshHeadYawS` should be
+// getHeadMoveAngleS()'s own current value. Called once per eye, alongside
+// applyVrBodyPositionOffset() above.
+void applyVrBodyYawOffset(J3DModel* bodyModel, s16 freshHeadYawS);
+
+// ATTEMPTED fix for the body position/yaw offsets above being dead code
+// the whole time (found 2026-09-10, REVERTED same day -- see
+// vr_link::refreshVrBodyOffsetsLive()'s own "ROUND 8 UPDATE" comment for
+// the full story before touching this again). applyVrBodyPositionOffset()/
+// applyVrBodyYawOffset() above are still only ever called from
+// d_a_alink.cpp's daAlink_c::draw(), gated on isEyePassOpen() -- the same
+// call site section 20 already proved (via a full-session
+// [dusk::vr::eyepasscheck] capture) never runs during a real VR eye pass
+// -- so this WAS meant to be the real, live-per-frame call site. Once
+// actually wired live, it caused two confirmed regressions (a 30Hz-
+// looking stutter from disabling frame_interp's animation smoothing for
+// the WHOLE skeleton, and a position overshoot from applying a
+// camera/hands-style extrapolation to the body's non-physically-
+// continuous simulated position) WITHOUT fixing the original 180°-facing
+// symptom at all. NOT currently called from anywhere -- kept defined for
+// reference only. Use logVrBodyRotationDiagLive() below for live
+// instrumentation instead.
+void refreshVrBodyOffsetsLive(s16 freshHeadYawS);
+
+// Pure, read-only diagnostic instrumentation -- see
+// vr_link::logVrBodyRotationDiagLive()'s own comment. Logs
+// [dusk::vr::bodyrotdiag] from a genuinely live per-real-frame call site
+// without touching rendering at all (unlike refreshVrBodyOffsetsLive()
+// above, currently unused). This IS what's actually wired into
+// vr_main.cpp's tick() right now.
+void logVrBodyRotationDiagLive(s16 freshHeadYawS);
+
 // The current VR smooth-turn yaw offset (vr_smooth_turn.hpp), in radians --
 // 0 outside VR or before the right thumbstick has been used to turn.
 // Exposed here (a plain float, no OpenXR types in the signature) so

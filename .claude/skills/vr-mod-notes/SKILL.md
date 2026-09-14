@@ -11420,6 +11420,1147 @@ project (gamma compensation, menu-stick pulse cadence, etc.) was closed
 out once confirmed. Not done tonight -- user asked only to document and
 stop, not to keep editing/rebuilding.
 
+### "Attach Body Rotation to Headset" VR setting — built 2026-09-08, defaults ON, NOT yet tested in-headset
+
+**Goal** (explicit user request): a VR settings toggle that attaches
+Link's body rotation to the headset's own yaw, defaulting ON.
+
+**What was already there**: since the 2026-08-07 movement-direction fix
+(section 17), `mMoveAngle` already includes the HMD's live yaw
+(`dusk::vr::getHeadMoveAngleS()`) regardless of stick input, and
+`daAlink_c::setSpeedAndAngleNormal()` (`d_a_alink.cpp`) already eases
+`current.angle.y`/`shape_angle.y` toward `mMoveAngle` every sim tick via
+`cLib_addCalcAngleS()` at the base game's normal walking turn rate — so
+turning your head while standing still already nudged Link's body, just
+capped at that turn rate (visible lag behind a fast real head turn, by
+design for ordinary gamepad play). This request is about removing that
+lag specifically, not adding a mechanism that didn't exist at all.
+
+**Fix**: added a direct override at the very end of
+`setSpeedAndAngleNormal()`, after all of its existing turn-rate logic has
+already run for the frame — `current.angle.y = shape_angle.y =
+dusk::vr::getHeadMoveAngleS()` — gated on
+`isRenderingToHeadset() && isVrFirstPerson(this) &&
+vrAttachBodyRotationToHead.getValue()`. Scoped to this one function
+deliberately: `setSpeedAndAngleNormal()` is already only ever called
+while NOT Z-targeting/locked-on, throwing an item, or hookshot-moving
+(confirmed by reading its own call site, `d_a_alink.cpp` ~line 12403-12415)
+— exactly the states where forcing body-facing to the headset would
+fight with more appropriate existing facing logic (target lock, aim
+animations), so those are left completely untouched. `isVrFirstPerson()`
+excludes Wolf form/cutscenes/dialogue-third-person the same way every
+other per-frame VR override in this file already does.
+
+**New `ConfigVar<bool> game.vrAttachBodyRotationToHead`**
+(`dusk/settings.h`/`.cpp`, default `true`), added to the Dusklight menu's
+VR settings tab (`dusk/ui/settings.cpp`) as "Attach Body Rotation to
+Headset", right after "Third Person" in the Appearance section.
+
+Built successfully (RelWithDebInfo) — `settings.h`/`.cpp`,
+`dusk/ui/settings.cpp`, `d_a_alink.cpp` and dependents all recompiled,
+clean link, no new warnings.
+
+**Same-day follow-up — first version broke strafing, fixed, built.** User
+report: "since link is always facing the cameras direction i cant walk
+left and right." Root cause: the override unconditionally snapped
+`current.angle.y` to raw head yaw, ignoring `mStickAngle` entirely, every
+real frame it ran — including while the movement stick was deflected.
+This game has no independent strafe: moving at an angle relative to where
+you're looking works by turning Link's BODY to face that angle
+(`mMoveAngle`, already turned toward by the pre-existing logic above),
+then walking straight ahead — since this override runs AFTER (and thus
+wins over) that turn-toward-`mMoveAngle` logic, it was silently
+overriding the player's steering input every single frame, locking body
+facing (and therefore movement direction) to pure head yaw regardless of
+the stick.
+
+**Fix**: added `&& mStickValue <= 0.05f` to the override's condition —
+the snap-to-head-yaw override now only fires while the movement stick is
+neutral (standing still, which is what "always face the headset" was
+actually meant to fix). While the stick is deflected, `mMoveAngle`
+(already turned toward above, and already including the HMD's yaw as its
+own base) is left in full control, so steering at an angle from the view
+still works exactly as before. Built successfully (RelWithDebInfo) — only
+`d_a_alink.cpp` recompiled, clean link, no new warnings.
+
+**Round 3, same day — round 2 fixed strafing but broke head-tracking
+WHILE MOVING; unified fix, built.** User: "now his body doesnt snap to
+the headset with the setting on." Asked a direct clarifying question
+before guessing a third time (the round-1→round-2 cycle had already burned
+one blind-guess round): were they standing still, or walking while
+turning their head? **Answer: walking/holding the stick while turning
+their head.**
+
+Root cause: round 2's gate (`mStickValue <= 0.05f`) only applied the
+head-yaw snap while the stick was neutral — while moving, it did nothing
+and left the pre-existing turn-toward-`mMoveAngle` logic (already
+including the HMD's yaw, just at the normal walking turn rate) in full
+control, which is exactly the lag this whole feature exists to remove.
+Also root-caused, via reading `JUTGamePad::CStick::update()`
+(`JUTGamePad.cpp`) directly, why round 1 couldn't simply use `mMoveAngle`
+at rest either: `mAngle` (the stick's angle) is only recomputed while
+`mValue > 0` — once the stick returns to center, `mStickAngle` (and
+therefore `mMoveAngle`) freezes at whatever direction was LAST pushed,
+not "wherever I'm looking now." `mStickValue` itself has no such
+staleness (always recomputed from raw x/y every frame), so the neutral-
+stick THRESHOLD check itself was always reliable — the bug was purely in
+which TARGET angle got used in each case.
+
+**Fix**: apply the instant-snap override unconditionally now (removed
+the `mStickValue <= 0.05f` gate on the `if` itself), but pick the target
+based on stick state: `current.angle.y = (mStickValue > 0.05f) ?
+mMoveAngle : dusk::vr::getHeadMoveAngleS();` — while deflected, snap
+straight to `mMoveAngle` (already includes both the HMD's yaw and the
+stick's offset from it, so strafing/steering-at-an-angle still works,
+just without turn-rate lag); while neutral, snap to raw head yaw instead
+(avoids the frozen-`mStickAngle` problem). `shape_angle.y` mirrors
+`current.angle.y` in both cases, same as before.
+
+Built successfully (RelWithDebInfo) — only `d_a_alink.cpp` recompiled,
+clean link, no new warnings.
+
+**NOT yet tested in-headset.** Next step for whoever picks this up: with
+the setting on (the default), confirm (a) turning your head WHILE WALKING
+now redirects Link's body/movement instantly (the actual reported gap),
+(b) standing still and turning your head still snaps instantly with no
+lag, and (c) pushing the movement stick left/right/backward relative to
+your view still lets you walk/strafe in that direction instead of being
+locked to head-forward (the original round-1 regression must not come
+back). Also worth checking movement now feels reasonable rather than too
+"snappy"/robotic while turning direction quickly mid-walk, since this
+removes turn-rate smoothing entirely while the setting is on, not just
+the head-yaw portion of it — if that feels bad, the fix would need to
+separate the stick-offset and head-yaw components of the turn rather
+than bypassing smoothing for both at once. Also worth checking it doesn't
+fight anything unexpected right as Z-targeting engages/disengages (should
+hand off cleanly to/from `setSpeedAndAngleAtn()`'s own facing logic,
+since the two functions are mutually exclusive per their shared call
+site).
+
+**Round 3 tested — still not fixed. User explicitly deferred ("Still not
+fixed but ill do it later") rather than asking for a fourth guess.** No
+further detail was given on what specifically still looks wrong (body
+still lags, doesn't move at all, wrong direction, etc.) — three rounds of
+code-reading-only guesses (round 1: unconditional raw head yaw, broke
+strafing; round 2: idle-only gate, left movement-time lag unfixed; round
+3: unified instant-snap picking `mMoveAngle` vs. raw head yaw by stick
+state) have each been plausible from reading the code but none confirmed
+working, and continuing to guess a fourth time without new evidence would
+repeat exactly the pattern this project's own standing lesson (see the
+bottom of this file) warns against. **STOPPED here per explicit user
+request — do not attempt a fourth blind fix.**
+
+**Concrete next step, whenever this is picked back up**: per this
+project's own established practice for a bug that resists 2+ rounds of
+code-reading-only guesses (see the Build Workflow section, and section
+20/23's own repeated lessons), add temporary `OutputDebugStringA` logging
+at the override site (`d_a_alink.cpp`, `setSpeedAndAngleNormal()`'s
+tail) — log `mStickValue`, `mMoveAngle`, `dusk::vr::getHeadMoveAngleS()`,
+the computed target, and `current.angle.y`/`shape_angle.y` both BEFORE
+and AFTER the override, once every ~30 frames — then ask the user to
+reproduce (walk, turn head, stand still, turn head) and paste back the
+Output-window lines. That capture would settle directly whether: (a) the
+override is even being reached at all (rules in/out a gating bug in
+`isRenderingToHeadset()`/`isVrFirstPerson()`/the settings check itself),
+(b) the computed target angle is sane, or (c) something ELSE downstream
+overwrites `current.angle.y`/`shape_angle.y` again later the same
+tick/frame before it's ever drawn (the same "dead call site" bug CLASS
+section 20's whole saga eventually traced hand/sword/body lag to — worth
+specifically checking whether `daAlink_c::draw()`/`setMatrix()` or
+`frame_interp`'s once-per-tick snapshot system could be substituting a
+stale value here too, not just re-deriving the angle math a fourth
+time).
+
+**ROUND 4 (new session, 2026-09-XX) — per explicit user request, replaced
+the whole setSpeedAndAngleNormal()-only mechanism with a universal
+tail-of-execute() override so it also covers Z-targeting and everything
+else. Two sub-rounds so far; still NOT confirmed fully fixed — PAUSED for
+the night per user request, read this box before resuming.**
+
+**User's request, verbatim**: "its really that hard to just force link's
+body direction to the headset in all gameplay when not in a cutscene? I
+want it to work for z targeting and everything else as well." Rounds 1-3
+(documented above) all lived inside `setSpeedAndAngleNormal()`, which by
+its own call site is ONLY ever reached outside Z-targeting/item-throwing/
+hookshot-moving — meaning no amount of retuning there could ever have
+worked for Z-targeting, explaining why round 3 stalled.
+
+**Round 4 (moved to the real universal choke point)**: `daAlink_c::execute()`
+was confirmed (via `awk` scan across the whole ~1100-line function) to
+have exactly ONE `return` statement, at its very tail, with the per-proc
+dispatch (`(this->*mpProcFunc)()`, the mechanism that ultimately calls
+`setSpeedAndAngleNormal()`/`setSpeedAndAngleAtn()`/every other proc's own
+facing logic) confirmed to run earlier in the SAME function body. Placing
+the override right before that one `return` guarantees it runs after
+every proc's own facing logic, every single sim tick, unconditionally —
+so it now wins over Z-targeting too. First version forced BOTH
+`current.angle.y` AND `shape_angle.y` to the headset yaw, gated by a large
+exclusion list (magne boots, vine climb, mounted, swimming, every hookshot
+proc, crawling, any active event) reusing the same accessors the game's
+own immediately-preceding reorientation block already relies on.
+
+**Round 4 tested — real regression, user report**: "z targeting works can
+i walk normally... I cannot walk backwards or strafe left and right. If I
+hold left or right on the stick I walk forward slightly to the left and
+vice versa. Walking back gets me stuck. Is it possible to let link move
+normally but visually rotate towards the headset?"
+
+**Root cause, confirmed by reading `setMatrix()` (same file)**:
+`current.angle.y` is what actual TRANSLATION is computed from
+(`cM_ssin`/`cM_scos(current.angle.y)`, used throughout this file for
+movement and various offset calculations) — forcing it to head yaw
+regardless of stick input meant "forward" always meant "wherever I'm
+looking," so any lateral stick input just walked slightly off dead-ahead
+instead of strafing, and holding back fought the game's own
+turn-before-you-can-reverse logic (`cLib_distanceAngleS(mMoveAngle,
+current.angle.y) > 0x7800` branch, `setSpeedAndAngleNormal()`) since
+`current.angle.y` could never actually point away from the headset to
+satisfy it. `shape_angle.y`, in contrast, is confirmed (by reading
+`setMatrix()` directly) to be PURELY the visual body orientation —
+`setMatrix()` builds the actual rendered model transform via
+`mDoMtx_stack_c::ZXYrotM(shape_angle.x, shape_angle.y, shape_angle.z)`,
+never touching `current.angle` at all.
+
+**Round 4.1 fix**: force ONLY `shape_angle.y`, leave `current.angle.y`
+completely alone under the native, unmodified movement/steering logic.
+This is exactly what the user asked for ("let link move normally but
+visually rotate towards the headset") and, per the user's own follow-up
+report, DID restore normal strafing/backward movement — the movement
+regression is fixed.
+
+**Round 4.1 tested — new symptom, real (pre-existing) lag surfaced**: "It
+faces the right way now, however the body slightly lags behind a bit.
+When I walk backwards it comes out in front of me." Diagnosed as the same
+"value only updates once per 30Hz sim tick, drawn at 70-90Hz VR
+framerate" lag class this project has hit and fixed repeatedly before
+(hands, sword/shield, and — critically — this EXACT symptom already
+exists for body POSITION, fixed via `getVrBodyPositionOffset()`/
+`applyVrBodyPositionOffset()`, section 20/23). `shape_angle.y` is only
+written once per tick (in `execute()`'s new tail override); `setMatrix()`
+(also tick-rate, called from `execute()`) bakes whatever `shape_angle.y`
+is at that moment into `mpLinkModel`'s base transform, and nothing
+refreshes it again until the next tick — so between ticks the body's
+visual facing stair-steps behind the player's real, continuously-changing
+head yaw. Theory for "comes out in front of me when walking backward":
+the pre-existing residual body-position lag (small, and invisible while
+walking forward since a laggy trailing body sits behind the camera, out
+of view) becomes highly visible walking backward, since retreating means
+the same-magnitude lag now lands in front of the camera instead of behind
+it — compounded by the facing lag on top.
+
+**Round 4.2 fix (built, NOT yet confirmed working)**: added a real
+per-eye-rate rotation correction, `vr_link::applyVrBodyYawOffset()`
+(`vr_link_visibility.hpp`), directly mirroring
+`getVrBodyPositionOffset()`/`applyVrBodyPositionOffset()`'s own shape.
+Verified algebraically before writing: `setMatrix()` builds the transform
+as `T(pos) * ZXYrotM(shape_angle.x, shape_angle.y, shape_angle.z)`, and
+(assumed, NOT independently verified via a script or capture) this
+engine's `ZXYrotM` convention applies its Y term innermost (first,
+closest to a local vertex) — since pure Y-axis rotations about the same
+axis always compose additively regardless of what's chained around them
+(`Ry(a)*Ry(b) == Ry(a+b)`), right-multiplying the ALREADY-BUILT base
+transform by a plain `Ry(delta)` should be exactly equivalent to having
+used `shape_angle.y + delta` in `setMatrix()` in the first place, with
+X/Z (pitch/roll) untouched and position (translation column) completely
+unaffected (Ry has zero translation). `delta` = fresh
+`dusk::vr::getHeadMoveAngleS()` (passed in by the caller, since this
+header deliberately doesn't include `vr_main.hpp`) minus the CURRENT
+`link->shape_angle.y` (i.e. whatever the last `setMatrix()` call actually
+used — correct regardless of intra-tick ordering, since `shape_angle.y`
+doesn't change again until the next tick). Implemented via
+`MTXRotRad(yRot, 'Y', cM_s2rad(delta))` then `MTXConcat(base, yRot,
+result)` (right-multiply, `base` on the left) then `MTXCopy(result,
+base)` then `bodyModel->calc()`.
+
+Also factored the whole round-4 exclusion list into one shared function,
+`vr_link::isVrForcingBodyYawToHeadset(daAlink_c*)` (reusing the
+already-existing `isMagnetized()`/`isCrawling()`/
+`isHookshotAirborneOrHanging()`/`isHookshotAiming()` helpers instead of
+re-deriving their `mProcID` lists a second time — this also NARROWED the
+hookshot exclusion slightly versus round 4's own ad-hoc list, since those
+established helpers deliberately do NOT exclude `PROC_HOOKSHOT_SUBJECT`/
+`PROC_HOOKSHOT_MOVE`'s sibling case the same way, per their own
+documented reasoning: "neither involves Link's own body leaving its
+normal standing pose"). Thin-forwarded via `dusk::vr::
+isVrForcingBodyYawToHeadset()`/`dusk::vr::applyVrBodyYawOffset()`
+(`vr_main.hpp`/`.cpp`). Both `execute()`'s tick-rate override AND the new
+per-eye correction now call the SAME shared gate, so they can't drift
+onto two different definitions of "should the body face the headset right
+now." Call site: `d_a_alink.cpp`, right next to the existing
+`applyVrBodyPositionOffset(mpLinkModel)` call, same `isEyePassOpen()`
+gate (same reasoning: `daAlink_c::draw()` is ALSO called once per sim
+tick from the legacy `fapGm_Execute()` path, and `isRenderingToHeadset()`
+doesn't distinguish that from a real eye pass — see section 20's own
+`isEyePassOpen()` root-cause for the full story).
+
+Built successfully (RelWithDebInfo, full rebuild since `vr_main.hpp`
+changed — 1185/1185 objects, no errors, no new warnings).
+
+**Round 4.2 tested — user report: "movement and z targeting both still
+lag behind a bit. Walking forward is fine."** So the per-eye yaw
+correction did NOT fully resolve it (may have reduced it — not stated
+either way, just "still lag behind a bit") — and critically, **Z-targeting
+was separately confirmed still lagging too**, which is new information:
+round 4.2's fix is gated by the exact same `isVrForcingBodyYawToHeadset()`
+condition regardless of Z-targeting state (Z-targeting doesn't trip any
+of that function's exclusions), so if forward walking is genuinely fine
+but Z-targeting and backward walking both still lag, the common factor is
+NOT "which proc is active" but something about the DIRECTION/kind of
+motion — consistent with the leading theory being the residual
+BODY-POSITION lag (`applyVrBodyPositionOffset()`), not the rotation fix
+specifically, since that position-lag theory would equally affect
+Z-targeting (which very plausibly involves strafing/backward motion
+around the target) and backward walking, while being naturally invisible
+walking straight forward. **Not confirmed — this is the leading
+hypothesis for a future session, not a proven diagnosis.**
+
+**Explicitly PAUSED for the night per user request ("write this down im
+done for the night") — do not attempt a further blind fix.** Current code
+state, for a quick `git diff` orientation next time:
+- `d_a_alink.cpp`: `execute()`'s tail override forces ONLY `shape_angle.y`
+  (not `current.angle.y`), gated on `dusk::vr::isRenderingToHeadset() &&
+  dusk::vr::isVrForcingBodyYawToHeadset(this)`. The
+  `applyVrBodyPositionOffset(mpLinkModel)` call site also now calls
+  `dusk::vr::applyVrBodyYawOffset(mpLinkModel, dusk::vr::getHeadMoveAngleS())`
+  immediately after, same `isEyePassOpen()` gate.
+- `vr_link_visibility.hpp`: new `isVrForcingBodyYawToHeadset(daAlink_c*)`
+  (near `isMagnetized()`) and `applyVrBodyYawOffset(J3DModel*, s16
+  freshHeadYawS)` (near `applyVrBodyPositionOffset()`).
+- `vr_main.hpp`/`.cpp`: matching thin forwards for both.
+- The old rounds 1-3 code (inside `setSpeedAndAngleNormal()`) has been
+  fully replaced with a short pointer comment to this section — nothing
+  of rounds 1-3 remains active.
+
+**Concrete next steps for whoever picks this up**:
+1. **Verify the `ZXYrotM` axis-order assumption with a script or a real
+   capture before trusting it further** — it was never independently
+   confirmed (only "assumed, NOT independently verified" per the round
+   4.2 writeup above), unlike this project's own standing practice for
+   rotation math (section 12/14's lesson: verify derived rotation/
+   coordinate math before trusting it in-headset). If shape_angle.x/z are
+   ever meaningfully nonzero during the reported lag (e.g. during a
+   slight lean or uneven ground), a wrong axis-order assumption here
+   would silently produce a partially-wrong correction rather than an
+   obviously-broken one — hard to distinguish from "still just laggy"
+   without checking directly.
+2. **Test whether the residual lag is actually POSITION, not rotation** —
+   since forward walking is reportedly fine but backward walking and
+   Z-targeting both still lag, and `getVrBodyPositionOffset()`'s own
+   extrapolation-based smoothing (section 20) was tuned/confirmed under
+   NORMAL forward-walking conditions, it's plausible the existing position
+   fix has always had a residual error in other movement directions that
+   nobody had a reason to notice until this rotation fix made the body's
+   facing correct enough to expose it. Test moving backward and
+   Z-targeting/strafing with the rotation fix's diagnostic value in hand
+   (see next point) to separate "rotation still wrong" from "position
+   still wrong" before attempting another rotation-side fix.
+3. **Add real diagnostic logging before guessing a third rotation
+   fix** — per this project's own established practice once 2+ rounds of
+   code-reading-only guesses have failed (see this file's Build Workflow
+   section, and sections 20/23's own repeated lessons): log, once every
+   ~15-30 real frames from inside `applyVrBodyYawOffset()`, the computed
+   `delta`, `freshHeadYawS`, `link->shape_angle.y`, and (separately) the
+   body-position offset from `getVrBodyPositionOffset()` for the same
+   frame — ask the user to reproduce (walk forward, walk backward,
+   Z-target and strafe) and paste back the Output-window lines. This
+   would directly show whether the rotation delta is behaving sanely
+   (small, decaying appropriately) or the position offset is the actual
+   remaining culprit, rather than guessing a third time.
+
+**ROUND 5 (2026-09-08, new session) — item 1 above resolved: the
+`ZXYrotM` axis-order assumption was checked by re-reading
+`mDoMtx_ZXYrotM()`/`mDoMtx_concat()` directly (not a script this time,
+but a full symbolic derivation from the actual matrix-concat convention
+already established elsewhere in this codebase), and it was WRONG. Fixed,
+built, NOT yet retested in-headset.**
+
+`mDoMtx_ZXYrotM(mtx, x, y, z)` (`src/m_Do/m_Do_mtx.cpp`) does, in order:
+`if(y) concat(mtx,YrotS(y),mtx)`, then `if(x) concat(mtx,XrotS(x),mtx)`,
+then `if(z) concat(mtx,ZrotS(z),mtx)` — each `mDoMtx_concat(a,b,c)` is
+`PSMTXConcat(a,b,c)`, i.e. `c = a*b` (applying to a vector: `c*v =
+a*(b*v)`, so `b` is the innermost/first-applied operation). Expanding:
+`mtx_final = mtx_initial * Ry(y) * Rx(x) * Rz(z)`. In `setMatrix()`
+(`d_a_alink.cpp`), `mtx_initial = T(pos)` (from the preceding `transS`),
+so the body's full transform is `T(pos) * Ry(y) * Rx(x) * Rz(z)`.
+
+The round-4.2 fix's claim — "right-multiplying the already-built base
+transform by `Ry(delta)` is exactly equivalent to having used
+`shape_angle.y + delta` in `setMatrix()`" — is false in general.
+`T(pos)*Ry(y+delta)*Rx(x)*Rz(z) == T(pos)*Ry(delta)*[Ry(y)*Rx(x)*Rz(z)]`
+(pure Y rotations commute additively with each other, so `Ry(delta)` can
+be pulled out to sit directly next to `Ry(y)`) — a **LEFT**-multiply of
+the rotation-only block, not a right-multiply of the whole built matrix.
+The round-4.2 code did `MTXConcat(base, yRot, result)` → `result = base *
+yRot`, applying `yRot` as the INNERMOST rotation (before even `Rz(z)`)
+— only equal to the correct answer when `shape_angle.x`/`shape_angle.z`
+(pitch/roll) are exactly zero. Standing still on flat ground facing
+forward, both are typically ~0 (masking the bug), but on a slope, or
+during any animation/state that sets nonzero pitch/roll, this would
+silently drift wrong — plausibly explaining "still lag[ging] a bit" even
+after the round-4.2 fix, and independent of (though possibly compounding)
+the still-open position-lag-in-other-directions question (item 2 above).
+
+**Fix** (`vr_link_visibility.hpp`'s `applyVrBodyYawOffset()`):
+`MTXConcat(yRot, base, rotated)` (swapped argument order — LEFT-multiply)
+gives the correct new rotation submatrix in `rotated`'s top-left 3x3, but
+as a side effect also carries `base`'s translation column through as
+`yRot * t` (matrix-product translation-combination rule: `(A*B)`'s
+translation is `Ra*tb + ta`) — i.e. it would incorrectly ROTATE Link's
+actual position around the origin if used verbatim. Fixed by copying back
+only the 3x3 rotation block (`base[r][c] = rotated[r][c]` for `r,c` in
+0..2) and leaving `base`'s translation column (`base[*][3]`) completely
+untouched — it already holds the correct, possibly
+`applyVrBodyPositionOffset()`-corrected position, unaffected by this
+purely-rotational fix.
+
+Built successfully (RelWithDebInfo) — only `vr_main.cpp` (transitively
+includes the header) recompiled, clean link, no new warnings.
+
+**NOT yet retested in-headset.** This directly resolves item 1 from the
+prior round's "concrete next steps" (the axis-order assumption was
+checked and found wrong, not just verified). Items 2 and 3 (whether a
+SEPARATE position-lag bug also exists for backward/Z-target movement, and
+adding real diagnostic logging if guessing a third time is ever needed)
+are both still open — test this rotation fix alone first (walk forward,
+walk backward, Z-target while strafing) before assuming any remaining
+lag is positional; if backward movement/Z-targeting still show a
+lag *distinct from* facing (i.e. facing now looks correct but the body's
+POSITION still trails), that confirms item 2's separate-bug theory and
+item 3's diagnostic-logging step is the right next move — don't guess a
+further rotation-side fix on top of this one without that evidence.
+
+**ROUND 6 (2026-09-09) — round-5 fix tested, still broken, with a much
+more specific symptom this time; real diagnostic logging added instead of
+guessing a fourth rotation fix. Built, NOT yet captured.**
+
+**User's report**: "Still not fixed. It seems tied to another bug. When
+standing still, the body is in the right place, but when I rotate it the
+body seems offset. By the time I rotate a full 180 degrees behind me the
+body is in front of me. It quickly snaps back to the headset when i walk
+forward. When walking backward the body comes out in front of me."
+
+This is a genuinely different, more specific description than any prior
+round — a POSITIONAL symptom that scales with rotation angle (worst at
+180°), not a facing-direction bug. Traced two candidate mechanisms by
+reading code (neither confirmed with real data):
+- `computeRawCoreAnchoredEye()`'s 6-inch "hunch clearance" forward-nudge
+  (`kCoreAnchorExtraForwardUnits`) uses `current.angle.y` — the
+  MOVEMENT-facing angle, not the (now head-yaw-driven) visual
+  `shape_angle.y` — as its forward direction. `current.angle.y` only
+  updates while `checkInputOnR()` (stick actively held, `mMoveValue >
+  0.05f`) is true (confirmed by reading `setSpeedAndAngleNormal()`
+  directly — the ONLY place that calls `cLib_addCalcAngleS(&current.angle.y,
+  mMoveAngle, ...)`, always inside `if (checkInputOnR())`), so it should
+  stay completely FROZEN while standing still with the stick idle — which
+  would mean this nudge can't be the cause after all, UNLESS that
+  frozen-while-idle assumption is wrong in practice (never verified with
+  real data, only inferred from a single call site).
+- `getVrBodyPositionOffset()` (= `smoothedEye - freshEye`, both computed
+  via the same `computeRawEyeAnchor()` basis) should be exactly zero while
+  genuinely standing still (current.pos unchanged tick to tick →
+  freshEye unchanged → prev==curr → zero extrapolation delta) — if a real
+  capture shows this nonzero while standing still and just turning the
+  head, that's direct proof something in the eye-anchor chain IS changing
+  per tick even at rest, which would point straight at the real
+  mechanism.
+
+Given round 5 was itself a plausible-looking, algebra-verified fix that
+still didn't resolve the report, and per this project's own repeatedly-
+learned lesson (see sections 12/14/20/23 throughout this file) that
+continuing to guess past 2+ rounds without real data wastes time, added
+`logBodyRotationDiagOnce()` (`vr_link_visibility.hpp`, called from
+`applyVrBodyYawOffset()`) instead of a fourth blind fix. Logs, once
+every ~45 real frames (~2/sec) PLUS unconditionally on any frame where
+`getVrBodyPositionOffset()`'s magnitude exceeds 5 units (~2 inches) —
+already-suspicious while genuinely standing still: `headYaw`, `shapeY`,
+`currAngleY`, the computed `delta`, whether the stick is held
+(`checkInputOnR()`), `current.pos`, the body position-offset delta, and
+both `freshEye`/`smoothedEye` (the eye-anchor chain's own before/after
+values) — enough in one line to settle both candidate theories above
+directly, or point somewhere else entirely if neither holds up.
+
+Built successfully (RelWithDebInfo) — only `vr_main.cpp` (transitively
+includes the header) recompiled, clean link, no new warnings.
+
+**Concrete next step**: launch in VR, stand still, turn your head slowly
+through at least 180° (both directions), then walk forward and backward a
+few steps, and paste back the `[dusk::vr::bodyrotdiag]` lines from the
+Output window — especially any lines tagged "BIG OFFSET WHILE THIS RAN".
+That capture should show directly whether `posOffset` is ever nonzero
+while stationary (implicating the eye-anchor/position side, not
+rotation), whether `currAngleY` is genuinely frozen while the stick is
+idle (settling the hunch-nudge theory), and whether `freshEye`/
+`smoothedEye` themselves sweep through any large arc as the head turns.
+Remove this logging once the real mechanism is found and fixed — don't
+attempt another rotation-math rewrite on top of round 5's fix without
+this data in hand.
+
+**ROUND 7 (2026-09-10) — real capture analyzed, ZERO
+[dusk::vr::bodyrotdiag] lines despite a full real VR session with the
+feature demonstrably active. Root cause found: same dead-call-site bug
+CLASS section 20 already root-caused for hands/sword/shield, just never
+migrated for the body's own position/yaw offsets. Fixed, built, NOT yet
+retested in-headset.**
+
+The user's `log (2).txt` capture showed real session activity
+(`[dusk::vr::tick]`, `[dusk::vr::coreanchor]` calibration lines, a
+Meta Quest 3 startup) but literally zero `[dusk::vr::bodyrotdiag]` lines
+anywhere — meaning `applyVrBodyYawOffset()` (where the log call lives) was
+never entered at all, not just producing bad output. Traced both
+`applyVrBodyPositionOffset()` and `applyVrBodyYawOffset()`'s only call
+site: `d_a_alink.cpp`'s `daAlink_c::draw()`, gated on
+`if (dusk::vr::isEyePassOpen())`. This is the EXACT SAME call site
+`refreshTrackedHandDrawMtxLive()`'s own header comment already documents
+as proven, via a full-session `[dusk::vr::eyepasscheck]` capture back in
+section 20's saga, to NEVER run during a real VR eye pass (only via the
+legacy `fapGm_Execute()` per-sim-tick path, where `isEyePassOpen()` is
+always false). Nobody had migrated the body position/yaw offset fixes to
+the "live" call-site pattern (`vr_main.cpp`'s `tick()`, before the per-eye
+loop) that section 20 already established as the REQUIRED fix shape for
+anything read from inside `daAlink_c::draw()` — they were simply left
+behind at the old, already-known-dead location when they were first
+written (2026-08-08/2026-09-08).
+
+**What this means retroactively**: `applyVrBodyPositionOffset()` (section
+20/23's own body-lag fix, "confirmed" to help back when the core-anchor
+change landed) was very likely NEVER ACTUALLY RUNNING either — section
+23's own writeup already flagged this exact possibility as an open
+question ("the isEyePassOpen() question below is still open... the
+residual one-tick positional lag... presumably still exists
+mathematically, but is apparently small/smooth enough now not to read as
+'lag' anymore"). With this round's fix, it's now confirmed dead and
+migrated to a real call site for the first time.
+
+**Why this plausibly explains the specific reported symptom** (positional
+offset that scales with turn angle, worst at 180°, self-corrects while
+walking forward): with the offset fixes dead, the ONLY thing driving
+`mpLinkModel`'s visual facing was `execute()`'s tick-rate
+`shape_angle.y = getHeadMoveAngleS()` override, baked into the base
+transform once per ~30Hz tick via `setMatrix()`. `mpLinkModel` was never
+being marked live for `dusk::frame_interp` anywhere (no existing
+`markModelJointsLive(bodyModel)` call site at all) — meaning every real
+per-eye draw showed a `frame_interp`-substituted blend between the last
+TWO once-per-tick snapshots of the body's joint matrices, not the current
+tick's real value. For normal tick-rate animation this blend is the
+intended, correct behavior (matches how flatscreen animation smoothing
+already works) — but `shape_angle.y` can, under this feature, change by a
+LARGE amount within a single tick if the player turns their head fast.
+Naively blending between two ROTATION MATRICES that are far apart (worst
+case ~180°) via plain per-element lerp (not quaternion slerp) is a known
+degenerate case — it doesn't just undershoot, it can produce a
+badly-wrong intermediate transform, worse the further apart the two ends
+are. This matches the reported shape exactly (fine at rest, worse
+approaching 180°, self-corrects once real per-tick deltas shrink again
+while walking) — though this specific matrix-lerp mechanism is NOT
+independently confirmed via a targeted capture, only inferred; the
+dead-call-site finding itself IS confirmed directly (zero log lines is
+unambiguous).
+
+**Fix**: new `vr_link::refreshVrBodyOffsetsLive(s16 freshHeadYawS)`
+(`vr_link_visibility.hpp`) — fetches Link and `link->getBodyModel()`
+itself (a pre-existing accessor, already added for an earlier item-
+tracking fix), calls `applyVrBodyPositionOffset()` then
+`applyVrBodyYawOffset()` (unchanged internals), then
+`markModelJointsLive(bodyModel)` (the same per-joint live-marking
+function already used for hands/sword/shield/held items) — removing
+`frame_interp`'s substitution from the picture for the body's joints
+entirely, regardless of the precise matrix-lerp failure mode. Thin-
+forwarded via `dusk::vr::refreshVrBodyOffsetsLive()`
+(`vr_main.hpp`/`.cpp`). Called once per real frame from `vr_main.cpp`'s
+`tick()`, right after the existing `refreshTrackedHandDrawMtxLive()` call
+and — deliberately — BEFORE `refreshTrackedItemMtxLive()`/
+`refreshTrackedHeldItemMtxLive()`/`refreshTrackedItemJointMtxLive()`, so
+sword/shield/held items (which read `mpLinkModel`'s item-joint matrices
+fresh each frame) see this frame's already-corrected body pose rather
+than a stale pre-offset one. The old `d_a_alink.cpp` call site (inside
+`daAlink_c::draw()`, `isEyePassOpen()`-gated) is left in place, inert,
+matching this file's existing convention for `applyTrackedItemMtx()`'s
+own dead-but-harmless legacy call site — its comment was corrected to
+explain it's now confirmed dead rather than describing an active fix.
+
+**`[dusk::vr::bodyrotdiag]` diagnostic logging is deliberately still in
+the tree** — it should now actually fire (since `applyVrBodyYawOffset()`
+is finally reachable), and a fresh capture would help confirm whether the
+matrix-lerp theory above is the full explanation or whether the position/
+rotation deltas it logs still look wrong in some other way once they're
+actually taking effect. Remove once the fix is confirmed working
+in-headset.
+
+Built successfully (RelWithDebInfo, full rebuild since `vr_main.hpp`
+changed — 1185/1185 objects, no errors, no new warnings). Verified clean
+via a second no-op incremental build.
+
+**NOT yet retested in-headset.** Next step for whoever picks this up:
+launch in VR, stand still and turn your head through 180° both ways
+(the original repro), then walk forward/backward a few steps, and report
+whether the body now stays correctly positioned throughout the turn. If
+it's still wrong, this time a fresh `[dusk::vr::bodyrotdiag]` capture
+should contain REAL data (not zero lines) — paste it back rather than
+guessing further; the log fields (`posOffset`, `freshEye`/`smoothEye`,
+`currAngleY` vs `shapeY`) are designed to distinguish "the offsets are now
+applying but computing a wrong value" from "some other, still-unfound
+mechanism is at play."
+
+**ROUND 8 (2026-09-10, same day) — round 7's live fix tested, TWO real
+regressions found, ORIGINAL symptom UNCHANGED. Reverted rendering to
+pre-round-7 state; kept a pure-instrumentation-only live call site so a
+real capture can finally be gathered. Built, awaiting a fresh capture.**
+
+**User's report on round 7's live fix**: "The rotation problem isn't
+fixed, turning 180 still puts the body in front of me. The body also now
+moves in a very stuttery way, looks like it updates at 30hz now instead
+of being smooth like it was previously. When running forward it goes
+ahead of me now instead of being in the right place. So instead of
+previously where moving forwards looked good but backwards it lagged,
+the body goes in front of me with any movement."
+
+This is genuinely useful negative evidence, not just "still broken":
+
+1. **Stutter (new regression)**: `markModelJointsLive(bodyModel)` marks
+   EVERY joint of the body live for `frame_interp`, not just whatever
+   contributes to the root placement. Sword/shield/hands/held items are
+   small, ~rigid models with no meaningful skeletal ANIMATION to lose —
+   marking them live has zero downside. `mpLinkModel` has real walk-
+   cycle/idle/breathing animation that `frame_interp`'s normal tick-to-
+   tick blending smooths continuously — disabling that for the WHOLE
+   skeleton (unavoidable: a child joint only reflects a corrected root if
+   IT is also marked live, since `frame_interp` substitutes each joint's
+   already-composed WORLD matrix independently) throws away real
+   animation smoothing, producing the reported 30Hz stutter. This
+   technique, proven correct for small non-animated items throughout this
+   file, does not transfer to a model with genuine skeletal animation.
+2. **Position overshoot (new regression)**: `getVrBodyPositionOffset()`'s
+   full one-tick-ahead EXTRAPOLATION (`kEyeAnchorExtrapolationGain=1.0`)
+   is valid for the camera/hands specifically because they track a REAL,
+   physically-continuous quantity (the HMD/controllers) where "assume the
+   same velocity for one more tick" is a reasonable prediction. Link's
+   `current.pos` is SIMULATED, discrete, tick-rate game logic with no such
+   continuity guarantee — velocity can change abruptly between ticks
+   (start/stop/turn) in a way real physical momentum can't, so
+   extrapolating it overshoots once genuinely live, for ANY movement
+   direction (not just backward, which was really just this same
+   already-dead-code-era bug's own lesser, asymmetric-looking residual).
+3. **Original 180° symptom: UNCHANGED even with the correction genuinely
+   live.** This is the most important result — it means the "frame_interp
+   naively lerping two far-apart rotation matrices" theory this round's
+   own fix was built on is most likely WRONG, not merely unconfirmed. With
+   `markModelJointsLive()` bypassing `frame_interp`'s substitution
+   entirely, the render should have been using round 5's already-verified
+   -correct rotation math directly, at real frame rate — and 180° still
+   looked exactly as wrong as before. **The real cause of "body ends up in
+   front of me at 180°" is still not root-caused.** Do not re-attempt
+   "make the offset functions live" as the next step without genuinely new
+   evidence — that specific avenue has now been tried and empirically
+   failed to fix the target symptom while causing two confirmed new ones.
+
+**Action taken**: reverted rendering back to the pre-round-7 (dead-code)
+state — `refreshVrBodyOffsetsLive()` (the position+yaw+markModelJointsLive
+combination) is kept defined in `vr_link_visibility.hpp` for reference but
+is NOT called from anywhere. In its place, `vr_main.cpp`'s `tick()` now
+calls a new, pure-instrumentation function,
+`vr_link::logVrBodyRotationDiagLive()` — logs the exact same
+`[dusk::vr::bodyrotdiag]` line from the exact same genuinely-live per-real
+-frame call site, but touches NO rendering state at all (no offset
+application, no `calc()`, no `markModelJointsLive()`). This means the
+NEXT capture should finally contain real, non-zero `bodyrotdiag` data
+(unlike round 6's capture, which had zero lines because the log call
+lived inside the then-dead `applyVrBodyYawOffset()`), gathered while
+rendering is in its ORIGINAL (imperfect, but not further regressed) state
+— letting the actual mechanism be diagnosed without the stutter/overshoot
+noise round 7 introduced. Throttle tightened from every 45 real frames
+(~2/sec) to every 10 (~7-9/sec) for finer time resolution across a 1-2
+second 180° turn.
+
+Built successfully (RelWithDebInfo, full rebuild since `vr_main.hpp`
+changed — 1185/1185 objects, no errors, no new warnings).
+
+**Concrete next step**: launch in VR, confirm the body is back to its
+PREVIOUS behavior (smooth animation, forward movement looking fine, no
+new stutter/overshoot — if this ISN'T the case, the revert itself needs
+re-checking before trusting any new capture), then reproduce the original
+180° turn-while-standing-still repro and paste back the fresh
+`[dusk::vr::bodyrotdiag]` lines. With real, non-zero data finally in hand,
+the fields to look at first: does `posOffset` (from
+`getVrBodyPositionOffset()`, still computed for logging even though no
+longer applied to rendering) spike during the turn even while standing
+still with the stick idle (would point at the eye-anchor/`current.angle.y`
+side, not rotation); does `currAngleY` actually stay frozen while
+`stickHeld=0` as the checkInputOnR()-gating theory predicts; and do
+`freshEye`/`smoothEye` themselves sweep through any noticeable arc. Do NOT
+attempt another rotation-math or live-wiring fix before this data is in
+hand — round 8 already demonstrated that guessing further at this
+mechanism produces regressions without progress.
+
+**ROUND 9 (2026-09-10, same day) — real, clean capture analyzed: EVERY
+game-logic-layer quantity is provably correct throughout the exact repro.
+This rules out all three prior rounds' theories (extrapolation lag,
+naive-matrix-lerp-near-180°, position overshoot) as the cause of the
+CORE symptom. The bug is very likely at the render layer, not game logic.
+NOT yet root-caused — a RenderDoc capture is the recommended next step,
+per this project's own established practice for exactly this situation.**
+
+User provided a fresh `[dusk::vr::bodyrotdiag]` capture, this time using
+the RIGHT-STICK smooth-turn (not physical head-turning) to rotate —
+confirmed via `stickHeld=0` (the checkInputOnR()-gated MOVEMENT stick,
+separate from smooth-turn) staying 0 throughout. Found a clean, isolated
+segment: a full ~360° rotation via smooth-turn while standing completely
+still (`currAngleY` frozen at a single constant value the whole segment,
+confirming current.angle.y really does stay frozen while the movement
+stick is idle, settling that half of round 6's original open question).
+
+**Every single logged value was exactly as expected, for every sample
+across the entire 360° sweep, including passing through the ±32768 BAMS
+wrap boundary with no glitch**:
+- `posOffset` = exactly `(0.00,0.00,0.00)` on literally every sample —
+  not just small, exactly zero (current.pos never changed, so
+  prev==curr==fresh, zero extrapolation delta by construction).
+- `freshEye`/`smoothEye` — bit-for-bit identical to each other and
+  completely static across the whole rotation.
+- `currPos` — completely static (as expected while standing still).
+- `delta` (headYaw − shapeY) stayed small (tens to a few hundred BAMS
+  units, roughly 0.1°-4°) throughout, with NO growth correlated to how
+  far into the 360° sweep the rotation had progressed — flatly
+  contradicting the "gets worse approaching 180°" shape the "naive
+  matrix-lerp near antipodal rotations" theory (round 7's own stated
+  rationale) would predict if it were real.
+
+**This conclusively rules out, with real data rather than further
+reasoning, every theory chased across rounds 5-8**: the eye-anchor
+extrapolation, the position-offset formula, and the "frame_interp lerps
+two far-apart rotation matrices badly" theory are ALL cleared — none of
+them can be the cause of the reported "body ends up in front of me at
+180°" symptom, because none of the quantities they depend on ever leave
+their expected, well-behaved range during an actual, clean reproduction
+of the bug. Also checked and ruled out along the way: `field_0x308c`
+(the OTHER additive term in `setMatrix()`'s `ZXYrotM(shape_angle.x,
+shape_angle.y + field_0x308c, shape_angle.z)` call, briefly suspected as
+an unlogged confound) is only ever touched during `MODE_VINE_CLIMB` —
+irrelevant here, always 0 in this repro. Also checked:
+`computeHeadWorldForward()` (what `getHeadMoveAngleS()`/`shape_angle.y`
+is ultimately derived from) reuses `eyePoseToViewMtx()` itself — the
+EXACT SAME function that builds the real per-eye render view matrix, same
+`yawRad` parameter — so a smooth-turn sign/convention mismatch between
+"what the camera renders" and "what shape_angle.y thinks it should face"
+is structurally impossible; they cannot diverge, by construction.
+
+**Where this leaves things**: the bug is very likely NOT in any game-
+state math this diagnostic can see -- it's most likely something at the
+RENDER/GPU-submission layer (a stale matrix reaching the actual draw call
+despite correct CPU-side state, a stereo left/right-eye desync, or
+something else not reflected in any of `shape_angle.y`/`current.pos`/
+`current.angle.y`/the eye-anchor chain). Per this project's own
+established practice (see the Build Workflow section: "When the
+OutputDebugStringA-log-and-guess loop stalls, reach for a RenderDoc GPU
+capture sooner rather than later") — with the log-based approach now
+having definitively cleared the entire state layer rather than merely
+failing to find something, a RenderDoc capture (or a real debugger call
+stack on `daAlink_c::modelDraw()`'s actual per-eye execution, the same
+technique that finally cracked section 20's hand-lag saga) is the
+right next step, not a fourth state-layer guess.
+
+**Not yet isolated**: whether this happens with PHYSICAL head-turning
+(no stick at all) or only via the right-stick smooth-turn — asked the
+user directly, they haven't isolated it yet. This is a free, no-rebuild
+test worth doing before or alongside a RenderDoc capture: if it turns out
+to be smooth-turn-specific, that would point at
+`vr_smooth_turn.hpp`/`rotateYawXr`/`rotateYawQuat`'s own machinery
+specifically (despite the structural argument above that it *shouldn't*
+be able to diverge from the camera) rather than something in the general
+head-rotation → body-facing path.
+
+**`[dusk::vr::bodyrotdiag]` diagnostic logging left in the tree** — still
+useful (it's what produced this round's clean, conclusive data), but has
+now answered everything it can from game-state alone. Don't expect a
+further capture of the same fields to reveal anything new; the next real
+lead has to come from the render layer instead.
+
+**ROUND 9 follow-up (2026-09-10, same day) — smooth-turn ruled out as the
+trigger: user confirmed the bug happens with PURE physical head-turning
+too (no stick input at all).** This closes off the one remaining
+un-eliminated theory from round 9's own writeup (a `vr_smooth_turn.hpp`/
+`rotateYawXr`/`rotateYawQuat`-specific bug) — combined with round 9's
+already-clean game-state capture, this is now a GENERAL head-rotation →
+body-facing bug, not something specific to the smooth-turn mechanism.
+Re-examined whether section 14's stereo-eye-alignment fix
+(`eyePoseToViewMtx()`) might have an unverified angle range that could
+explain a yaw-dependent symptom — checked and this does NOT hold up: the
+FINAL applied fix there (removing the position Z-flip to match
+`buildHandMtx()`'s convention) was verified via `Rᵀ(q)·R(q) == I`, a
+mathematical identity that holds for every rotation matrix at every
+angle, not an empirically-tested-only-up-to-120° result (that narrower
+test was for the FIRST, reverted attempt, not the fix actually shipped).
+No new code changes this round — pure investigation, ruled out one more
+candidate without finding the real cause.
+
+**State of the investigation, for whoever picks this up next**: every
+game-logic-layer quantity (position, both eye-anchor forms, the
+rotation-catch-up delta) is proven clean through an actual, clean
+repro (round 9) that ALSO isn't smooth-turn-specific (this follow-up).
+The remaining candidates are all at the RENDER/GPU-submission layer,
+none yet investigated:
+- A stereo per-eye mismatch specific to nearby geometry (the body is by
+  far the closest, most stereo-disparity-sensitive object in the scene)
+  — not yet checked whether `mpLinkModel`'s resolved joint matrices
+  could differ between the two eyes within one frame, or whether
+  per-eye view-matrix math has some yaw-dependent quirk specific to
+  very-close-to-camera geometry that wouldn't show up on distant world
+  geometry.
+- A stale-matrix-reaching-the-GPU-draw bug independent of correct CPU
+  state (the same general bug CLASS section 20's whole hand-lag saga
+  eventually traced to a dead call site, and section 20's "eyepasscheck"
+  method — a full-session log capture watching a boolean gate, or a real
+  debugger call stack on `daAlink_c::modelDraw()`'s actual per-eye
+  execution — is the established way to investigate this class directly).
+- A genuine RenderDoc GPU capture at the moment the bug is visible,
+  per this project's own standing "when the log-and-guess loop stalls,
+  reach for RenderDoc sooner rather than later" practice (Build Workflow
+  section) — proposed to the user, not yet attempted; user has not yet
+  agreed to do one (also declined sharing a screen-recording video for
+  visual review, since this session's tools have no video-viewing
+  capability beyond extracting stills via VLC's command-line scene
+  filter, which the user opted not to use for now).
+
+**Do not re-attempt another game-state-logging round or another rotation-
+math rewrite without new evidence from one of the render-layer avenues
+above** — round 9's data was clean and thorough; more of the same kind of
+capture is very unlikely to reveal anything new.
+
+**"Body ends up in front of me on rotation" — PAUSED 2026-09-10 per
+explicit user request ("let's pause this one for now"). Read this box
+before resuming; the rounds above are the full trail, not current status.**
+
+**Current code state, working tree (uncommitted)**:
+- `d_a_alink.cpp`: `execute()`'s tail still forces `shape_angle.y =
+  getHeadMoveAngleS()` every tick while `isVrForcingBodyYawToHeadset()`
+  (round 4.1's fix, unchanged) -- this part of "Attach Body Rotation to
+  Headset" works as intended and is NOT the subject of this pause. The
+  OLD `daAlink_c::draw()` call site for `applyVrBodyPositionOffset()`/
+  `applyVrBodyYawOffset()` is confirmed-dead (isEyePassOpen() never true
+  there) and its comment says so -- left in place, inert, unchanged.
+- `vr_link_visibility.hpp`: `applyVrBodyPositionOffset()`/
+  `applyVrBodyYawOffset()` (round 5's rotation-math fix, mathematically
+  correct per the derivation in that function's comment) are defined but
+  NOT called from anywhere live. `refreshVrBodyOffsetsLive()` (round 7's
+  attempt to make them live, which caused a stutter + position-overshoot
+  regression without fixing the target symptom) is defined but NOT
+  called from anywhere -- kept for reference, its own comment explains
+  why it's parked. `logVrBodyRotationDiagLive()` (round 8's pure
+  read-only instrumentation) IS the one thing actually wired live --
+  logs `[dusk::vr::bodyrotdiag]` every ~10 real frames (or immediately on
+  a >5-unit position-offset spike) with zero effect on rendering.
+- `vr_main.cpp`'s `tick()` calls `logVrBodyRotationDiagLive()` (not
+  `refreshVrBodyOffsetsLive()`) at the spot both would occupy.
+- Rendering itself is in the ORIGINAL, pre-any-of-this-investigation's-
+  fixes state: `execute()`'s tick-rate `shape_angle.y` snap, plain
+  (un-live-marked) `frame_interp` blending for the rest of the body's
+  animation -- i.e. exactly what existed right when "Attach Body
+  Rotation to Headset" first shipped, before rounds 5-8 touched anything
+  render-facing. Confirmed by the user as "back to where it was before"
+  after round 8's revert.
+- Build is clean (confirmed via a no-op incremental rebuild) as of the
+  last change in this investigation.
+
+**What's confirmed, so a future session doesn't re-litigate it**:
+1. The bug is real, reproducible, and NOT fixed by anything tried so far.
+2. It is NOT caused by: the eye-anchor extrapolation math, the position-
+   offset formula, `current.angle.y` staying frozen while the movement
+   stick is idle (confirmed correct/expected), or a naive-matrix-lerp-
+   near-180° theory (round 7's live, un-interpolated correction made
+   zero difference to the symptom).
+3. It is NOT specific to the smooth-turn (right-stick) mechanism --
+   confirmed via a direct user test with pure physical head-turning,
+   same symptom.
+4. `refreshVrBodyOffsetsLive()`'s two-part fix (position offset +
+   `markModelJointsLive()` for the whole skeleton) is a KNOWN BAD
+   approach for the FULL BODY specifically (works fine for sword/shield/
+   hands/held items, which have no real skeletal animation to lose) --
+   don't re-attempt that exact combination even if a future session
+   forgets why.
+5. Every game-logic-layer diagnostic value (`[dusk::vr::bodyrotdiag]`)
+   is clean through an actual, isolated repro (full 360° rotation,
+   completely standing still) -- position offset exactly zero throughout,
+   eye anchor completely static, rotation delta small and uncorrelated
+   with how far into the turn the rotation had progressed. More captures
+   of the same fields are very unlikely to reveal anything new.
+
+**Not yet tried, in order of how promising they seem** (per the last
+round's own writeup): a RenderDoc GPU capture at the moment the bug is
+visible (this project's own established fallback once log-based
+debugging stalls); a real debugger call stack on the body's actual
+per-eye draw call (the technique that finally cracked section 20's
+hand-lag saga); investigating whether the body -- being by far the
+closest, most stereo-disparity-sensitive object in the scene -- has any
+per-eye divergence in its resolved joint matrices or view-matrix
+handling that wouldn't show up on distant world geometry. User declined
+a RenderDoc capture and a debugger session for now, and also declined
+sharing a screen-recording video (this session has no video-viewing
+capability beyond extracting still frames via VLC's command-line scene
+filter, which was offered but not used). Resume by asking whether the
+user is up for either of the two hands-on options above -- don't restart
+with more passive log capture, since that avenue is exhausted.
+
+**ROUND 10 (2026-09-11) — resumed per user request, used a real debugger
+check (Immediate Window) to rule out one theory, found and fixed a
+genuinely different, real bug via code-reading, tested, CONFIRMED
+INSUFFICIENT. Re-paused per user request to work on other features.**
+
+**Debugger check performed** (Immediate Window, paused at the
+`shape_angle.y = getHeadMoveAngleS()` line in `execute()`):
+- `this->getBodyModel()->getModelData()->getFlag() & 0x10` → `16`
+  (nonzero) — confirms `mpLinkModel` uses `J3DMdlDataFlag_ConcatView`,
+  the SAME buffer class as the hand/sword/shield models.
+- `this->getBodyModel()->getDrawMtxPtr()` → the shared
+  `J3DMtxBuffer::sNoUseDrawMtx` sentinel (frozen at all zeros) —
+  confirms `mpDrawMtxArr`/`viewCalc()`/`calcDrawMtx()` are NOT what the
+  body's real per-eye draw actually reads.
+- `this->getBodyModel()->getAnmMtx(0)` → a real, live-looking matrix.
+- **This ruled out a "wrong buffer" theory** (analogous to the
+  `getDrawMtxPtr()`-vs-`getUserAnmMtx()` mixup section 20 once found for
+  hands) that a first pass of code-reading this session had proposed —
+  the body draws via `getAnmMtx()`/ConcatView, exactly what
+  `markModelJointsLive()` already marks live, so that was never the
+  problem. Also confirmed `markModelJointsLive()` (the shared helper used
+  throughout this file) already marks BOTH `getAnmMtx()` AND
+  `getWeightAnmMtx()` — a second candidate theory (missing weight-
+  envelope marking) was also already covered and ruled out by inspection.
+
+**A different, real bug found by reading `execute()`'s actual call
+order** (not the debugger session specifically, but prompted by it):
+`setMatrix()` — the function that bakes `mpLinkModel`'s rendered
+rotation from `shape_angle.x/y/z` — is called from two branches INSIDE
+`execute()` (confirmed at this file's own line numbers, both well before
+the tail), while the `shape_angle.y = getHeadMoveAngleS()` override sits
+at `execute()`'s very tail (confirmed: `execute()` has exactly one
+`return`, right after this override). This means every tick, the
+RENDERED transform was built from shape_angle.y as it stood BEFORE that
+tick's own override updated it — a full one-tick staleness that had
+never been checked in any of rounds 1-9 (all of which assumed
+`shape_angle.y`'s own value was what mattered, never asking whether the
+model's baked transform used the same-tick or previous-tick value).
+
+**A second bug found in round 7/8's abandoned "live" `applyVrBodyYawOffset()`
+call**: it computes its correction as `freshHeadYawS - link->shape_angle.y`
+— but `shape_angle.y` only changes once per tick, while the abandoned
+live version called this every real FRAME (2-3x per tick at typical VR
+framerates). With nothing tracking how much correction had already been
+baked in, each of those extra calls re-applied nearly the identical delta
+on top of the already-corrected value, compounding rather than
+converging — a plausible, additional explanation (on top of round 8's
+already-identified stutter/overshoot) for why that whole attempt read as
+"the body goes in front of me with any movement."
+
+**Fix applied** (`d_a_alink.cpp`, same call site): call
+`dusk::vr::applyVrBodyYawOffset(mpLinkModel, freshHeadYawS)` — reusing
+round 5's already-verified left-multiply `Ry(delta)` math unmodified —
+BEFORE overwriting `shape_angle.y`, so the delta is computed against the
+exact stale value `setMatrix()` actually used this tick; THEN assign
+`shape_angle.y = freshHeadYawS` for next tick. Called exactly once per
+tick (inside `execute()`, not from any real-per-frame call site), which
+also sidesteps round 7/8's compounding bug by construction — there's
+only ever one correction per tick, synchronized with `setMatrix()`'s own
+one bake per tick.
+
+Built successfully (RelWithDebInfo, only `d_a_alink.cpp` recompiled,
+clean link, no new warnings).
+
+**RESULT: CONFIRMED INSUFFICIENT.** User tested the exact repro (stand
+still, turn head 180°, then walk backward) and reported: "Turned my head
+180, still offcenter, and walking backwards still lags." Both the
+original rotation symptom AND the backward-walk lag persisted unchanged.
+**This rules out the one-tick-staleness theory as the (sole) cause** —
+the fix directly, verifiably closed that specific gap (confirmed via the
+debugger session that `setMatrix()` really does run before the override,
+and the fix's math is the same already-verified-correct math from round
+5), yet the reported symptom didn't budge. Left in place (it's a real,
+independently-correct fix for a real bug — the rendered rotation IS now
+synchronized with `shape_angle.y` within the same tick — just not the
+explanation for THIS symptom), same reasoning this file has applied to
+every other "real but insufficient" fix along the way (e.g. the
+`isEyePassOpen()` fix, the reentrancy guard, both from section 20's own
+saga).
+
+**State after round 10**: every theory involving `shape_angle.y`'s
+timing/staleness, `frame_interp`'s buffer/substitution mechanics, the
+eye-anchor extrapolation math, and the position-offset formula has now
+been tried and empirically failed to explain the core symptom. **Re-
+paused per explicit user request** ("I want to work on other features for
+now and come back to this one") — not abandoned, just deprioritized.
+Whoever picks this up next should treat rounds 1-10 as fully exhausted
+for code-reading/log-based approaches — the two remaining avenues from
+the previous pause box (a RenderDoc GPU capture at the moment the bug is
+visible, or a real debugger call stack specifically on the body's actual
+per-eye GX draw submission — not just a game-logic breakpoint like this
+round's, which only confirmed buffer/flag facts) are still the most
+promising next steps, and are now even more clearly indicated since
+every game-logic-and-matrix-recipe-level theory has been individually
+ruled out.
+
+### Camera-only 6DOF positional tracking (leaning/ducking) — built 2026-09-11, NOT yet tested in-headset (explicitly deferred by the user)
+
+**Goal** (explicit user request): "6 degrees of freedom so that the
+headset can move horizontally and vertically from its position." Scoped
+via a direct question first — **camera-only for now** (real head
+translation offsets the VR view; Link's actual position/collision stays
+where the game logic puts him) — **user explicitly plans a phase 2 later**
+("when I finish the body rotation I want link's body to move with it")
+once the still-open rotating-body investigation above is resolved. Not
+started this session, deliberately — this section is camera-only.
+
+**Why this was a real gap, not already covered**: the VR camera already
+fully tracks head ROTATION, but for POSITION only ever applied the tiny
+stereo eye-separation offset (`eyePoseToViewMtx()`'s `dx,dy,dz = eyePose
+- hmdRefPos`, where `hmdRefPos` is the SAME-FRAME head-center pose, so
+this is just IPD, not real movement) on top of a rigid, calibrated
+anchor point (core- or head-joint-anchored per section 23/the swim-crawl-
+vine-hookshot-mount fallback list) that deliberately does NOT respond to
+real head translation at all — that rigidity was the whole point of the
+2026-08-09 comfort change (no bob/lean from head/torso animation).
+Genuine positional 6DOF (leaning to peek, ducking under something) was
+simply never implemented.
+
+**Design, reusing existing proven mechanisms rather than inventing new
+ones**:
+- `getVrCameraEyeAnchor()` (`vr_link_visibility.hpp`) is already the
+  SINGLE shared choke point both the camera (`vr_main.cpp`'s `tick()`)
+  and tracked hands (`updateFrame()`'s own separate call) read every real
+  frame — confirmed by checking both call sites, and confirmed calling it
+  twice per frame is safe/idempotent (its internal smoothing state only
+  advances on real TICK boundaries, not per call). Adding the head-
+  translation offset INSIDE this one function, rather than in
+  `eyePoseToViewMtx()`/`buildHandMtx()` separately, makes it apply
+  uniformly to camera AND hands for free — critical, since without this,
+  leaning your head would shift the camera away from your tracked hands
+  (which would stay pinned to the pre-lean anchor otherwise, since their
+  own `controllerPose - hmdPos` delta is head-relative and doesn't by
+  itself carry any "how far has my whole head/body translated" signal).
+- New optional parameters `const XrVector3f* hmdPosXR = nullptr, float
+  yawRad = 0.f` added to `getVrCameraEyeAnchor()` (both defaulted, so any
+  other/older call site — the dead legacy hand path in `vr_main.cpp`, the
+  body-position-offset diagnostic calls — keeps compiling and behaving
+  identically unchanged). Both real call sites (the camera one in
+  `vr_main.cpp`'s `tick()`, the hand one in `updateFrame()`) already had
+  a live HMD pose and smooth-turn yaw on hand, so threading them through
+  needed no new plumbing.
+- Reference point (`detail::s_headPosCalibrationRef`, an `XrVector3f` in
+  OpenXR tracking space) is captured ONCE per first-person activation —
+  same "capture on the false→true transition" shape already proven for
+  the core anchor's own height calibration (`s_coreAnchorCalibrated`),
+  reset in the exact same branch. Every frame after that, the real delta
+  from this reference is computed, magnitude-clamped (not per-axis) to
+  `vrPositionalTrackingRadius` (a new `ConfigVar<float>`, default 0.75m,
+  untested guess, live-adjustable via a Debug > Graphics Settings slider)
+  so leaning further than that just stops moving the camera rather than
+  producing an unbounded offset, then rotated by the same smooth-turn yaw
+  the camera/hands already apply to their own tracked offsets (via the
+  existing `rotateYawXr()`, `vr_smooth_turn.hpp`) so leaning stays aligned
+  with wherever "forward" currently means in-game rather than raw
+  physical tracking-space forward, then scaled by the same
+  `VR_SCALE_FACTOR` (100 units/metre) already used for hand tracking, and
+  added directly onto the anchor before it's returned.
+- Gated by a new `ConfigVar<bool> vrPositionalTracking` (default ON,
+  matching the user's phrasing that this should just work), exposed in
+  the Dusklight menu's VR settings tab under a new "Comfort" section
+  (`dusk/ui/settings.cpp`, placed before "Appearance").
+- Deliberately does NOT touch Link's actual `current.pos`/collision at
+  all — purely a camera/hand-anchor-level offset, matching the scoped-in
+  "camera-only" design.
+
+**Built successfully** (RelWithDebInfo, full rebuild since `settings.h`
+changed — 1200/1200 objects, no errors, no new warnings) — `settings.h`/
+`.cpp`, `dusk/ui/settings.cpp`, `dusk/imgui/ImGuiMenuTools.cpp`,
+`vr_link_visibility.hpp` (via `vr_main.cpp`), `vr_main.cpp` all
+recompiled.
+
+**CONFIRMED WORKING IN-HEADSET** — user tested and reported "It works,
+and it even auto calibrates when you recenter the headset." That
+recalibration-on-recenter behavior wasn't deliberately built (no runtime-
+recenter-event handling exists anywhere in this feature's code) — most
+likely an emergent side effect of the reference point living in the same
+raw OpenXR tracking-space coordinates the runtime itself redefines on a
+recenter, though the exact mechanism (why it lands cleanly rather than
+producing one clamped-radius jump before settling) hasn't been traced
+further; worth keeping in mind if a future session ever needs to touch
+`detail::s_headPosCalibrationRef`/`s_headPosCalibrated`, since whatever
+makes this work isn't written down anywhere in the code itself. Position/
+hand-following/radius-clamp/toggle were not individually itemized in the
+user's report — a terse "it works" was treated as covering the feature as
+demoed, not each sub-behavior separately; if any specific piece (radius
+feel, hands desyncing, the off-toggle) is ever reported wrong later,
+revisit this section rather than assuming it was exhaustively checked.
+**Phase 2 (moving Link's actual body/position with real head/body
+translation) is explicitly out of scope for this pass** — pick it up only
+after the user asks, and only once the rotating-body investigation above
+is resolved (per the user's own stated ordering).
+
+### Fixed forward "hunch-clearance" nudge misapplied during Z-targeting/backward movement — direction-aware fix, built 2026-09-11, NOT yet tested in-headset
+
+**User report + hypothesis, both correct**: "Link's body lags behind when
+Z targeting even when the setting is disabled" and a direct guess that a
+pre-existing forward-compensation (tuned for running forward) might be
+misapplied when moving backward. **Confirmed exactly right by reading
+`detail::computeRawCoreAnchoredEye()`** (`vr_link_visibility.hpp`): the
+`kCoreAnchorExtraForwardUnits`/`kCoreAnchorExtraUpUnits` nudge (section
+23, "3in up / 6in forward" — added to clear Link's own hunched-forward
+neck/back from view while running) was applied **unconditionally**, in
+Link's BODY-FACING direction (`current.angle.y`), regardless of which
+way he's actually moving. Z-targeting locks his facing onto the target
+(native base-game behavior, independent of any VR setting — which is
+exactly why the user saw this "even when the setting is disabled") while
+letting the player strafe/back away around it; walking backward has the
+same mismatch. In both cases the nudge kept pushing 6 inches further
+toward his FACING direction while he moved away from it, reading as a
+positional mismatch — this is a real, separate, previously-undetected bug
+from the big "body ends up in front of me on rotation" investigation
+above (that one persists through a full 360° turn while standing
+COMPLETELY still, which this 6-inch fixed offset could never produce on
+its own — don't conflate the two, though fixing this one may reduce how
+bad the OTHER one looks during Z-target/backward-movement testing).
+
+**Fix**: scale the forward nudge by how aligned actual movement
+(`mMoveAngle`, the base game's own stick-relative-to-facing signal — see
+`d_a_alink.h`'s pre-existing `getDirectionFromCurrentAngle()`, which
+makes the identical `mMoveAngle - current.angle.y` comparison for
+animation selection) is with facing: `cos(angleBetween)`, clamped to
+never go negative (moving straight forward → full nudge, unchanged;
+sideways → tapers toward zero; backward → zero, not reversed — there's
+no forward hunch to clear if he's not running forward, so pushing the
+camera the OTHER way isn't warranted either). Left at full strength
+whenever the stick is idle (`checkInputOnR()` false, the exact "is the
+player actively steering" gate `setSpeedAndAngleNormal()` itself already
+uses) — standing still was never reported wrong, so that case is
+untouched. The vertical (`kCoreAnchorExtraUpUnits`) component was left
+unconditional — not reported as part of this issue, and less obviously
+tied to travel direction than the forward push.
+
+Built successfully (RelWithDebInfo) — only `vr_main.cpp` (transitively
+includes the header) recompiled, clean link, no new warnings.
+
+**TESTED, DID NOT FIX IT.** User: "That didnt fix it. im going to wrap it
+up for the night." No further detail on what specifically still looks
+wrong (still lagging the same way, a different symptom, etc.) — session
+ended here, not investigated further. The fix itself is still believed
+correct on its own terms (verified via diff review with the user that the
+tuned 3in-up/6in-forward values and their unconditional/forward-movement
+behavior were completely unchanged — only backward/sideways movement now
+scales down, exactly as intended) and is LEFT IN PLACE — it's a real,
+independently-reasoned improvement to a genuine unconditional-nudge bug
+even if it didn't resolve what the user is actually seeing. Two
+possibilities for a future session, neither investigated: (a) this
+6-inch-scale nudge was simply never the dominant contributor to the
+Z-target/backward-movement symptom the user's describing (i.e. it's a
+real but minor secondary issue, and the actual cause is the same
+still-unresolved mechanism as the big "body ends up in front of me on
+rotation" investigation above, which is known to be unrelated to any
+fixed-offset math); or (b) something about this specific fix didn't take
+effect the way intended (worth double-checking the build the user tested
+was actually the one with this change, and that Z-targeting really does
+route through `computeRawCoreAnchoredEye()` rather than one of the other
+fallback branches in `computeRawEyeAnchor()`'s dispatch list, before
+assuming the direction-aware math itself is wrong). Get a specific
+description of what's still wrong (which direction, how large, does it
+scale with turn/strafe angle) before attempting another fix here — same
+discipline the main rotation investigation has needed repeatedly.
+
 ## Key lesson learned this session
 
 Don't infer that an uncommitted fix supersedes a nearby disable guard just

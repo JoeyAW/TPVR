@@ -894,6 +894,18 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                             "pass, so this has no meaningful performance cost."
             });
 
+        leftPane.add_section("Comfort");
+        config_bool_select(leftPane, rightPane, getSettings().game.vrPositionalTracking,
+            {
+                .key = "Positional Tracking",
+                .helpText = "Lets leaning, ducking, or side-stepping with your real head "
+                            "move the VR camera to match, on top of the normal head-turning "
+                            "tracking. Only offsets the camera view -- Link's actual position "
+                            "and collision stay where the game puts him, so leaning far enough "
+                            "can let you see through thin geometry. The maximum lean distance "
+                            "is tunable in Debug > Graphics Settings. On by default."
+            });
+
         leftPane.add_section("Appearance");
         config_bool_select(leftPane, rightPane, getSettings().game.vrThirdPerson,
             {
@@ -904,6 +916,17 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                             "through his eyes. Also shows his body (overriding \"Hide "
                             "Body\" below if it's on), since there's no point being in "
                             "third person with an invisible avatar. Off by default."
+            });
+        config_bool_select(leftPane, rightPane, getSettings().game.vrAttachBodyRotationToHead,
+            {
+                .key = "Attach Body Rotation to Headset",
+                .helpText = "Keeps Link's body facing exactly where your headset is looking, "
+                            "with no turn-rate lag -- without this, his body still turns "
+                            "toward your head direction while standing still, but eases into "
+                            "it at the normal walking turn rate, which can visibly lag behind "
+                            "a fast real head turn. Has no effect while Z-targeting, throwing "
+                            "an item, or using the hookshot, which already have their own "
+                            "facing logic. On by default."
             });
         config_bool_select(leftPane, rightPane, getSettings().game.vrHideBody,
             {

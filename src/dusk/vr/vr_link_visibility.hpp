@@ -1248,6 +1248,37 @@ inline bool isMagnetized(daAlink_c* link) {
     return link->checkMagneBootsOn() || link->mProcID == daAlink_c::PROC_MAGNE_BOOTS_FLY;
 }
 
+// VR "Attach Body Rotation to Headset" -- shared gating condition, used by
+// BOTH the tick-rate override (daAlink_c::execute()'s tail, d_a_alink.cpp)
+// and the real-per-eye-rate lag compensation (applyVrBodyYawOffset(),
+// below getVrBodyPositionOffset()) -- factored into one place for the same
+// "don't let two copies drift" reasoning as isFirstPerson()/isCrawling()
+// above, rather than re-deriving the exclusion list a second time at the
+// draw-time call site. Reuses the established per-state helpers already
+// defined above instead of re-listing their mProcID values again.
+//
+// Every excluded state here is one where shape_angle.y is required to
+// reflect something OTHER than the headset's own yaw (a wall/ceiling
+// normal, a vine's direction, a mount's own rig, a script/demo facing an
+// NPC) -- forcing it toward the headset there would fight physically- or
+// narratively-required orientation that has nothing to do with where the
+// player happens to be looking.
+inline bool isVrForcingBodyYawToHeadset(daAlink_c* link) {
+    if (!link) return false;
+    if (!isFirstPerson(link)) return false;
+    if (!dusk::getSettings().game.vrAttachBodyRotationToHead.getValue()) return false;
+
+    if (link->checkEventRun()) return false;  // dialogue/doors/cutscenes
+    if (isMagnetized(link)) return false;
+    if (link->checkModeFlg(daAlink_c::MODE_VINE_CLIMB | daAlink_c::MODE_SWIMMING)) return false;
+    if (link->checkCargoCarry() && link->mCargoCarryAcKeep.getActor() != NULL) return false;
+    if (link->checkReinRide() || link->checkCanoeRide() || link->checkBoardRide()) return false;
+    if (isHookshotAirborneOrHanging(link) || isHookshotAiming(link)) return false;
+    if (isCrawling(link)) return false;
+
+    return true;
+}
+
 // SAME DAY follow-up (user: "It's also an underwater issue" -- i.e. use
 // the same raw-anchor treatment for this too). Iron Boots' other
 // well-known use is sinking to walk along a submerged lake/river bed
@@ -1277,8 +1308,14 @@ inline bool isMagnetized(daAlink_c* link) {
 
 // Forward-declared here, defined further down (see its own comment) --
 // needed by updateFrame() below so hands anchor to the SAME point the VR
-// camera actually renders from.
-inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye);
+// camera actually renders from. hmdPosXR/yawRad (added 2026-09-11 for
+// camera-only 6DOF positional tracking, both default so any other/older
+// call site keeps working unmodified) are threaded through from whatever
+// live HMD pose/smooth-turn-yaw the caller already has on hand -- see the
+// real definition's own comment for the math.
+inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye,
+                                  const XrVector3f* hmdPosXR = nullptr,
+                                  float yawRad = 0.f);
 
 // Computes both hands' tracked matrices from a given (hmdPos, controller
 // poses, eye anchor, yaw) sample and caches them into detail::s_rightHandMtx/
@@ -1417,7 +1454,13 @@ inline void updateFrame(const FrameInput& input) {
     // its own comment for the full root-cause writeup and why a plain
     // setAnmMtx() write alone isn't sufficient either. Position tracking
     // itself has been confirmed working since 2026-08-02 (section 12).
-    const cXyz eyePos = getVrCameraEyeAnchor(view->lookat.eye);
+    // hmdPos/smoothTurnYawRad passed through (2026-09-11) so hands pick up
+    // the SAME camera-only 6DOF head-position offset the camera itself
+    // gets -- without this, leaning your head would visually shift the
+    // camera away from your tracked hands (which would stay anchored to
+    // the pre-lean position instead of moving with you).
+    const cXyz eyePos = getVrCameraEyeAnchor(view->lookat.eye, &input.hmdPose.position,
+                                              input.smoothTurnYawRad);
     computeTrackedHandMatrices(input.hmdPose.position, input.rightControllerPose,
                                 input.leftControllerPose, eyePos, input.smoothTurnYawRad);
 }
@@ -2769,6 +2812,17 @@ inline cXyz s_eyeAnchorCurr{};
 inline bool s_eyeAnchorValid = false;
 inline uint64_t s_lastSeenSimTick = 0;
 
+// Camera-only 6DOF positional tracking (2026-09-11) -- see
+// settings.h's vrPositionalTracking/vrPositionalTrackingRadius comments
+// for the feature description. s_headPosCalibrationRef is the real-world
+// (OpenXR tracking-space) head position captured the moment first-person
+// mode last activated -- everything else is measured as a delta from
+// this one reference point, the same "capture once on activation" shape
+// already used for s_coreAnchorHeightOffset above, just for a raw XR
+// position instead of a derived height.
+inline XrVector3f s_headPosCalibrationRef{};
+inline bool s_headPosCalibrated = false;
+
 inline cXyz lerpXyz(const cXyz& a, const cXyz& b, float t) {
     cXyz out;
     out.x = a.x + (b.x - a.x) * t;
@@ -3091,11 +3145,42 @@ inline cXyz computeRawCoreAnchoredEye(daAlink_c* link) {
     // established convention for yaw math (see rotateYawXr() above).
     const float yawRad = static_cast<float>(link->current.angle.y) * (3.14159265f / 32768.0f);
 
+    // Direction-aware scaling (2026-09-11, user report/hypothesis:
+    // "Link's body lags behind when Z targeting" + "there might be
+    // compensation... that brings him forward... when going back it
+    // would compensate in the wrong direction"). The nudge above was
+    // tuned specifically while running FORWARD -- unconditionally
+    // applying it in Link's FACING direction regardless of which way
+    // he's actually moving means it stays fully applied while strafing
+    // or backing away from a Z-target (his facing locks onto the target,
+    // independent of any VR setting -- native base-game behavior) or
+    // walking backward -- there's no forward hunch to clear in those
+    // cases, so the fixed push just reads as a positional mismatch.
+    // Scale by how much of the actual movement (mMoveAngle -- the same
+    // stick-relative-to-facing comparison the base game's own
+    // getDirectionFromCurrentAngle() already makes, d_a_alink.h) lines up
+    // with facing: full nudge moving straight forward (unchanged from
+    // the already-confirmed-correct running case), smoothly down to zero
+    // moving sideways, clamped at zero rather than going negative for
+    // backward movement (no reason to push the OTHER way -- there's
+    // nothing to compensate for if he's not leaning forward). Left at
+    // full strength while the stick is idle (checkInputOnR() false,
+    // matching setSpeedAndAngleNormal()'s own "is the stick actively
+    // held" check) -- standing still was never reported wrong, so that
+    // case is deliberately left exactly as before.
+    float forwardAlignment = 1.0f;
+    if (link->checkInputOnR()) {
+        const s16 moveFacingDeltaS = static_cast<s16>(link->mMoveAngle - link->current.angle.y);
+        const float moveFacingDeltaRad =
+            static_cast<float>(moveFacingDeltaS) * (3.14159265f / 32768.0f);
+        forwardAlignment = std::max(0.f, std::cos(moveFacingDeltaRad));
+    }
+
     cXyz eye{link->current.pos.x, link->current.pos.y + s_coreAnchorHeightOffset,
              link->current.pos.z};
     eye.y += kCoreAnchorExtraUpUnits;
-    eye.x += kCoreAnchorExtraForwardUnits * std::sin(yawRad);
-    eye.z += kCoreAnchorExtraForwardUnits * std::cos(yawRad);
+    eye.x += kCoreAnchorExtraForwardUnits * forwardAlignment * std::sin(yawRad);
+    eye.z += kCoreAnchorExtraForwardUnits * forwardAlignment * std::cos(yawRad);
     return eye;
 }
 
@@ -3348,7 +3433,9 @@ inline constexpr float kEyeAnchorExtrapolationGain = 1.0f;
 // follow-cam or an authored cutscene camera" -- we're narrowing that
 // guarantee to human-form, non-cutscene gameplay (which now includes
 // plain dialogue), not removing it.
-inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye) {
+inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye,
+                                  const XrVector3f* hmdPosXR,
+                                  float yawRad) {
     auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
     if (!isFirstPerson(link)) {
         detail::s_eyeAnchorValid = false;
@@ -3365,6 +3452,13 @@ inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye) {
         detail::s_coreAnchorCalibrationAttempts = 0;
         detail::s_coreAnchorConsecutivePlausible = 0;
         detail::s_coreAnchorLastTickPosValid = false;
+        // Camera-only 6DOF (see detail::s_headPosCalibrated's own comment):
+        // recalibrate the real-head-position reference on the NEXT
+        // activation too, same reasoning as the core anchor's own height
+        // reset just above -- don't carry a stale reference (e.g. from
+        // standing somewhere else before a cutscene) into the next
+        // first-person session.
+        detail::s_headPosCalibrated = false;
         return fallbackEye;
     }
 
@@ -3399,6 +3493,55 @@ inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye) {
     // of just smoothing between two already-stale samples.
     const cXyz extrapolated = detail::lerpXyz(detail::s_eyeAnchorPrev, detail::s_eyeAnchorCurr,
                                                step + detail::kEyeAnchorExtrapolationGain);
+
+    // Camera-only 6DOF positional tracking (2026-09-11, explicit user
+    // request: "the headset can move horizontally and vertically from its
+    // position"). Everything above this point is unchanged -- this only
+    // ever ADDS an offset on top of the existing rigid (core- or head-
+    // joint-anchored) anchor, so every other caller/behavior of this
+    // function is untouched when hmdPosXR is null or the setting is off.
+    //
+    // Deliberately does NOT touch Link's actual position/collision (see
+    // settings.h's vrPositionalTracking comment) -- camera-only leaning/
+    // ducking, body-follows-along is an explicitly deferred phase 2.
+    //
+    // Reference point is captured ONCE per first-person activation (reset
+    // above, same shape as the core anchor's own height calibration) --
+    // everything after that is measured as a plain delta from it, in the
+    // same OpenXR tracking-space axes buildHandMtx() already uses for the
+    // identical "offset from a live head-relative reference" computation.
+    // Rotated by the same smooth-turn yaw the camera/hands already apply
+    // to their own tracked offsets, so leaning stays aligned with
+    // wherever "forward" currently means in-game (accounting for any
+    // smooth-turn applied since standing up), not raw physical tracking-
+    // space forward. Magnitude-clamped (not per-axis) to
+    // vrPositionalTrackingRadius so standing up fully or walking away from
+    // the calibrated spot can't produce an unbounded offset -- it just
+    // stops moving the camera further once you lean past that radius.
+    if (hmdPosXR != nullptr && dusk::getSettings().game.vrPositionalTracking.getValue()) {
+        if (!detail::s_headPosCalibrated) {
+            detail::s_headPosCalibrationRef = *hmdPosXR;
+            detail::s_headPosCalibrated = true;
+        } else {
+            float dx = hmdPosXR->x - detail::s_headPosCalibrationRef.x;
+            float dy = hmdPosXR->y - detail::s_headPosCalibrationRef.y;
+            float dz = hmdPosXR->z - detail::s_headPosCalibrationRef.z;
+
+            const float maxRadius = dusk::getSettings().game.vrPositionalTrackingRadius.getValue();
+            const float lenSq = dx * dx + dy * dy + dz * dz;
+            if (maxRadius > 0.f && lenSq > maxRadius * maxRadius) {
+                const float invLen = maxRadius / std::sqrt(lenSq);
+                dx *= invLen; dy *= invLen; dz *= invLen;
+            }
+
+            const XrVector3f rotated = dusk::vr::rotateYawXr(XrVector3f{dx, dy, dz}, yawRad);
+            cXyz withHeadOffset = extrapolated;
+            withHeadOffset.x += rotated.x * VR_SCALE_FACTOR;
+            withHeadOffset.y += rotated.y * VR_SCALE_FACTOR;
+            withHeadOffset.z += rotated.z * VR_SCALE_FACTOR;
+            return withHeadOffset;
+        }
+    }
 
     return extrapolated;
 }
@@ -3485,6 +3628,308 @@ inline void applyVrBodyPositionOffset(J3DModel* bodyModel) {
     base[1][3] += offset.y;
     base[2][3] += offset.z;
     bodyModel->calc();
+}
+
+// VR "Attach Body Rotation to Headset" -- real-per-eye-rate lag
+// compensation, same root cause and precedent as
+// getVrBodyPositionOffset()/applyVrBodyPositionOffset() just above (user
+// report, after the tick-rate-only override in daAlink_c::execute()'s
+// tail landed: "the body slightly lags behind a bit. When I walk
+// backwards it comes out in front of me"). execute()'s override only
+// forces shape_angle.y to the headset's yaw once per 30Hz sim tick;
+// setMatrix() (also tick-rate, d_a_alink.cpp) bakes whatever
+// shape_angle.y is at that moment into mpLinkModel's base transform, and
+// nothing updates it again until the next tick -- so between ticks the
+// body's VISUAL facing stair-steps behind the player's real,
+// continuously-changing head yaw. The pre-existing residual body-POSITION
+// lag applyVrBodyPositionOffset() already compensates for becomes far
+// more visible once facing lags too, especially walking backward (the
+// body catches up to the wrong spot approached from the wrong direction,
+// landing visibly ahead of the camera instead of trailing behind it).
+//
+// Fix, mirroring applyVrBodyPositionOffset()'s own shape: rather than
+// re-run setMatrix() at real frame rate (would mean duplicating its
+// mount/wolf/board special-case logic outside execute()), apply the
+// residual yaw delta as an EXTRA local rotation on top of whatever
+// setMatrix() already baked into the base transform this tick.
+//
+// CORRECTED 2026-09-08: the first version of this fix (built, never
+// confirmed conclusively fixed in-headset -- see the "PAUSED for the
+// night" writeup in vr-mod-notes for the round that found this) computed
+// `result = base * yRot` (a RIGHT-multiply) on the theory that Y-axis
+// rotations compose additively regardless of what's chained around them.
+// That's true only when comparing two PURE Y rotations directly -- it does
+// NOT mean right-multiplying the ALREADY-BUILT `base = T(pos) * Ry(y) *
+// Rx(x) * Rz(z)` by Ry(delta) is equivalent to having used `y + delta`
+// in setMatrix() in the first place. Re-derived algebraically: since
+// Ry(a)*Ry(b) == Ry(a+b), `T(pos) * Ry(y+delta) * Rx(x) * Rz(z) ==
+// T(pos) * Ry(delta) * Ry(y) * Rx(x) * Rz(z) == T(pos) * Ry(delta) *
+// [Ry(y)*Rx(x)*Rz(z)]` -- i.e. Ry(delta) needs to be inserted as a
+// LEFT-multiply of the ROTATION-ONLY block (Ry(y)*Rx(x)*Rz(z)), not a
+// right-multiply of the whole already-built matrix. The old right-multiply
+// applied Ry(delta) as the INNERMOST rotation (even before Rz(shape_angle.z)
+// and Rx(shape_angle.x)), which only happens to equal the correct answer
+// when pitch/roll (shape_angle.x/z) are exactly zero -- true standing on
+// flat ground facing forward, false on any slope or during animations that
+// set shape_angle.x/z, silently drifting wrong exactly when that's
+// nonzero. Left-multiplying `yRot * base` gives the correct rotation
+// submatrix, but ALSO rotates `base`'s translation column (`yRot * t`,
+// since MTXConcat(a,b,c) computes c=a*b and a plain matrix product
+// combines both parts) -- so this only touches the 3x3 rotation block and
+// leaves the translation column (already correct, possibly pre-adjusted
+// by applyVrBodyPositionOffset() above) completely untouched, rather than
+// building a full new 4x4 and needing to restore translation afterward.
+//
+// `freshHeadYawS` is passed in by the caller (d_a_alink.cpp already calls
+// dusk::vr::getHeadMoveAngleS() directly elsewhere; this header
+// deliberately doesn't include vr_main.hpp, same "keep heavier VR-session
+// headers out of this lower-level file" layering this file already
+// follows). `delta` is computed fresh every call as (real head yaw right
+// now) - (shape_angle.y as it currently stands, i.e. whatever the last
+// setMatrix() call actually used) -- correct regardless of exactly when
+// within a tick setMatrix() or execute()'s own override ran, since
+// shape_angle.y doesn't change again until the next tick.
+//
+// Gated on isVrForcingBodyYawToHeadset(link) (NOT just isFirstPerson()) --
+// during any of that shared gate's excluded states, shape_angle.y is NOT
+// being driven toward the headset at all, so "real head yaw minus
+// shape_angle.y" would be an arbitrary, meaningless delta there; applying
+// it would visibly fight e.g. Iron Boots' wall-normal orientation. Called
+// once per eye, right alongside applyVrBodyPositionOffset() above.
+// TEMP DIAGNOSTIC 2026-09-09 -- added after the round-5 rotation-math fix
+// (left-multiply instead of right-multiply, see the big comment above)
+// was tested and reported STILL broken, with a much more specific
+// symptom this time: "when standing still, the body is in the right
+// place, but when I rotate it the body seems offset. By the time I
+// rotate a full 180 degrees behind me the body is in front of me. It
+// quickly snaps back... when I walk forward. When walking backward the
+// body comes out in front of me." That's a POSITIONAL symptom tied to
+// rotation angle, not a pure facing-direction bug -- doesn't match
+// anything the round-5 fix (which only ever touches the 3x3 rotation
+// block, explicitly leaving translation untouched) should be able to
+// cause on its own. Leading candidate theories, neither confirmed:
+// (a) computeRawCoreAnchoredEye()'s 6in forward-nudge uses
+// current.angle.y (the MOVEMENT-facing angle), which per checkInputOnR()
+// only updates while the stick is actively held -- if it's staying
+// frozen while the player turns their head with the stick idle, this
+// nudge shouldn't be able to sweep at all, but that assumption has never
+// actually been checked with real data; (b) something else entirely
+// (mBodyAngle, a torso-twist term, or an interaction with
+// getVrBodyPositionOffset()'s own extrapolation) is the actual source.
+// Logs everything needed to settle this in one capture: real head yaw,
+// current shape_angle.y/current.angle.y, current.pos, whether the stick
+// is held, and the body position-offset delta (should be exactly zero
+// while genuinely standing still -- if it isn't, that's the smoking gun).
+// Throttled to ~2/sec normally, plus an unconditional log on any frame
+// where the position offset exceeds a "shouldn't happen while standing
+// still" threshold, to catch the exact moment things go wrong without
+// needing a huge paste. Remove once this is root-caused.
+inline void logBodyRotationDiagOnce(daAlink_c* link, s16 freshHeadYawS, s16 delta) {
+    static int s_frameCounter = 0;
+    const cXyz posOffset = getVrBodyPositionOffset(link);
+    const float offsetMagSq = posOffset.x * posOffset.x + posOffset.y * posOffset.y +
+                               posOffset.z * posOffset.z;
+    const bool bigOffset = offsetMagSq > (5.0f * 5.0f);  // >5 units (~2in) is already
+                                                          // suspicious while standing still
+    ++s_frameCounter;
+    // Tightened 2026-09-10 (round 8) from every 45 frames (~2/sec) to
+    // every 10 (~7-9/sec at typical VR framerates) -- a 180 degree turn
+    // over 1-2 seconds needs finer time resolution to actually correlate
+    // the exact moment things look wrong with the logged values, rather
+    // than getting only 2-4 samples across the whole turn.
+    if (!bigOffset && (s_frameCounter % 10) != 0) return;
+
+    const cXyz freshEye = detail::computeRawEyeAnchor(link);
+    const cXyz smoothedEye = getVrCameraEyeAnchor(freshEye);
+    char buf[400];
+    std::snprintf(
+        buf, sizeof(buf),
+        "[dusk::vr::bodyrotdiag] headYaw=%d shapeY=%d currAngleY=%d delta=%d "
+        "stickHeld=%d currPos=(%.1f,%.1f,%.1f) posOffset=(%.2f,%.2f,%.2f) "
+        "freshEye=(%.1f,%.1f,%.1f) smoothEye=(%.1f,%.1f,%.1f)%s\n",
+        (int)freshHeadYawS, (int)link->shape_angle.y, (int)link->current.angle.y, (int)delta,
+        link->checkInputOnR() ? 1 : 0, link->current.pos.x, link->current.pos.y,
+        link->current.pos.z, posOffset.x, posOffset.y, posOffset.z, freshEye.x, freshEye.y,
+        freshEye.z, smoothedEye.x, smoothedEye.y, smoothedEye.z,
+        bigOffset ? " <-- BIG OFFSET WHILE THIS RAN" : "");
+    OutputDebugStringA(buf);
+}
+
+inline void applyVrBodyYawOffset(J3DModel* bodyModel, s16 freshHeadYawS) {
+    if (!bodyModel) return;
+    auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
+    if (!isVrForcingBodyYawToHeadset(link)) return;
+
+    const s16 delta = (s16)(freshHeadYawS - link->shape_angle.y);
+    logBodyRotationDiagOnce(link, freshHeadYawS, delta);
+    if (delta == 0) return;
+
+    Mtx& base = bodyModel->getBaseTRMtx();
+    Mtx yRot;
+    MTXRotRad(yRot, 'Y', cM_s2rad(delta));
+
+    // LEFT-multiply: rotated = yRot * base. This gives the correct new
+    // rotation submatrix (Ry(delta) * [Ry(y)*Rx(x)*Rz(z)]) in rotated's
+    // top-left 3x3, but also carries the translation column through as
+    // `yRot * t` -- which we deliberately do NOT want (that would rotate
+    // Link's actual position around the origin). Only the 3x3 rotation
+    // block is copied back into `base`; its translation column (columns
+    // [*][3]) is left completely untouched.
+    Mtx rotated;
+    MTXConcat(yRot, base, rotated);
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            base[r][c] = rotated[r][c];
+        }
+    }
+    bodyModel->calc();
+}
+
+// ACTUAL ROOT CAUSE, found 2026-09-10: the zero [dusk::vr::bodyrotdiag]
+// lines in a full-session capture (despite the "attach body rotation"
+// feature clearly being active per the user's report) proved
+// applyVrBodyPositionOffset()/applyVrBodyYawOffset() were NEVER BEING
+// CALLED AT ALL, not just producing a wrong result. Both are only ever
+// invoked from `daAlink_c::draw()` (d_a_alink.cpp), gated on
+// `isEyePassOpen()` -- the EXACT SAME call site section 20's
+// "eyepasscheck" investigation already proved, via a full-session log
+// capture, NEVER runs during a real VR eye pass (only via the legacy
+// `fapGm_Execute()` per-sim-tick path, where `isEyePassOpen()` is always
+// false) -- see `refreshTrackedHandDrawMtxLive()`'s own comment for that
+// original finding. Nobody had migrated the body position/yaw offset
+// fixes to the same "live" pattern already used for hands/sword/shield/
+// held items when they were added -- this function does that now.
+//
+// With these two fixes confirmed dead code the whole time, the ONLY thing
+// actually affecting the real per-eye render was the TICK-RATE
+// `shape_angle.y = getHeadMoveAngleS()` override in `execute()`'s tail
+// (d_a_alink.cpp) -- which snaps shape_angle.y directly to head yaw once
+// per ~30Hz sim tick, with mpLinkModel's resulting per-JOINT draw matrices
+// then subject to `dusk::frame_interp`'s own once-per-tick snapshot
+// substitution (same mechanism section 20's whole saga root-caused for
+// hands/sword/shield -- see that section's "ACTUALLY FINALLY RESOLVED"
+// box) UNLESS marked live. mpLinkModel was never being marked live at
+// all before this fix (no existing markModelJointsLive(bodyModel) call
+// site anywhere) -- meaning every real frame's body draw was showing a
+// frame_interp-substituted blend between the last TWO once-per-tick
+// snapshots of shape_angle.y, not the current tick's real value. For
+// ordinary tick-rate animation this kind of blend is normal/desirable
+// (matches how the rest of this engine's animation smoothing works) --
+// but for a value that can, in principle, change by a large amount in a
+// single tick (a fast real head turn), naively interpolating between two
+// ROTATION MATRICES that are far apart (worst case: nearly antipodal,
+// i.e. ~180° apart) is a well-known degenerate case for plain per-element
+// matrix lerp (as opposed to quaternion slerp) -- it does not simply
+// "undershoot," it can produce a matrix with badly wrong translation/scale
+// behavior partway through the blend, growing worse the further apart the
+// two ends are. This matches the reported symptom shape exactly: fine
+// standing still (zero delta -- nothing to interpolate away from),
+// increasingly wrong approaching a 180° turn (worst-case interpolation
+// distance), corrects itself once real per-tick deltas shrink again
+// (walking forward apparently makes current.angle.y/mMoveAngle catch up
+// to shape_angle.y fast enough that large single-tick jumps stop
+// happening). NOT yet independently confirmed via a targeted capture that
+// this specific mechanism (rather than merely "the offset fixes were
+// dead") is the exact source of the positional symptom -- but marking
+// mpLinkModel's joints live, the same fix already proven for every other
+// tracked-pose model in this file, removes frame_interp's substitution
+// from the picture entirely regardless of exactly how it was going wrong,
+// so it should resolve this class of bug the same way it did for hands/
+// sword/shield even without pinning down the precise matrix-lerp failure
+// mode.
+//
+// ROUND 8 UPDATE (2026-09-10) -- this WAS wired live (called from
+// vr_main.cpp's tick(), as this comment used to describe), and the
+// result disproved the theory above rather than confirming it. Real
+// in-headset report once genuinely live: "The rotation problem isn't
+// fixed, turning 180 still puts the body in front of me. The body also
+// now moves in a very stuttery way, looks like it updates at 30hz...
+// When running forward it goes ahead of me now instead of being in the
+// right place... instead of previously where moving forwards looked good
+// but backwards it lagged, the body goes in front of me with any
+// movement." Two real, confirmed regressions, and the ORIGINAL target
+// symptom (180° facing offset) was UNCHANGED:
+// 1. **Stutter regression**: `markModelJointsLive(bodyModel)` marks
+//    EVERY joint of the FULL BODY skeleton live, not just the root/base
+//    placement -- unlike sword/shield/hands/held items (small, ~rigid
+//    models with no meaningful skeletal ANIMATION of their own to lose),
+//    mpLinkModel has real walk-cycle/idle/breathing animation that
+//    frame_interp's normal tick-to-tick blending smooths continuously.
+//    Marking every joint live disables that blending entirely, so the
+//    body's own ANIMATION (not just the position/yaw correction) now only
+//    updates once per ~30Hz tick with zero cross-tick smoothing -- the
+//    reported stutter. There is no cheap way to mark "just the root" live
+//    while leaving the rest smoothed: frame_interp substitutes each
+//    joint's already-composed WORLD matrix independently, so a corrected
+//    root can only reach a child joint's rendered matrix if that child is
+//    ALSO marked live (and thus also loses its own tick-to-tick animation
+//    blending). This technique, proven correct for small non-animated
+//    items, does not transfer to the full animated body.
+// 2. **Position overshoot regression**: `getVrBodyPositionOffset()`'s
+//    formula (full one-tick-ahead EXTRAPOLATION, `kEyeAnchorExtrapolationGain
+//    = 1.0`) is valid for the camera/hands because those track a REAL,
+//    physically-continuous external quantity (the HMD/controllers) where
+//    "keep going at the same velocity for one more tick" is a reasonable
+//    prediction. Link's own `current.pos` is SIMULATED, discrete,
+//    tick-rate game logic with no such continuity guarantee -- velocity
+//    can change abruptly between ticks (starting/stopping/turning) in a
+//    way a real physical body's momentum can't, so extrapolating it ahead
+//    overshoots, and does so for ANY movement once actually live (not
+//    just backward, as the pre-existing dead-code state's OWN residual,
+//    lesser bug happened to look like).
+// 3. **Rotation NOT fixed even though genuinely live**: this is the most
+//    important negative result -- it means the "frame_interp naively
+//    lerping two far-apart rotation matrices" theory this function's own
+//    header comment proposed is likely WRONG, not just unconfirmed. With
+//    markModelJointsLive() bypassing frame_interp's substitution entirely,
+//    the rendered body should have been using OUR fresh, real-frame-rate,
+//    already-verified-correct (round 5) rotation correction directly --
+//    and 180° still looked exactly as wrong as before. The real cause of
+//    the reported "body ends up in front of me at 180°" symptom is still
+//    NOT root-caused. Do not re-attempt "make this live again" as the
+//    next step without new evidence -- that specific avenue has now been
+//    tried and empirically failed to fix the target symptom while causing
+//    two new ones.
+//
+// Consequently: NOT currently called from anywhere (the call site that
+// used to invoke this from vr_main.cpp's tick() now calls
+// logVrBodyRotationDiagLive() instead -- pure instrumentation, no
+// rendering side effects) -- kept defined, unused, in case a future,
+// smarter version of this same idea (e.g. correcting position WITHOUT
+// extrapolation, or finding a way to propagate a root correction without
+// disabling animation blending) is worth revisiting. The old
+// d_a_alink.cpp dead-call-site (isEyePassOpen()-gated, inside
+// daAlink_c::draw()) is what's actually "live" right now in the sense
+// that it's the only place these two functions are still referenced from
+// outside this file -- and it's still just as dead as section 20 already
+// proved, so calling THIS function from THERE would change nothing.
+inline void refreshVrBodyOffsetsLive(s16 freshHeadYawS) {
+    auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
+    if (!link) return;
+    J3DModel* bodyModel = link->getBodyModel();
+    if (!bodyModel) return;
+
+    applyVrBodyPositionOffset(bodyModel);
+    applyVrBodyYawOffset(bodyModel, freshHeadYawS);
+    markModelJointsLive(bodyModel);
+}
+
+// Pure, read-only instrumentation -- calls logBodyRotationDiagOnce() from
+// the same genuinely-live per-real-frame call site refreshVrBodyOffsetsLive()
+// uses, WITHOUT applying either correction or marking anything live, so a
+// real capture of headYaw/shapeY/currAngleY/posOffset/eye-anchor values can
+// finally be gathered during an actual 180° turn without either of round
+// 8's regressions (stutter, position overshoot) muddying what's observed.
+// This is the ONLY thing currently wired into vr_main.cpp's tick() from
+// this whole investigation -- rendering itself is back to the pre-round-7
+// (dead-code) state, i.e. whatever execute()'s tick-rate shape_angle.y
+// override + plain frame_interp blending naturally produce.
+inline void logVrBodyRotationDiagLive(s16 freshHeadYawS) {
+    auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
+    if (!link) return;
+    if (!isVrForcingBodyYawToHeadset(link)) return;
+    const s16 delta = (s16)(freshHeadYawS - link->shape_angle.y);
+    logBodyRotationDiagOnce(link, freshHeadYawS, delta);
 }
 
 inline void restoreVisibility() {

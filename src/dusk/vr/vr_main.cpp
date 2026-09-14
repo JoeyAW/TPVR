@@ -539,6 +539,22 @@ void applyVrBodyPositionOffset(J3DModel* bodyModel) {
     vr_link::applyVrBodyPositionOffset(bodyModel);
 }
 
+bool isVrForcingBodyYawToHeadset(daAlink_c* link) {
+    return vr_link::isVrForcingBodyYawToHeadset(link);
+}
+
+void applyVrBodyYawOffset(J3DModel* bodyModel, s16 freshHeadYawS) {
+    vr_link::applyVrBodyYawOffset(bodyModel, freshHeadYawS);
+}
+
+void refreshVrBodyOffsetsLive(s16 freshHeadYawS) {
+    vr_link::refreshVrBodyOffsetsLive(freshHeadYawS);
+}
+
+void logVrBodyRotationDiagLive(s16 freshHeadYawS) {
+    vr_link::logVrBodyRotationDiagLive(freshHeadYawS);
+}
+
 float getSmoothTurnYawRad() {
     return dusk::vr::g_smoothTurnYawRad;
 }
@@ -1834,6 +1850,20 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
         dusk::vr::refreshTrackedHandDrawMtxLive(link->getHandModel());
     }
 
+    // ROUND 7/8, "Attach Body Rotation to Headset" saga: applyVrBodyPositionOffset()/
+    // applyVrBodyYawOffset() were found to have the identical dead-call-site
+    // bug the hand-lag fix above already proved (same d_a_alink.cpp draw()/
+    // isEyePassOpen() call site) -- round 7 tried making them genuinely live
+    // here (refreshVrBodyOffsetsLive()), which caused two real regressions
+    // (a 30Hz stutter, a position overshoot) WITHOUT fixing the original
+    // 180°-facing symptom, and was reverted same day. This call is
+    // deliberately DIAGNOSTIC-ONLY now -- see
+    // vr_link::logVrBodyRotationDiagLive()'s and
+    // vr_link::refreshVrBodyOffsetsLive()'s own comments
+    // (vr_link_visibility.hpp) for the full writeup before re-attempting a
+    // live fix here.
+    dusk::vr::logVrBodyRotationDiagLive(dusk::vr::getHeadMoveAngleS());
+
     // Same fix, same reason, extended to sword/shield (2026-08-09 follow-up
     // -- user-confirmed hands fixed, sword/shield still laggy, same root
     // cause). See refreshTrackedItemMtxLive()'s own comment.
@@ -1871,7 +1901,12 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     // non-null here: isViewReady() already returned before reaching this
     // point (see the check above).
     view_class* currentView = dComIfGd_getView();
-    const cXyz vrCameraEyeAnchor = vr_link::getVrCameraEyeAnchor(currentView->lookat.eye);
+    // hmdPose.position/smoothTurnYawRad passed through (2026-09-11) for
+    // camera-only 6DOF positional tracking -- see getVrCameraEyeAnchor()'s
+    // own comment. No-op when the setting is off or before the first real
+    // HMD sample this session.
+    const cXyz vrCameraEyeAnchor = vr_link::getVrCameraEyeAnchor(
+        currentView->lookat.eye, &hmdPose.position, dusk::vr::getSmoothTurnYawRad());
 
     // --- locate both eyes for this frame ---
     XrViewLocateInfo locateInfo{XR_TYPE_VIEW_LOCATE_INFO};

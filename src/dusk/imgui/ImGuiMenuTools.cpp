@@ -154,6 +154,15 @@ namespace dusk {
                     getSettings().game.vrSwapShieldGripOffsetY, -20.0f, 20.0f, "%.2f");
                 dusk::config::ImGuiSliderFloat("VR Swap Shield Grip Offset Z",
                     getSettings().game.vrSwapShieldGripOffsetZ, -20.0f, 20.0f, "%.2f");
+                // Debug-only, live-adjustable (2026-09-11) -- see settings.h's
+                // vrPositionalTrackingRadius comment. Untested starting guess
+                // (0.75m) for how far real head translation (leaning/
+                // ducking) is allowed to move the VR camera from its
+                // calibrated reference position before clamping. Only
+                // matters while "Positional Tracking" (VR settings tab) is
+                // on.
+                dusk::config::ImGuiSliderFloat("VR Positional Tracking Radius (metres)",
+                    getSettings().game.vrPositionalTrackingRadius, 0.1f, 2.0f, "%.2f");
                 ImGui::EndMenu();
             }
 

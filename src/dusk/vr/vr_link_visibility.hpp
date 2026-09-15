@@ -2996,6 +2996,24 @@ inline cXyz s_wolfEyeAnchorCurr{};
 inline bool s_wolfEyeAnchorValid = false;
 inline uint64_t s_lastSeenWolfSimTick = 0;
 
+// Wolf-mode's OWN camera-only-6DOF calibration reference (2026-09-14),
+// deliberately separate from s_headPosCalibrationRef/s_headPosCalibrated
+// below -- same "don't share state with the human-form copy" reasoning as
+// s_wolfEyeAnchorPrev's own comment just above, and for a sharper reason
+// than that one: getVrCameraEyeAnchor()'s `!isFirstPerson(link)` branch
+// unconditionally resets s_headPosCalibrated to false on EVERY call while
+// not in ordinary human first-person -- which is every single frame of
+// wolf gameplay, since isFirstPerson() always returns false for wolf (see
+// its own comment). Reusing that flag for wolf meant it got reset to
+// false and immediately re-armed to the CURRENT head position each frame,
+// so the delta was always ~zero and leaning did nothing -- root-caused
+// via user report ("moving the headset around in vr doesnt do anything as
+// wolf link") the same day this was added. A dedicated pair, reset only
+// when actually leaving wolf first-person (alongside s_wolfEyeAnchorValid
+// below), avoids the collision entirely.
+inline XrVector3f s_wolfHeadPosCalibrationRef{};
+inline bool s_wolfHeadPosCalibrated = false;
+
 // Fixed height above Wolf Link's own root/center (current.pos.y) the
 // camera sits at -- roughly where Midna usually rides on his back, raised
 // further so the camera clears his own body/head geometry (explicit user
@@ -3702,14 +3720,68 @@ inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye,
             }
 
             const float wolfStep = dusk::frame_interp::get_interpolation_step();
-            return detail::lerpXyz(detail::s_wolfEyeAnchorPrev, detail::s_wolfEyeAnchorCurr,
-                                    wolfStep + detail::kEyeAnchorExtrapolationGain);
+            const cXyz wolfExtrapolated = detail::lerpXyz(
+                detail::s_wolfEyeAnchorPrev, detail::s_wolfEyeAnchorCurr,
+                wolfStep + detail::kEyeAnchorExtrapolationGain);
+
+            // Camera-only 6DOF positional tracking, extended to wolf form
+            // (2026-09-14, same-day follow-up to the height/back nudge
+            // above -- explicit user request: "add 6dof movement to the
+            // wolf camera like you did with the regular gameplay").
+            // Identical technique to the human-form block further down in
+            // this same function (see its own long comment for the full
+            // reasoning), but uses its OWN separate
+            // s_wolfHeadPosCalibrationRef/s_wolfHeadPosCalibrated state --
+            // see that state's own comment (up near s_wolfEyeAnchorPrev)
+            // for why sharing the human copy is actively wrong here, not
+            // just unnecessary: this whole `if (isWolfFirstPersonView(...))`
+            // block lives inside the outer `!isFirstPerson(link)` branch,
+            // which unconditionally resets the human flag to false on
+            // EVERY call for as long as we're not in ordinary human
+            // first-person -- i.e. every single frame of wolf gameplay.
+            // FIXED 2026-09-14 same day, user report ("moving the headset
+            // around in vr doesnt do anything as wolf link"): sharing the
+            // flag meant it was forced back to false and immediately
+            // re-armed to the CURRENT head position each frame, so the
+            // measured delta was always ~zero. Only ever ADDS an offset on
+            // top of the rigid wolf anchor above; untouched when hmdPosXR
+            // is null or the setting is off.
+            if (hmdPosXR != nullptr && dusk::getSettings().game.vrPositionalTracking.getValue()) {
+                if (!detail::s_wolfHeadPosCalibrated) {
+                    detail::s_wolfHeadPosCalibrationRef = *hmdPosXR;
+                    detail::s_wolfHeadPosCalibrated = true;
+                } else {
+                    float dx = hmdPosXR->x - detail::s_wolfHeadPosCalibrationRef.x;
+                    float dy = hmdPosXR->y - detail::s_wolfHeadPosCalibrationRef.y;
+                    float dz = hmdPosXR->z - detail::s_wolfHeadPosCalibrationRef.z;
+
+                    const float maxRadius = dusk::getSettings().game.vrPositionalTrackingRadius.getValue();
+                    const float lenSq = dx * dx + dy * dy + dz * dz;
+                    if (maxRadius > 0.f && lenSq > maxRadius * maxRadius) {
+                        const float invLen = maxRadius / std::sqrt(lenSq);
+                        dx *= invLen; dy *= invLen; dz *= invLen;
+                    }
+
+                    const XrVector3f rotated = dusk::vr::rotateYawXr(XrVector3f{dx, dy, dz}, yawRad);
+                    cXyz wolfWithHeadOffset = wolfExtrapolated;
+                    wolfWithHeadOffset.x += rotated.x * VR_SCALE_FACTOR;
+                    wolfWithHeadOffset.y += rotated.y * VR_SCALE_FACTOR;
+                    wolfWithHeadOffset.z += rotated.z * VR_SCALE_FACTOR;
+                    return wolfWithHeadOffset;
+                }
+            }
+
+            return wolfExtrapolated;
         }
         // Not (or no longer) in wolf first-person view -- recalibrate fresh
         // next time it activates rather than lerping from a stale position
         // (same reasoning as every other recalibration reset in this
-        // branch).
+        // branch). Includes the wolf-only 6DOF calibration reference
+        // (s_wolfHeadPosCalibrated) added alongside it -- same "don't
+        // carry a stale reference into the next session" reasoning as
+        // s_headPosCalibrated's own reset above, just wolf's own copy.
         detail::s_wolfEyeAnchorValid = false;
+        detail::s_wolfHeadPosCalibrated = false;
         return fallbackEye;
     }
 

@@ -3005,7 +3005,17 @@ inline uint64_t s_lastSeenWolfSimTick = 0;
 // kHorseCameraUpUnits/kCoreAnchorHeightOffsetDefault's own history) is to
 // pick a plausible value, ship it, and retune from real in-headset
 // feedback rather than trying to derive it exactly up front.
-inline constexpr float kWolfCameraHeightUnits = 120.0f;
+// UPDATED 2026-09-14, same-day follow-up (explicit user request: "sit back
+// 12 inches higher and 12 inches backwards"): +12 real inches on top of
+// the original 120-unit guess above, same 2.54-units/inch conversion as
+// kCoreAnchorExtraForwardUnits/kHorseCameraUpUnits (100 units/metre).
+inline constexpr float kWolfCameraHeightUnits = 120.0f + 30.48f;
+
+// Backward nudge along Wolf Link's own facing direction (current.angle.y),
+// added the same day as the +12" height bump above and for the same
+// request ("... and 12 inches backwards"). Same yaw-projection technique
+// as kHorseCameraBackUnits -- see computeRawEyeAnchor()'s horse branch.
+inline constexpr float kWolfCameraBackUnits = 30.48f; // 12 real inches
 
 // Camera-only 6DOF positional tracking (2026-09-11) -- see
 // settings.h's vrPositionalTracking/vrPositionalTrackingRadius comments
@@ -3662,7 +3672,10 @@ inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye,
         // animated joint that bobs with his gait), raised by a fixed
         // kWolfCameraHeightUnits so the camera clears his body/head and
         // sits roughly where Midna usually rides, per the user's own
-        // description. Uses the exact same prev/curr-snapshot-and-lerp-
+        // description, then pulled back by kWolfCameraBackUnits along his
+        // facing direction (same-day follow-up request, same yaw-
+        // projection technique as the horse branch's kHorseCameraBackUnits
+        // above). Uses the exact same prev/curr-snapshot-and-lerp-
         // with-extrapolation technique as the human-form anchor below (own,
         // separate state -- see detail::s_wolfEyeAnchorPrev's comment).
         // Deliberately does NOT try to also emulate the human anchor's
@@ -3673,6 +3686,9 @@ inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye,
             const uint64_t wolfSimTick = dusk::frame_interp::sim_tick_seq();
             cXyz freshWolfEye = link->current.pos;
             freshWolfEye.y += detail::kWolfCameraHeightUnits;
+            const float wolfYawRad = static_cast<float>(link->current.angle.y) * (3.14159265f / 32768.0f);
+            freshWolfEye.x -= detail::kWolfCameraBackUnits * std::sin(wolfYawRad);
+            freshWolfEye.z -= detail::kWolfCameraBackUnits * std::cos(wolfYawRad);
 
             if (!detail::s_wolfEyeAnchorValid) {
                 detail::s_wolfEyeAnchorPrev = freshWolfEye;

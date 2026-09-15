@@ -13028,3 +13028,110 @@ possibility already flagged: this project's own `hsChainShape_c`
 precedent shows at least one other Wolf-Link-adjacent system draws via
 raw immediate-mode GX calls rather than a J3DModel, which would explain
 why no shape-hide of any kind has worked on it).
+
+**Round 9 (2026-09-15) — real capture came back, ACTUAL ROOT CAUSE FOUND
+by re-reading `daMidna_c::setBodyPartMatrix()` in full. Fix built, NOT yet
+tested in-headset. Closes out the round-5-through-9 "why won't this one
+model hide" mystery for real.**
+
+Capture confirmed: `match=1` (round-7 aliasing fix was correct -- same
+object both ways) and, critically, `hiddenFlag=0` on every single sample
+from BOTH the real-body and shadow-form draw sites, across both branches
+(the branch-check log showed `mpModel` toggling active/inactive over the
+session, confirming both code paths really do get exercised while
+riding, not just one). Object identity confirmed correct, gate confirmed
+not blocking -- yet the shape's own "hidden" flag reads unset right at
+the moment of the real draw call, every time.
+
+**Root cause, found by re-reading `daMidna_c::setBodyPartMatrix()` in
+full** (the same function whose OTHER content -- hands, mask -- was
+partially read back in this feature's very first investigation, but
+never in full): for BOTH `mpShadowHairhandBmd` and `mpHairhandBmd`,
+EVERY REAL SIM TICK this function unconditionally hides all 3 of the
+hair-hand model's materials, then immediately re-shows exactly ONE of
+them -- picking which hand-grip pose to display (the base game's own
+normal per-tick hand-pose animation logic, genuinely active and correct,
+not dead code). This directly and reliably defeats
+`hideMidnaEntirely()`'s once-per-real-frame `hideModel()` call on this
+one specific model family: nothing else Midna draws (body, mask, glow)
+has an equivalent competing per-tick writer, which is exactly why THOSE
+hid successfully in round 6 while only the hair-hand models kept
+fighting back, every round since.
+
+**Fix** (`d_a_midna.cpp`'s `setBodyPartMatrix()`): rather than try to
+out-race this per-tick writer from VR code (a fragile, decoupled-cadence
+race this project's own history has been bitten by repeatedly), the
+writer itself now checks a new `vrHairHandHidden` local (computed once
+at the top of the function: `dusk::vr::isRenderingToHeadset() &&
+dusk::vr::isWolfFirstPersonView(link) && !checkCalledUp()`) and skips
+JUST the "show exactly one" step -- for both models, both branches of
+each (`bvar2`'s if/else) -- while genuinely in VR wolf-first-person
+hidden mode. The initial "hide all 3" call, the pose/color-chase logic,
+and `bvar2`/`bvar8`'s own computation are all left completely
+untouched -- this only ever removes the one `->show()` call each branch
+would otherwise make, leaving the already-hidden state (set by this
+same function's own unconditional hide-all-3 sweep, immediately above)
+intact instead. New thin-forward `dusk::vr::isWolfFirstPersonView(daAlink_c*)`
+added to `vr_main.hpp`/`.cpp` (mirroring `isVrFirstPerson()`'s existing
+shape) so this base-game function can reach it without pulling in
+`vr_link_visibility.hpp`'s heavier includes.
+
+**Built successfully** (RelWithDebInfo, full rebuild since `vr_main.hpp`
+changed) — `d_a_midna.cpp`, `vr_main.hpp`/`.cpp` recompiled, clean link,
+no new warnings, verified via a second no-op incremental rebuild.
+
+**Diagnostic scaffolding from rounds 5 and 8 (`[dusk::vr::midnahairdiag]`
+and its three call sites in `d_a_midna.cpp`) is deliberately still in the
+tree** — not yet confirmed fixed in-headset, per this project's normal
+practice of only removing diagnostics once a fix is actually confirmed
+working, not just built.
+
+**NOT yet tested in-headset.** Next step for whoever picks this up:
+transform into Wolf Link during ordinary gameplay and confirm the
+hair-hand appendage is now hidden along with everything else, and that
+it (along with everything else) correctly reappears when she's called
+up -- ideally checked across BOTH her hand-grip pose states (the
+`bvar2`/`bvar8` branches control which of 3 materials would normally
+show, e.g. resting vs. actively gripping something), since this fix
+touches all of them but only the resting-pose case has had any real
+in-headset testing pressure so far.
+
+**CONFIRMED WORKING IN-HEADSET** — user tested and reported "working
+now." Closes out the whole wolf-first-person Midna-hiding feature (nine
+rounds across two days: camera anchor redesign, full-body hide, the
+aliasing fix, and finally this per-tick competing-writer fix for the
+hair-hand appendage specifically). Diagnostic scaffolding from rounds 5
+and 8 (`[dusk::vr::midnahairdiag]` and its three call sites, plus the
+now-unused `<windows.h>`/`<cstdio>` includes they needed) removed same
+session per this project's normal practice — rebuilt clean
+(`d_a_midna.cpp` only), confirmed no leftover references.
+
+**Final summary of the whole feature, for reference**: `isWolfFirstPersonView(daAlink_c*)`
+(`vr_link_visibility.hpp`) gates both halves — the VR camera anchors to
+Wolf Link's own elevated root/center position (`kWolfCameraHeightUnits`,
+still an untested-guess constant, never separately reported as wrong)
+instead of the old third-person fallback, and Midna is hidden entirely
+(`hideMidnaEntirely()`/`showMidnaEntirely()`, called every real frame
+from `updateFrame()`) via whole-model `hideModel()`/`showModel()` calls
+across every model her draw path can touch — both her own `daMidna_c`
+fields and Link's own aliased `mpWlMidna*` originals — with one
+additional fix inside `daMidna_c::setBodyPartMatrix()` itself
+(`vrHairHandHidden`) to stop a genuine, unrelated per-tick hand-pose
+writer from undoing the hide on her hair-hand appendage specifically.
+She reappears fully whenever `daMidna_c::checkCalledUp()` is true (the
+player pressed her talk/call button). Third Person VR setting and wolf
+cutscenes/dialogue are unaffected by any of this — she stays visible in
+both, matching vanilla, since `isWolfFirstPersonView()` excludes them by
+construction.
+
+**Reusable lesson from this whole saga**: a model that seems to resist
+every hide attempt despite confirmed-correct object identity and a
+mechanism proven to work on sibling models is a strong signal to look
+for a COMPETING WRITER (something else calling `show()` on a cadence
+your own hide call can't reliably out-race) rather than continuing to
+doubt the hide mechanism itself or the pointer identity — this is the
+second time this exact class of bug has been the real answer in this
+codebase (the first being section 20's whole hand/body-lag saga), and
+both times it was only found by reading the FULL body of a function
+already partially read earlier, not by further diagnostic rounds on the
+hide call site alone.

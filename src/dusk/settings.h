@@ -221,7 +221,7 @@ struct UserSettings {
         // Default off (added 2026-08-18 per explicit user request -- purely
         // a player preference for players who don't want to see their own
         // avatar body in VR, not a bug workaround).
-        ConfigVar<bool> vrHideBody;
+        ConfigVar<bool> vrShowBody;
         // Forces the WHOLE game into third-person VR, the same way Wolf
         // form/cutscenes already render (camera anchored to the flatscreen
         // third-person eye instead of Link's head, headset position/

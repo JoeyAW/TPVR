@@ -76,7 +76,7 @@ UserSettings g_userSettings = {
         .enableMapBackground {"game.enableMapBackground", true},
         .disableCutscenePillarboxing {"game.disableCutscenePillarboxing", false},
         .vrDesktopMirror {"game.vrDesktopMirror", true},
-        .vrHideBody {"game.vrHideBody", false},
+        .vrShowBody {"game.vrShowBody", false},
         .vrThirdPerson {"game.vrThirdPerson", false},
         .vrAttachBodyRotationToHead {"game.vrAttachBodyRotationToHead", true},
         .vrExperimentalCutsceneFirstPerson {"game.vrExperimentalCutsceneFirstPerson", false},
@@ -343,7 +343,7 @@ void registerSettings() {
     Register(g_userSettings.game.enableMapBackground);
     Register(g_userSettings.game.disableCutscenePillarboxing);
     Register(g_userSettings.game.vrDesktopMirror);
-    Register(g_userSettings.game.vrHideBody);
+    Register(g_userSettings.game.vrShowBody);
     Register(g_userSettings.game.vrThirdPerson);
     Register(g_userSettings.game.vrAttachBodyRotationToHead);
     Register(g_userSettings.game.vrExperimentalCutsceneFirstPerson);

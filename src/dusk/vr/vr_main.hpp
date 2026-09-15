@@ -378,6 +378,21 @@ void getHeadAimAngles(s16* outYawS, s16* outPitchS);
 // `isRenderingToHeadset() && isVrFirstPerson(this)`.
 bool isVrFirstPerson(daAlink_c* link);
 
+// Thin forward to vr_link::isWolfFirstPersonView(link) (vr_link_visibility.hpp)
+// -- 2026-09-15, wolf-mode first-person camera/hide feature. Added for
+// daMidna_c::setBodyPartMatrix() (d_a_midna.cpp), which runs a genuine,
+// active, once-per-sim-tick hair-hand-pose writer (hides all 3 of a
+// hair-hand model's materials, then re-shows exactly one, every tick --
+// picking which hand-grip pose to display) that was silently defeating
+// hideMidnaEntirely()'s once-per-real-frame hideModel() call on that same
+// model -- found via real [dusk::vr::midnahairdiag] draw-time logging
+// showing the shape's hidden flag reading unset (still visible) every
+// single sample despite confirmed-correct object identity. Used to skip
+// that per-tick re-show step (leaving the model fully hidden, matching
+// what hideMidnaEntirely() already set) while genuinely in this mode,
+// rather than trying to out-race the competing writer from VR code.
+bool isWolfFirstPersonView(daAlink_c* link);
+
 // Thin forward to vr_link::shouldTrackHookshotToHand(link)
 // (vr_link_visibility.hpp) -- see that function's own comment for the
 // full reasoning. Added 2026-08-19, same-day follow-up to

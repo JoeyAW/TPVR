@@ -15,8 +15,7 @@
 #include "d/d_s_play.h"
 #include "d/d_debug_viewer.h"
 #include "dusk/frame_interpolation.h"
-#include <windows.h>  // TEMP DIAGNOSTIC: OutputDebugStringA for [dusk::vr::midnahairdiag] logging below
-#include <cstdio>
+#include "dusk/vr/vr_main.hpp"  // dusk::vr::isRenderingToHeadset()/isWolfFirstPersonView()
 
 static f32 dummy_lit_3777(int idx, u8 foo) {
     Vec dummy_vec = {0.0f, 0.0f, 0.0f};
@@ -3455,20 +3454,16 @@ static int daMidna_Execute(daMidna_c* i_this) {
 int daMidna_c::draw() {
     daAlink_c* link = daAlink_getAlinkActorClass();
 
-    // NOTE: the VR wolf-first-person feature (2026-09-14) used to hide her
-    // ENTIRELY here via an early-return -- reverted same day (user report:
-    // "she didn't hide in the gameplay") in favor of a whole-MODEL hide
+    // VR wolf-first-person feature (2026-09-14, CONFIRMED WORKING
+    // IN-HEADSET 2026-09-15): Midna is hidden entirely while riding and
+    // not "called up" via a whole-MODEL hide
     // (hideMidnaEntirely()/showMidnaEntirely(), vr_link_visibility.hpp,
-    // called every real frame from updateFrame()) instead -- more reliable
-    // than a draw()-level skip regardless of which draw() call site
-    // actually reaches the real render. Body/mask/hands/glow all confirmed
-    // hidden by that fix; her hair-hand appendage is NOT (user report,
-    // 2026-09-15 round 3: "I can still see the ponytail" -- persists even
-    // after round 7 additionally hid link->getMidnaHairHandModel()
-    // directly). TEMP DIAGNOSTIC logging added below, at both candidate
-    // draw call sites for it, to settle -- with real data instead of a
-    // fourth guess -- which branch is actually active and whether the
-    // model identity/hidden-flag are what hideMidnaEntirely() assumes.
+    // called every real frame from updateFrame()) rather than a
+    // draw()-level skip -- more reliable regardless of which draw() call
+    // site actually reaches the real render. The one real holdout (her
+    // hair-hand appendage, defeated by a genuine competing per-tick
+    // writer in setBodyPartMatrix()) is fixed at its own root cause
+    // there -- see that function's own comment for the full writeup.
 
     if (checkNoDrawState() ||
         (!checkStateFlg1((daMidna_FLG1)(FLG1_SHADOW_MODEL_DRAW_DEMO_FORCE | FLG1_UNK_1))
@@ -3480,24 +3475,6 @@ int daMidna_c::draw() {
 
     int bvar1 = false;
     dComIfGd_setListDark();
-
-    // TEMP DIAGNOSTIC (2026-09-15): fires the first 5 times draw() actually
-    // reaches this point, regardless of VR state (harmless on flatscreen
-    // too) -- settles which top-level branch (mpModel != NULL, "real
-    // body", vs. the shadow/imp else-branch) is genuinely active while
-    // riding, which round 7's fix assumed without direct confirmation.
-    {
-        static int s_branchDiagCount = 0;
-        if (s_branchDiagCount < 5) {
-            ++s_branchDiagCount;
-            char buf[256];
-            std::snprintf(buf, sizeof(buf),
-                          "[dusk::vr::midnahairdiag] draw() branch check: mpModel=%p checkStateFlg0(FLG0_NO_DRAW)=%d checkStateFlg1(FLG1_SHADOW_MODEL_DRAW_DEMO_FORCE)=%d\n",
-                          static_cast<void*>(mpModel), checkStateFlg0(FLG0_NO_DRAW) ? 1 : 0,
-                          checkStateFlg1(FLG1_SHADOW_MODEL_DRAW_DEMO_FORCE) ? 1 : 0);
-            OutputDebugStringA(buf);
-        }
-    }
 
     if (!checkStateFlg0(FLG0_NO_DRAW) && !checkStateFlg1(FLG1_SHADOW_MODEL_DRAW_DEMO_FORCE) && mpModel != NULL) {
         g_env_light.settingTevStruct(3, &current.pos, &tevStr);
@@ -3563,33 +3540,6 @@ int daMidna_c::draw() {
         mDoExt_modelEntryDL(mpModel);
         g_env_light.setLightTevColorType_MAJI(mpHandsBmd, &tevStr);
         mDoExt_modelEntryDL(mpHandsBmd);
-        // TEMP DIAGNOSTIC (2026-09-15): fires the first 5 times the
-        // REAL-BODY hairhand branch is reached -- checks the raw
-        // mpHairhandBmd pointer against what link->getMidnaHairHandModel()
-        // returns AT THIS EXACT MOMENT (settles the round-7 aliasing
-        // theory directly) and whether this model's own shape 0 currently
-        // reads hidden (checkFlag(J3DShpFlag_Visible), per J3DShape.h's
-        // confusingly-named-but-confirmed-correct convention: hide() SETS
-        // this flag) -- i.e. whether hideMidnaEntirely()'s hide() call is
-        // still in effect at the actual moment this draw call fires.
-        {
-            static int s_hairhandDiagCount = 0;
-            if (s_hairhandDiagCount < 5) {
-                ++s_hairhandDiagCount;
-                daAlink_c* linkForDiag = daAlink_getAlinkActorClass();
-                J3DShape* firstShape = (mpHairhandBmd && mpHairhandBmd->getModelData()->getMaterialNum() > 0)
-                    ? mpHairhandBmd->getModelData()->getMaterialNodePointer(0)->getShape() : nullptr;
-                char buf[256];
-                std::snprintf(buf, sizeof(buf),
-                              "[dusk::vr::midnahairdiag] REALBODY hairhand: mpHairhandBmd=%p viaLink=%p match=%d hiddenFlag=%d gateBlocked=%d\n",
-                              static_cast<void*>(mpHairhandBmd),
-                              static_cast<void*>(linkForDiag ? linkForDiag->getMidnaHairHandModel() : nullptr),
-                              (linkForDiag && linkForDiag->getMidnaHairHandModel() == mpHairhandBmd) ? 1 : 0,
-                              (firstShape && firstShape->checkFlag(J3DShpFlag_Visible)) ? 1 : 0,
-                              checkStateFlg1((daMidna_FLG1)(FLG1_UNK_40 | FLG1_UNK_10)) ? 1 : 0);
-                OutputDebugStringA(buf);
-            }
-        }
         if (mpHairhandBmd != NULL && !checkStateFlg1((daMidna_FLG1)(FLG1_UNK_40 | FLG1_UNK_10))) {
             for (u16 i = 0; i < 3; i++) {
                 J3DMaterial* material = mpHairhandBmd->getModelData()->getMaterialNodePointer(i);
@@ -3644,25 +3594,6 @@ int daMidna_c::draw() {
 
         g_env_light.setLightTevColorType_MAJI(mpShadowHandsBmd, &tevStr);
         mHandsInvModel.entryDL(&vec);
-        // TEMP DIAGNOSTIC (2026-09-15): same shape as the REALBODY hairhand
-        // log above, for the SHADOW-form branch instead -- fires the first
-        // 5 times this branch (not the real-body one) is reached.
-        {
-            static int s_shadowHairhandDiagCount = 0;
-            if (s_shadowHairhandDiagCount < 5) {
-                ++s_shadowHairhandDiagCount;
-                J3DShape* firstShape =
-                    (mpShadowHairhandBmd && mpShadowHairhandBmd->getModelData()->getMaterialNum() > 0)
-                    ? mpShadowHairhandBmd->getModelData()->getMaterialNodePointer(0)->getShape() : nullptr;
-                char buf[256];
-                std::snprintf(buf, sizeof(buf),
-                              "[dusk::vr::midnahairdiag] SHADOW hairhand: mpShadowHairhandBmd=%p hiddenFlag=%d gateBlocked=%d\n",
-                              static_cast<void*>(mpShadowHairhandBmd),
-                              (firstShape && firstShape->checkFlag(J3DShpFlag_Visible)) ? 1 : 0,
-                              checkStateFlg1(FLG1_UNK_40) ? 1 : 0);
-                OutputDebugStringA(buf);
-            }
-        }
         if (!checkStateFlg1(FLG1_UNK_40)) {
             g_env_light.setLightTevColorType_MAJI(mpShadowHairhandBmd, &tevStr);
             mHairhandInvModel.entryDL(&vec);

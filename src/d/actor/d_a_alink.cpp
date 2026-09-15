@@ -20044,9 +20044,13 @@ int daAlink_c::draw() {
         // isFirstPerson()'s own vrThirdPerson check, vr_link_visibility.hpp):
         // third person is pointless with an invisible body, so it forces
         // the body (and, transitively via hideBodyForVr below, the stowed
-        // sword/shield) to show regardless of what "Hide Body" is set to.
+        // sword/shield) to show regardless of what "Experimental: Show
+        // Link's Body" is set to.
+        // NOTE: setting renamed/inverted from "Hide Body" (vrHideBody) to
+        // "Experimental: Show Link's Body" (vrShowBody), now off by default
+        // -- same underlying mechanism, just flipped sense and default.
         const BOOL hideBodyForVr = dusk::vr::isRenderingToHeadset() &&
-                                    dusk::getSettings().game.vrHideBody.getValue() &&
+                                    !dusk::getSettings().game.vrShowBody.getValue() &&
                                     !dusk::getSettings().game.vrThirdPerson.getValue() &&
                                     !dusk::vr::isRealCutsceneRunning();
         modelDraw(mpLinkModel, isPlayerNoDraw || hideBodyForVr);

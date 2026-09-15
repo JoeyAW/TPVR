@@ -491,6 +491,10 @@ bool isVrFirstPerson(daAlink_c* link) {
     return vr_link::isFirstPerson(link);
 }
 
+bool isWolfFirstPersonView(daAlink_c* link) {
+    return vr_link::isWolfFirstPersonView(link);
+}
+
 bool shouldTrackHookshotToHand(daAlink_c* link) {
     return vr_link::shouldTrackHookshotToHand(link);
 }

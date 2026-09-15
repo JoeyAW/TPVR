@@ -913,31 +913,24 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                 .helpText = "Plays the entire game in third person while in VR, the same "
                             "camera Wolf Link and cutscenes already use -- your headset "
                             "still looks around freely, just from behind Link instead of "
-                            "through his eyes. Also shows his body (overriding \"Hide "
-                            "Body\" below if it's on), since there's no point being in "
-                            "third person with an invisible avatar. Off by default."
+                            "through his eyes. Also shows his body (overriding \"Experimental: "
+                            "Show Link's Body\" below if it's off), since there's no point "
+                            "being in third person with an invisible avatar. Off by default."
             });
-        config_bool_select(leftPane, rightPane, getSettings().game.vrAttachBodyRotationToHead,
+        // "Attach Body Rotation to Headset" (game.vrAttachBodyRotationToHead) is
+        // intentionally not exposed here -- still a real ConfigVar (defaults to
+        // true, editable directly in the config file) so the feature keeps
+        // working, just hidden from the regular settings UI.
+        config_bool_select(leftPane, rightPane, getSettings().game.vrShowBody,
             {
-                .key = "Attach Body Rotation to Headset",
-                .helpText = "Keeps Link's body facing exactly where your headset is looking, "
-                            "with no turn-rate lag -- without this, his body still turns "
-                            "toward your head direction while standing still, but eases into "
-                            "it at the normal walking turn rate, which can visibly lag behind "
-                            "a fast real head turn. Has no effect while Z-targeting, throwing "
-                            "an item, or using the hookshot, which already have their own "
-                            "facing logic. On by default."
-            });
-        config_bool_select(leftPane, rightPane, getSettings().game.vrHideBody,
-            {
-                .key = "Hide Body",
-                .helpText = "Hides Link's whole body in VR, in any outfit or armor, along "
+                .key = "Experimental: Show Link's Body",
+                .helpText = "Shows Link's whole body in VR, in any outfit or armor, along "
                             "with the sword and shield while they're stowed on his back. "
                             "Your tracked hands and anything actively held (sword drawn, "
-                            "shield raised, other items) still show normally. Off by "
-                            "default so you can see him normally; turn this on if you'd "
-                            "rather not see your own body. Has no effect while \"Third "
-                            "Person\" above is on."
+                            "shield raised, other items) show normally either way. Off by "
+                            "default (body hidden) since this is experimental; turn this on "
+                            "if you'd like to see your own body. Has no effect while \"Third "
+                            "Person\" above is on, which always shows the body."
             });
         config_bool_select(leftPane, rightPane, getSettings().game.vrExperimentalCutsceneFirstPerson,
             {

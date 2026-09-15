@@ -3046,12 +3046,71 @@ inline constexpr float kWolfCameraBackUnits = 30.48f; // 12 real inches
 inline XrVector3f s_headPosCalibrationRef{};
 inline bool s_headPosCalibrated = false;
 
+// Third calibration copy, for the "everything else" fallback branch of
+// getVrCameraEyeAnchor() -- cutscenes, door/transition events, and
+// ordinary third-person gameplay (Third Person VR setting), which
+// previously returned `fallbackEye` completely untouched by any of this
+// (2026-09-14, generalizing 6DOF from "gameplay + dialogue + wolf" to
+// "everywhere," per explicit user request, after confirming the
+// wolf-form port above -- "As long as there arent any game breaking
+// regressions, yes you can add it to every section of the game"). Own
+// dedicated state, same reasoning as s_wolfHeadPosCalibrationRef's own
+// comment: this fallback branch runs on every call where neither the
+// human nor the wolf branch is active, so it must NOT share either of
+// their calibration flags -- doing so would hit the exact same
+// reset-every-frame collision already root-caused and fixed for wolf.
+inline XrVector3f s_fallbackHeadPosCalibrationRef{};
+inline bool s_fallbackHeadPosCalibrated = false;
+
 inline cXyz lerpXyz(const cXyz& a, const cXyz& b, float t) {
     cXyz out;
     out.x = a.x + (b.x - a.x) * t;
     out.y = a.y + (b.y - a.y) * t;
     out.z = a.z + (b.z - a.z) * t;
     return out;
+}
+
+// Camera-only 6DOF positional-tracking math, factored out (2026-09-14,
+// same generalization pass as s_fallbackHeadPosCalibrationRef above) so
+// the identical calibrate-once/measure-delta/clamp/rotate/add formula
+// isn't hand-copied a third time -- see computeTrackedHandMatrices()'s
+// own comment for why this codebase treats a duplicated formula as a bug
+// class worth factoring out, not just a style nit. Each mode (human
+// gameplay/dialogue, wolf, fallback) passes ITS OWN calibration ref/flag
+// by reference -- deliberately not a shared static, for the same
+// don't-share-state-across-mutually-exclusive-modes reason documented on
+// every one of those state pairs' own comments. Returns `baseEye`
+// unchanged whenever hmdPosXR is null, the setting is off, or this is the
+// very first sample since (re)calibration -- nothing to measure a delta
+// against yet.
+inline cXyz applyPositionalLean(const cXyz& baseEye, XrVector3f& calibRef, bool& calibrated,
+                                 const XrVector3f* hmdPosXR, float yawRad) {
+    if (hmdPosXR == nullptr || !dusk::getSettings().game.vrPositionalTracking.getValue()) {
+        return baseEye;
+    }
+    if (!calibrated) {
+        calibRef = *hmdPosXR;
+        calibrated = true;
+        return baseEye;
+    }
+
+    float dx = hmdPosXR->x - calibRef.x;
+    float dy = hmdPosXR->y - calibRef.y;
+    float dz = hmdPosXR->z - calibRef.z;
+
+    const float maxRadius = dusk::getSettings().game.vrPositionalTrackingRadius.getValue();
+    const float lenSq = dx * dx + dy * dy + dz * dz;
+    if (maxRadius > 0.f && lenSq > maxRadius * maxRadius) {
+        const float invLen = maxRadius / std::sqrt(lenSq);
+        dx *= invLen; dy *= invLen; dz *= invLen;
+    }
+
+    const XrVector3f rotated = dusk::vr::rotateYawXr(XrVector3f{dx, dy, dz}, yawRad);
+    cXyz withOffset = baseEye;
+    withOffset.x += rotated.x * VR_SCALE_FACTOR;
+    withOffset.y += rotated.y * VR_SCALE_FACTOR;
+    withOffset.z += rotated.z * VR_SCALE_FACTOR;
+    return withOffset;
 }
 
 // ADDED 2026-08-09 (user request: anchor the VR camera to Link's ROOT/CORE
@@ -3701,6 +3760,12 @@ inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye,
         // height offset was what was asked for; revisit if in-headset
         // testing says a calibrated/adjustable height is needed instead.
         if (isWolfFirstPersonView(link)) {
+            // Wolf is active, so fallback isn't -- recalibrate fallback's
+            // OWN lean reference fresh next time it runs instead of
+            // carrying a stale one across the transition (same reasoning
+            // as every other recalibration reset in this function).
+            detail::s_fallbackHeadPosCalibrated = false;
+
             const uint64_t wolfSimTick = dusk::frame_interp::sim_tick_seq();
             cXyz freshWolfEye = link->current.pos;
             freshWolfEye.y += detail::kWolfCameraHeightUnits;
@@ -3727,63 +3792,68 @@ inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye,
             // Camera-only 6DOF positional tracking, extended to wolf form
             // (2026-09-14, same-day follow-up to the height/back nudge
             // above -- explicit user request: "add 6dof movement to the
-            // wolf camera like you did with the regular gameplay").
-            // Identical technique to the human-form block further down in
-            // this same function (see its own long comment for the full
-            // reasoning), but uses its OWN separate
+            // wolf camera like you did with the regular gameplay"). Uses
+            // the shared applyPositionalLean() helper (see its own
+            // comment) with wolf's OWN dedicated
             // s_wolfHeadPosCalibrationRef/s_wolfHeadPosCalibrated state --
-            // see that state's own comment (up near s_wolfEyeAnchorPrev)
-            // for why sharing the human copy is actively wrong here, not
-            // just unnecessary: this whole `if (isWolfFirstPersonView(...))`
-            // block lives inside the outer `!isFirstPerson(link)` branch,
-            // which unconditionally resets the human flag to false on
-            // EVERY call for as long as we're not in ordinary human
-            // first-person -- i.e. every single frame of wolf gameplay.
-            // FIXED 2026-09-14 same day, user report ("moving the headset
-            // around in vr doesnt do anything as wolf link"): sharing the
-            // flag meant it was forced back to false and immediately
-            // re-armed to the CURRENT head position each frame, so the
-            // measured delta was always ~zero. Only ever ADDS an offset on
-            // top of the rigid wolf anchor above; untouched when hmdPosXR
-            // is null or the setting is off.
-            if (hmdPosXR != nullptr && dusk::getSettings().game.vrPositionalTracking.getValue()) {
-                if (!detail::s_wolfHeadPosCalibrated) {
-                    detail::s_wolfHeadPosCalibrationRef = *hmdPosXR;
-                    detail::s_wolfHeadPosCalibrated = true;
-                } else {
-                    float dx = hmdPosXR->x - detail::s_wolfHeadPosCalibrationRef.x;
-                    float dy = hmdPosXR->y - detail::s_wolfHeadPosCalibrationRef.y;
-                    float dz = hmdPosXR->z - detail::s_wolfHeadPosCalibrationRef.z;
-
-                    const float maxRadius = dusk::getSettings().game.vrPositionalTrackingRadius.getValue();
-                    const float lenSq = dx * dx + dy * dy + dz * dz;
-                    if (maxRadius > 0.f && lenSq > maxRadius * maxRadius) {
-                        const float invLen = maxRadius / std::sqrt(lenSq);
-                        dx *= invLen; dy *= invLen; dz *= invLen;
-                    }
-
-                    const XrVector3f rotated = dusk::vr::rotateYawXr(XrVector3f{dx, dy, dz}, yawRad);
-                    cXyz wolfWithHeadOffset = wolfExtrapolated;
-                    wolfWithHeadOffset.x += rotated.x * VR_SCALE_FACTOR;
-                    wolfWithHeadOffset.y += rotated.y * VR_SCALE_FACTOR;
-                    wolfWithHeadOffset.z += rotated.z * VR_SCALE_FACTOR;
-                    return wolfWithHeadOffset;
-                }
-            }
-
-            return wolfExtrapolated;
+            // that state's own comment (up near s_wolfEyeAnchorPrev)
+            // explains why sharing the human copy is actively wrong here,
+            // not just unnecessary: this whole
+            // `if (isWolfFirstPersonView(...))` block lives inside the
+            // outer `!isFirstPerson(link)` branch, which unconditionally
+            // resets the human flag to false on EVERY call for as long as
+            // we're not in ordinary human first-person -- i.e. every
+            // single frame of wolf gameplay. FIXED 2026-09-14 same day,
+            // user report ("moving the headset around in vr doesnt do
+            // anything as wolf link"): sharing the flag meant it was
+            // forced back to false and immediately re-armed to the
+            // CURRENT head position each frame, so the measured delta was
+            // always ~zero.
+            return detail::applyPositionalLean(wolfExtrapolated, detail::s_wolfHeadPosCalibrationRef,
+                                                detail::s_wolfHeadPosCalibrated, hmdPosXR, yawRad);
         }
-        // Not (or no longer) in wolf first-person view -- recalibrate fresh
-        // next time it activates rather than lerping from a stale position
+        // Not (or no longer) in wolf first-person view -- this is the
+        // actual fallback case: cutscenes, door/transition events, and
+        // ordinary third-person gameplay (Third Person VR setting), all
+        // sharing `fallbackEye` = the flatscreen camera's own
+        // view->lookat.eye. Recalibrate wolf's state fresh next time it
+        // activates rather than lerping/leaning from a stale position
         // (same reasoning as every other recalibration reset in this
-        // branch). Includes the wolf-only 6DOF calibration reference
-        // (s_wolfHeadPosCalibrated) added alongside it -- same "don't
-        // carry a stale reference into the next session" reasoning as
-        // s_headPosCalibrated's own reset above, just wolf's own copy.
+        // branch) -- s_wolfEyeAnchorValid for the rigid anchor,
+        // s_wolfHeadPosCalibrated (added alongside it when wolf's 6DOF was
+        // wired) for wolf's own lean reference.
         detail::s_wolfEyeAnchorValid = false;
         detail::s_wolfHeadPosCalibrated = false;
-        return fallbackEye;
+
+        // Camera-only 6DOF, generalized to this fallback case too
+        // (2026-09-14, same-day follow-up -- explicit user request: "As
+        // long as there arent any game breaking regressions, yes you can
+        // add it to every section of the game"). Uses the shared
+        // applyPositionalLean() helper with its OWN dedicated
+        // s_fallbackHeadPosCalibrationRef/s_fallbackHeadPosCalibrated
+        // state (see that state's own comment above) rather than either
+        // other mode's flag, for the identical reason wolf needed its own
+        // copy. Deliberately NOT excluded for authored cutscenes despite
+        // the risk flagged when this was proposed (a precisely staged
+        // camera could clip through geometry under a few inches of real
+        // head drift) -- explicit user call to accept that risk rather
+        // than carve cutscenes out; vrPositionalTrackingRadius still
+        // bounds the maximum drift the same as everywhere else. Revisit
+        // this inclusion specifically if a real in-cutscene clipping
+        // report comes back.
+        return detail::applyPositionalLean(fallbackEye, detail::s_fallbackHeadPosCalibrationRef,
+                                            detail::s_fallbackHeadPosCalibrated, hmdPosXR, yawRad);
     }
+
+    // Human first-person is active, so neither the wolf nor the fallback
+    // branch is running -- recalibrate their OWN lean references fresh
+    // for next time rather than carrying a stale one across the
+    // transition (same reasoning as every other recalibration reset in
+    // this function; the two are never touched by anything else while
+    // this branch runs, since both live entirely inside the
+    // `if (!isFirstPerson(link))` block above).
+    detail::s_wolfHeadPosCalibrated = false;
+    detail::s_fallbackHeadPosCalibrated = false;
 
     const uint64_t simTick = dusk::frame_interp::sim_tick_seq();
 
@@ -3823,6 +3893,10 @@ inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye,
     // ever ADDS an offset on top of the existing rigid (core- or head-
     // joint-anchored) anchor, so every other caller/behavior of this
     // function is untouched when hmdPosXR is null or the setting is off.
+    // Uses the shared applyPositionalLean() helper (2026-09-14 refactor,
+    // once wolf and the fallback branch above both needed the identical
+    // formula -- see that helper's own comment) with this mode's own
+    // s_headPosCalibrationRef/s_headPosCalibrated state.
     //
     // Deliberately does NOT touch Link's actual position/collision (see
     // settings.h's vrPositionalTracking comment) -- camera-only leaning/
@@ -3841,32 +3915,8 @@ inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye,
     // vrPositionalTrackingRadius so standing up fully or walking away from
     // the calibrated spot can't produce an unbounded offset -- it just
     // stops moving the camera further once you lean past that radius.
-    if (hmdPosXR != nullptr && dusk::getSettings().game.vrPositionalTracking.getValue()) {
-        if (!detail::s_headPosCalibrated) {
-            detail::s_headPosCalibrationRef = *hmdPosXR;
-            detail::s_headPosCalibrated = true;
-        } else {
-            float dx = hmdPosXR->x - detail::s_headPosCalibrationRef.x;
-            float dy = hmdPosXR->y - detail::s_headPosCalibrationRef.y;
-            float dz = hmdPosXR->z - detail::s_headPosCalibrationRef.z;
-
-            const float maxRadius = dusk::getSettings().game.vrPositionalTrackingRadius.getValue();
-            const float lenSq = dx * dx + dy * dy + dz * dz;
-            if (maxRadius > 0.f && lenSq > maxRadius * maxRadius) {
-                const float invLen = maxRadius / std::sqrt(lenSq);
-                dx *= invLen; dy *= invLen; dz *= invLen;
-            }
-
-            const XrVector3f rotated = dusk::vr::rotateYawXr(XrVector3f{dx, dy, dz}, yawRad);
-            cXyz withHeadOffset = extrapolated;
-            withHeadOffset.x += rotated.x * VR_SCALE_FACTOR;
-            withHeadOffset.y += rotated.y * VR_SCALE_FACTOR;
-            withHeadOffset.z += rotated.z * VR_SCALE_FACTOR;
-            return withHeadOffset;
-        }
-    }
-
-    return extrapolated;
+    return detail::applyPositionalLean(extrapolated, detail::s_headPosCalibrationRef,
+                                        detail::s_headPosCalibrated, hmdPosXR, yawRad);
 }
 
 // FIXED 2026-08-08 (section 20 continuation -- user report, after

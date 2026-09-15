@@ -17,6 +17,7 @@
 #include "d/actor/d_a_alink.h"
 #include "d/actor/d_a_boomerang.h"
 #include "d/actor/d_a_mg_rod.h"
+#include "d/actor/d_a_midna.h"  // Wolf-mode Midna head/mask hiding
 #include "d/d_com_inf_game.h"
 #include "m_Do/m_Do_ext.h"  // mDoExt_McaMorf::getModel(), for the fishing rod's live-refresh
 #include "dusk/frame_interpolation.h"
@@ -1009,6 +1010,131 @@ inline bool isFirstPerson(daAlink_c* link) {
     return !link->checkPlayerNoDraw();
 }
 
+// Wolf mode played from a first-person perspective (2026-09-14, explicit
+// user request; camera REDESIGNED same day -- see kWolfCameraHeightUnits's
+// own comment further down for why this no longer tracks Midna's own head).
+//
+// isFirstPerson() above already returns false unconditionally for
+// checkWolf() -- Wolf Link's own head/rig was never designed to be viewed
+// from inside (see its own comment) -- so this is checked entirely INSIDE
+// that already-established third-person fallback, not a change to
+// isFirstPerson() itself: getVrCameraEyeAnchor() substitutes the elevated
+// wolf-center anchor for the usual flatscreen third-person eye only when
+// this returns true, everything else (tracked hands/items, Link's own
+// face/hat/arm hiding -- none of which apply to Wolf Link's model anyway)
+// is completely untouched.
+//
+// Scoped to ORDINARY wolf gameplay only, same reasoning as every other
+// first-person carve-out in this file: excluded while any event is running
+// (checkEventRun()) so wolf cutscenes/dialogue keep the already-proven
+// third-person fallback rather than risking an unverified anchor mid-shot,
+// and excluded while the "Third Person" VR setting is on (matches how that
+// setting already forces third-person everywhere else -- see
+// isFirstPerson()'s own comment on it) so turning it on still means "always
+// third person," wolf included, not "except when riding as a wolf."
+inline bool isWolfFirstPersonView(daAlink_c* link) {
+    if (!link || !link->checkWolf()) return false;
+    if (dusk::getSettings().game.vrThirdPerson.getValue()) return false;
+    if (link->checkEventRun()) return false;
+    return true;
+}
+
+// Midna full hide, round 6 of this same feature (2026-09-15) -- per
+// explicit user request ("Can you just hide her entirely and not show her
+// hands") after round 5's diagnostic capture came back inconclusive for
+// the narrower "hide head+eye, keep hands visible" approach: it PROVED the
+// hide() call was correctly setting J3DShpFlag_Visible on the right,
+// distinct shape object every single time (5/5 real-frame checks, ptr
+// stable and matching the shape table's own entry) -- yet the user still
+// saw her whole body, meaning something ELSE most likely re-shows it
+// later the same frame/tick (the exact same "one-shot toggle silently
+// reversed" class of risk hideArmsAndEars()'s own header comment already
+// warns about for Link, just for a not-yet-identified piece of daMidna_c's
+// own per-tick logic on mpShadowModel specifically). Rather than keep
+// chasing that per-shape mystery, this round drops per-shape hiding
+// entirely and just hides every whole MODEL involved in her draw path --
+// same hideModel()/J3DShapeTable::hide() mechanism already proven working
+// for the mask, applied to everything instead of one material.
+//
+// Covers every model daMidna_c::draw() can submit while she's actually
+// visible: for the shadow/imp form (mpModel == NULL, what's active during
+// ordinary wolf riding) that's mpShadowModel itself, mpShadowMaskBmd,
+// mpShadowHandsBmd (a SEPARATE model for her hands, distinct from
+// mpShadowModel's own hand materials -- confirmed by reading draw()'s
+// else-branch directly: mHandsInvModel wraps mpShadowHandsBmd and draws
+// it UNCONDITIONALLY, no flag guard at all, so this was very plausibly
+// the actual "hands" (and part of the "whole body") the user kept
+// seeing regardless of what round 5 did to mpShadowModel's own materials),
+// mpShadowHairhandBmd, and mpGokouBmd (the glow halo, also drawn
+// unconditionally in that branch). The "real body" form's own
+// counterparts (mpModel/mpHandsBmd/mpHairhandBmd/mpMaskBmd) are hidden
+// too, defensively, in case she's ever in that form while riding
+// (checkMidnaRealBody()/darkworld edge case) -- hideModel() already
+// null-checks, so this is harmless when any of these are NULL (the
+// common case for the "real body" set during ordinary wolf gameplay).
+//
+// ROUND 7 (2026-09-15, user report: "shes hidden, but I can still see her
+// ponytail, the one that moves and is used to grab onto stuff" --
+// i.e. her hair-hand grab ability): re-reading daMidna_c::initMidnaModel()
+// (d_a_midna.cpp) found that mpModel/mpMaskBmd/mpHandsBmd/mpHairhandBmd
+// (the "real body" set already hidden above) are themselves just aliases
+// assigned FROM daAlink_c's OWN mpWlMidnaModel/mpWlMidnaMaskModel/
+// mpWlMidnaHandModel/mpWlMidnaHairModel (link->getMidnaModel()/
+// getMidnaMaskModel()/getMidnaHandModel()/getMidnaHairHandModel(), all
+// already public on daAlink_c -- confirmed via d_a_alink_wolf.inc, where
+// they're set up once when entering wolf form) -- and per
+// getMidnaModel()'s own body, that alias returns NULL only during a brief
+// clothes-change-wait window, meaning the "real body" set is very likely
+// what's ACTUALLY active/drawn during ordinary wolf gameplay, not the
+// shadow/imp set section 4-6 of this feature's history focused on. Since
+// body/mask/hands from that same "real body" set DID hide successfully
+// per the user's own report, but hairhand specifically didn't, this round
+// hides link's own mpWlMidnaHairModel DIRECTLY (not just through
+// daMidna_c's own possibly-stale/aliased mpHairhandBmd pointer) as a
+// belt-and-suspenders fix -- cheap and harmless regardless of whether an
+// aliasing gap turns out to be the real explanation. The other three
+// (getMidnaModel()/getMidnaMaskModel()/getMidnaHandModel()) are hidden
+// the same direct way too, for the same reason.
+inline void hideMidnaEntirely(daAlink_c* link, daMidna_c* midna) {
+    if (midna) {
+        hideModel(midna->getShadowModel());
+        hideModel(midna->getMaskModel());
+        hideModel(midna->getShadowMaskModel());
+        hideModel(midna->getShadowHandsModel());
+        hideModel(midna->getShadowHairhandModel());
+        hideModel(midna->getGokouModel());
+        hideModel(midna->getBodyModel());
+        hideModel(midna->getHandsModel());
+        hideModel(midna->getHairhandModel());
+    }
+    if (link) {
+        hideModel(link->getMidnaModel());
+        hideModel(link->getMidnaMaskModel());
+        hideModel(link->getMidnaHandModel());
+        hideModel(link->getMidnaHairHandModel());
+    }
+}
+
+inline void showMidnaEntirely(daAlink_c* link, daMidna_c* midna) {
+    if (midna) {
+        showModel(midna->getShadowModel());
+        showModel(midna->getMaskModel());
+        showModel(midna->getShadowMaskModel());
+        showModel(midna->getShadowHandsModel());
+        showModel(midna->getShadowHairhandModel());
+        showModel(midna->getGokouModel());
+        showModel(midna->getBodyModel());
+        showModel(midna->getHandsModel());
+        showModel(midna->getHairhandModel());
+    }
+    if (link) {
+        showModel(link->getMidnaModel());
+        showModel(link->getMidnaMaskModel());
+        showModel(link->getMidnaHandModel());
+        showModel(link->getMidnaHairHandModel());
+    }
+}
+
 // Distinguishes a genuine scripted CUTSCENE (dEvt_type_OTHER_e/
 // COMPULSORY_e) from plain dialogue (dEvt_type_TALK_e -- already handled
 // separately via getMode()==dEvt_mode_TALK_e above) and from door/
@@ -1418,6 +1544,26 @@ inline void updateFrame(const FrameInput& input) {
             showModel(link->mpLinkFaceModel);
             showModel(link->mpLinkHatModel);
             showArmsAndEars(link);
+        }
+    }
+
+    // Wolf-mode first-person: hide Midna entirely while riding and not
+    // currently "called up" -- see hideMidnaEntirely()'s own comment above
+    // for the round-by-round history and why this is a persistent
+    // whole-model toggle (run every real frame, same "outfit-branch logic
+    // can silently reverse a one-shot toggle" reasoning as the face/hat/
+    // arm block above) rather than a per-shape hide or the earlier,
+    // reverted whole-draw()-skip approach. Runs even if her own daMidna_c*
+    // actor doesn't exist yet/at all -- hideMidnaEntirely()/
+    // showMidnaEntirely() also toggle link's OWN mpWlMidna* models
+    // directly (round 7), independent of her actor.
+    {
+        daMidna_c* midna = daPy_py_c::getMidnaActor();
+        const bool calledUp = midna && midna->checkCalledUp();
+        if (isWolfFirstPersonView(link) && !calledUp) {
+            hideMidnaEntirely(link, midna);
+        } else {
+            showMidnaEntirely(link, midna);
         }
     }
 
@@ -2812,6 +2958,34 @@ inline cXyz s_eyeAnchorCurr{};
 inline bool s_eyeAnchorValid = false;
 inline uint64_t s_lastSeenSimTick = 0;
 
+// Wolf-mode first-person camera (2026-09-14, REDESIGNED same day -- see
+// isWolfFirstPersonView()'s own comment for why this no longer tracks
+// Midna's own head) -- a completely separate prev/curr/valid/
+// lastSeenSimTick set from the human-form one above, since Wolf Link's
+// root position (current.pos, updated once per sim tick same as human
+// current.pos) is read through this same smoothing pipeline independently
+// of whichever human-form anchor happens to be active at the time.
+// Reuses the SAME technique (see getVrCameraEyeAnchor()'s own comment
+// block a few hundred lines down) rather than inventing a new one, but
+// deliberately not sharing state with the human-form copy, so switching
+// between human first-person and wolf first-person can't ever lerp FROM
+// one's stale anchor TOWARD the other's.
+inline cXyz s_wolfEyeAnchorPrev{};
+inline cXyz s_wolfEyeAnchorCurr{};
+inline bool s_wolfEyeAnchorValid = false;
+inline uint64_t s_lastSeenWolfSimTick = 0;
+
+// Fixed height above Wolf Link's own root/center (current.pos.y) the
+// camera sits at -- roughly where Midna usually rides on his back, raised
+// further so the camera clears his own body/head geometry (explicit user
+// request: "elevated so the camera is above him"). An untested starting
+// guess, not derived from any real joint/rig measurement -- this project's
+// usual pattern for a brand-new camera-height constant (see
+// kHorseCameraUpUnits/kCoreAnchorHeightOffsetDefault's own history) is to
+// pick a plausible value, ship it, and retune from real in-headset
+// feedback rather than trying to derive it exactly up front.
+inline constexpr float kWolfCameraHeightUnits = 120.0f;
+
 // Camera-only 6DOF positional tracking (2026-09-11) -- see
 // settings.h's vrPositionalTracking/vrPositionalTrackingRadius comments
 // for the feature description. s_headPosCalibrationRef is the real-world
@@ -3459,6 +3633,46 @@ inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye,
         // standing somewhere else before a cutscene) into the next
         // first-person session.
         detail::s_headPosCalibrated = false;
+
+        // Wolf-mode first-person camera (2026-09-14, REDESIGNED same day --
+        // see isWolfFirstPersonView()'s own comment for why). Anchors to
+        // Wolf Link's own root/center position (current.pos -- the same
+        // physics-driven value his body mesh is placed from, not an
+        // animated joint that bobs with his gait), raised by a fixed
+        // kWolfCameraHeightUnits so the camera clears his body/head and
+        // sits roughly where Midna usually rides, per the user's own
+        // description. Uses the exact same prev/curr-snapshot-and-lerp-
+        // with-extrapolation technique as the human-form anchor below (own,
+        // separate state -- see detail::s_wolfEyeAnchorPrev's comment).
+        // Deliberately does NOT try to also emulate the human anchor's
+        // core-anchor/6DOF/hunch-clearance machinery -- a plain fixed-
+        // height offset was what was asked for; revisit if in-headset
+        // testing says a calibrated/adjustable height is needed instead.
+        if (isWolfFirstPersonView(link)) {
+            const uint64_t wolfSimTick = dusk::frame_interp::sim_tick_seq();
+            cXyz freshWolfEye = link->current.pos;
+            freshWolfEye.y += detail::kWolfCameraHeightUnits;
+
+            if (!detail::s_wolfEyeAnchorValid) {
+                detail::s_wolfEyeAnchorPrev = freshWolfEye;
+                detail::s_wolfEyeAnchorCurr = freshWolfEye;
+                detail::s_wolfEyeAnchorValid = true;
+                detail::s_lastSeenWolfSimTick = wolfSimTick;
+            } else if (wolfSimTick != detail::s_lastSeenWolfSimTick) {
+                detail::s_wolfEyeAnchorPrev = detail::s_wolfEyeAnchorCurr;
+                detail::s_wolfEyeAnchorCurr = freshWolfEye;
+                detail::s_lastSeenWolfSimTick = wolfSimTick;
+            }
+
+            const float wolfStep = dusk::frame_interp::get_interpolation_step();
+            return detail::lerpXyz(detail::s_wolfEyeAnchorPrev, detail::s_wolfEyeAnchorCurr,
+                                    wolfStep + detail::kEyeAnchorExtrapolationGain);
+        }
+        // Not (or no longer) in wolf first-person view -- recalibrate fresh
+        // next time it activates rather than lerping from a stale position
+        // (same reasoning as every other recalibration reset in this
+        // branch).
+        detail::s_wolfEyeAnchorValid = false;
         return fallbackEye;
     }
 

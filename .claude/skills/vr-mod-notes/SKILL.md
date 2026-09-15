@@ -12570,3 +12570,461 @@ mid-investigation (e.g. after a closed/reopened prompt) cannot tell "fix
 landed, disable is stale" apart from "fix was tried and rejected, decision
 already made" from the code alone — both look identical in a diff. This bit
 us once already on the shadow-stretching guard (see #1).
+
+### Wolf mode played from a first-person perspective — REDESIGNED 2026-09-14, built, NOT yet tested in-headset
+
+**Goal** (explicit user request): originally "put the camera where midna's
+head is and hide her head while you are transformed into a wolf" —
+instead of Wolf Link always falling back to third-person (section 11's
+original, still-standing reasoning: Wolf Link's own rig/head joint was
+never designed to be viewed from inside), give VR wolf mode a real
+first-person camera.
+
+**Round 1 (same day, SUPERSEDED — kept here for the record, not the
+current design): anchor to Midna's own head, hide only her mask.**
+`daMidna_c` (`d_a_midna.cpp`/`.h`) exposes her own head/eye position via
+`eyePos` (a public `fopAc_ac_c` base-class field, recomputed every sim
+tick in `setBodyPartPos()` from her `JNT_HEAD` joint, the same "read a
+joint-attached world position once per tick" shape as Link's own head
+anchor). Anchored the VR camera there (with the usual prev/curr-
+snapshot-and-extrapolation smoothing), and hid her existing
+`FLG1_NO_MASK_DRAW`-gated face/mask model every frame while in ordinary
+wolf gameplay. **User tested: "It technically works but didn't hide her
+head at all."** `FLG1_NO_MASK_DRAW` only ever gated her separate face/
+mask overlay (`mpMaskBmd`/`mpShadowMaskBmd`) — her hair/skull/horns are
+baked into `mpShadowModel`'s own mesh with no existing toggle, so the
+camera ended up sitting inside a head that was still mostly there.
+
+**Round 2 (same day, CURRENT DESIGN), per explicit user follow-up**: "How
+about we take a different approach - while in gameplay hide midna
+entirely and anchor the camera to wolf link's center, where midna usually
+sits, but elevated so the camera is above him. that way it works for
+sections without her and sections with her. however when i call up midna
+by pressing her button she should be visible." Two deliberate
+simplifications over round 1: the camera no longer depends on Midna's own
+joint data at all (works even in any hypothetical wolf section without
+her), and instead of trying to hide just her head, she's hidden
+COMPLETELY (sidesteps round 1's whole "hair/skull have no toggle"
+problem) — visible again only while she's actively summoned.
+
+**`isWolfFirstPersonView(daAlink_c*)`** (`vr_link_visibility.hpp`,
+renamed from round 1's `isWolfMidnaView` — same gating logic, minus the
+now-unneeded `getMidnaActor() != nullptr` requirement): true only for
+ordinary wolf GAMEPLAY — `link->checkWolf()`, `!link->checkEventRun()`
+(wolf cutscenes/dialogue keep the existing, already-proven third-person
+fallback), and the "Third Person" VR setting OFF (matches that setting's
+existing "always third-person" contract). Checked entirely INSIDE
+`getVrCameraEyeAnchor()`'s existing `!isFirstPerson(link)` branch, same
+as round 1 — `isFirstPerson()` itself is untouched.
+
+**Camera anchor**: `link->current.pos` (Wolf Link's own physics-driven
+root/center — NOT his animated head joint; `daAlink_c::setBodyPartPos()`'s
+wolf branch, confirmed by reading it, sets `field_0x3768`/
+`getSubjectEyePos()` from an animated `JNT` 4-relative offset that would
+bob/lurch with his gait, the same class of comfort problem section 23
+already fixed once for human first-person) raised by a fixed
+`kWolfCameraHeightUnits = 120.0f` (untested starting guess, not derived
+from any rig measurement — this project's usual "ship a plausible
+constant, retune from real feedback" pattern, same as
+`kHorseCameraUpUnits`/`kCoreAnchorHeightOffsetDefault`'s own history).
+Own, fully independent prev/curr/valid/lastSeenSimTick smoothing state
+(`detail::s_wolfEyeAnchorPrev/Curr/Valid/s_lastSeenWolfSimTick`) —
+separate from both the human-form anchor's copy AND round 1's now-removed
+Midna-specific one, same "can't ever lerp from one anchor's stale value
+toward another's" reasoning as always. Deliberately does NOT layer on the
+core-anchor/6DOF/hunch-clearance machinery the human anchor has grown —
+a plain fixed-height offset was what was asked for.
+
+**Hiding her entirely**: a real draw-call skip in `daMidna_c::draw()`
+itself (`d_a_midna.cpp`), not a shape/flag toggle — same shape as the
+"Hide Body" VR setting's `daAlink_c::modelDraw()` skip. New
+`daMidna_c::checkCalledUp()` (`d_a_midna.h`) exposes her existing
+`field_0x84e` state machine as a single bool — that field walks
+`0 → 1 → 2 → 3 → 4 → 5` and back through her whole appear/talk/shrink-away
+sequence, driven by `eventInfo.checkCommandTalk()` (the actual "player
+pressed her talk/call button" signal — confirmed by reading
+`daMidna_c::execute()` directly, not guessed) and sits at `0` any time
+she's just idly riding. New `dusk::vr::isWolfMidnaHidden(daAlink_c*, bool
+midnaCalledUp)` (`vr_link_visibility.hpp`, thin-forwarded via
+`vr_main.hpp`/`.cpp` so `d_a_midna.cpp` doesn't need this file's heavier
+includes) = `isWolfFirstPersonView(link) && !midnaCalledUp` — hidden
+while in wolf first-person UNLESS she's actively called up, matching the
+request exactly.
+
+Gated in `draw()` on `isEyePassOpen()`, NOT the broader
+`isRenderingToHeadset()` — per this project's own standing lesson (see
+the minimap black-screen fix, and section 20's whole hand/body-lag saga):
+an actor's `draw()` runs from TWO places, the real per-eye
+`cAPIGph_Painter()`/`fpcM_DrawIterater()` traversal AND the legacy
+once-per-sim-tick `fapGm_Execute()` path, and `isRenderingToHeadset()`
+can't tell them apart (it's true for the whole VR frame). Gating on
+`isEyePassOpen()` skips her only during the real render; the legacy
+pass's otherwise-harmless (discarded, never-presented) draw work — and
+any other real side effect `draw()` might have (shadow registration,
+etc.) — is left alone rather than risked.
+
+**Build note**: hit and fixed a real, unrelated stray-keystroke
+corruption in `d_a_alink.cpp` while building round 1 (`coIt nst s16
+freshHeadYawS` where `const s16 freshHeadYawS` should be) — the exact
+CLAUDE.md-documented pattern, restored the line; not caused by, or
+related to, this feature's own changes.
+
+**Round 2 in-headset result: camera anchor untested/not reported, but
+"she didn't hide in the gameplay" — the full-draw-skip approach failed.**
+Diagnosed (not yet independently confirmed via a real capture, but
+consistent with everything this project already knows about this actor
+framework — see section 20's whole hand/body-lag saga): an actor's
+`draw()` runs from MULTIPLE call sites per real VR frame, not just the
+one the `isEyePassOpen()` gate was written for. Specifically,
+`vr_main.cpp`'s `tick()` has a SEPARATE, earlier
+`fpcM_DrawIterater((fpcM_DrawIteraterFunc)fpcM_Draw)` call (added for the
+HUD-billboard content-timing fix, section 7) that runs BEFORE
+`g_duskVREyePassOpen` is ever set true — and it calls the exact same
+`fpcM_Draw` dispatcher the real per-eye traversal uses, so it very
+plausibly submits real 3D draw work for every actor (Midna included), not
+just refreshes 2D HUD state as its own comment implies. A per-call-site
+early-return has to correctly identify EVERY such call site to reliably
+hide something; this project has been burned by exactly that class of gap
+before (section 20).
+
+**Round 3 (same day) — REDESIGNED again, per direct user follow-up
+("what are some ways... to 100% hide her head and mask but leave her
+body?" → "lets try option 1"): replaced the whole-draw()-skip with a
+persistent per-shape/material hide, exactly mirroring how Link's own
+arm/ear hiding already works, and now leaves her body always visible
+(a deliberate simplification over round 2's "hide entirely" design) —
+built, NOT yet tested in-headset.**
+
+**Why this sidesteps round 2's whole failure class**: `hideModel()`/
+`showModel()` (`vr_link_visibility.hpp`, already used for Link's face/
+hat) and `J3DShape::hide()`/`show()` (already used for Link's arms/ears)
+toggle PERSISTENT state on the shared `J3DModelData`/`J3DShapeTable`
+resource itself — not a per-call decision at all. Once set, ANY
+subsequent `draw()` call, from ANY call site (the pre-eye-loop pass, the
+real per-eye pass, the legacy `fapGm_Execute()` pass — doesn't matter
+which), respects it. This is exactly why Link's own face/hat/arm hiding
+has always worked reliably despite never being gated on
+`isEyePassOpen()` at all — called unconditionally every real frame from
+`updateFrame()`, same as this.
+
+**New `hideMidnaHead(daMidna_c*)`/`showMidnaHead(daMidna_c*)`**
+(`vr_link_visibility.hpp`), called from `updateFrame()` every real frame,
+gated on `isWolfFirstPersonView(link) && !midna->checkCalledUp()` (same
+condition round 2's removed `isWolfMidnaHidden()` used, just applied to a
+narrower target now):
+- Mask (`mpMaskBmd`/`mpShadowMaskBmd`) — a separate `J3DModel`, same as
+  Link's face/hat — hidden/shown wholesale via the existing
+  `hideModel()`/`showModel()` helpers. No material dump needed for this
+  half; both models were private fields with no existing getter, so
+  three new read-only accessors (`getShadowModel()`/`getMaskModel()`/
+  `getShadowMaskModel()`) were added to `daMidna_c` (`d_a_midna.h`).
+- Head/hair/horns — NOT a separate model, baked into `mpShadowModel`
+  itself alongside her torso/arms/legs, same situation Link's own
+  arm/ear hiding had to solve for `mpLinkModel` (see
+  `kArmEarMaterialIndices`'s own history, including two real
+  `[dusk::vr::...mats]` capture rounds for Hero's Clothes and Ordon
+  Clothes). Real shape indices for Midna's head aren't known yet —
+  `kMidnaHeadShapeIndices` is still a placeholder (`{-1}`, a deliberate
+  no-op sentinel: `static_cast<u16>(-1)` wraps to 65535, always
+  out-of-range, so the hide/show loops touch nothing until real indices
+  replace it). `logMidnaShapeNamesOnce(J3DModel*)` dumps every material
+  name on `mpShadowModel` via `[dusk::vr::midnamats]` the first time
+  she's ever hidden in wolf first-person — same one-shot-log-then-fill-
+  in-real-indices workflow already used twice for Link.
+
+**Current, intentional partial state**: the mask hides correctly, but her
+head/hair/horns geometry stays fully visible until a real capture comes
+back and the placeholder indices get filled in — this is the safer thing
+to ship than guessing indices and risking hiding the wrong (possibly
+body) shapes.
+
+**Build notes, round 3**: two real compile errors caught and fixed before
+this landed clean — (1) `mpModel`/`mpShadowModel`/`mpMaskBmd`/
+`mpShadowMaskBmd` are all PRIVATE on `daMidna_c` (an earlier read of the
+header had looked at the field list without noticing the `private:`
+specifier a few lines above it) — fixed by adding the three accessors
+listed above instead of reaching into the fields directly; (2)
+`constexpr int kMidnaHeadShapeIndices[] = {};` doesn't compile (MSVC:
+"cannot allocate an array of constant size 0") — C++ doesn't allow a
+truly empty array — fixed with the `{-1}` sentinel described above rather
+than special-casing an empty array at every call site.
+
+**Built successfully** (RelWithDebInfo) — `include/d/actor/d_a_midna.h`,
+`src/d/actor/d_a_midna.cpp`, `src/dusk/vr/vr_link_visibility.hpp` (via
+`vr_main.cpp`) recompiled, clean link, no new warnings. `vr_main.hpp`/
+`.cpp`'s round-2 `isWolfMidnaHidden()` thin-forward was removed this
+round (no longer called from anywhere) — those two files are back to
+their pre-this-feature content, confirmed via `git diff` showing no
+changes to either.
+
+**Round 4 (2026-09-15) — real `[dusk::vr::midnamats]` capture came back,
+real indices filled in, built, NOT yet tested in-headset.**
+
+Capture: her shadow-form mesh (`mpShadowModel`) has only FOUR materials
+total, and — the real finding — her head/hair/horns are NOT split out
+from the rest of her body at all:
+```
+0 md_body_m_v    -- torso, arms, legs, AND head/hair/horns, one merged mesh
+1 md_handLA_m_v  -- left hand
+2 md_handRA_m_v  -- right hand
+3 s_md_eye_m_v   -- eye glow
+```
+So the original "100% hide head, keep body" ask turned out to be
+impossible via per-shape hiding for THIS model — there's no shape
+boundary anywhere near head-vs-body (presumably an art choice: she's a
+low-detail silhouette in shadow form, nothing needed splitting out for
+texture reasons the way Link's own materials did). Presented this finding
+to the user directly (via a real options question) rather than guessing
+which tradeoff they'd want. **Explicit choice: hide body+head (material
+0) AND the eye glow (material 3, part of her face) every frame while in
+wolf first-person and not called up, leave ONLY her two hand materials
+(1, 2) visible** — `kMidnaHeadShapeIndices` (`vr_link_visibility.hpp`)
+filled in as `{0, 3}`, replacing the `{-1}` no-op placeholder. Net visual
+result: floating hands with no visible torso/head while just riding,
+mask hidden the same as before; everything (including body/head) shows
+normally once she's called up, same as before.
+
+**Built successfully** (RelWithDebInfo) — only `vr_main.cpp`
+(transitively includes the header) recompiled, clean link, no new
+warnings.
+
+**NOT yet tested in-headset.** Next step for whoever picks this up:
+transform into Wolf Link during ordinary gameplay (not a cutscene) and
+confirm (a) the camera anchor (still untested from round 2 — see
+`kWolfCameraHeightUnits`, `vr_link_visibility.hpp`, for the one tunable
+constant if the height feels wrong), (b) her body+head+eye+mask are all
+hidden while just riding normally, leaving only her two hands visible
+(the user's explicit choice — not a bug if it looks sparse/floating), (c)
+pressing her talk/call button brings everything back for the duration of
+that interaction, then hides again once it ends. Also worth re-confirming
+(d) the "Third Person" VR setting still forces the old third-person wolf
+view (Midna fully visible, matching vanilla) when turned on, and (e)
+wolf cutscenes/dialogue are unaffected the same way. If the "floating
+hands" look turns out to read badly in practice, the two real fallbacks
+already discussed with the user are hiding her entirely (material 0/1/2/3
+all hidden, same reliable persistent-state mechanism) or leaving her
+fully visible and dropping the hide feature -- both are one-line changes
+to `kMidnaHeadShapeIndices`/the hideMidnaHead()-vs-hideModel(mpShadowModel)
+call, not a redesign.
+
+**Round 5 (2026-09-15) — round 4 tested, per-material hide of body/eye
+had NO effect at all ("I can still see her whole body but not her mask.
+shes not hidden") despite the mask hiding correctly via the exact same
+underlying `J3DShape::hide()`. Real diagnostic added instead of guessing
+a second workaround blind — built, awaiting one more capture.**
+
+Confirmed along the way (not the bug, ruled out): `J3DShape::hide()`/
+`show()` have counterintuitively-named semantics in the SDK header
+(`hide()` SETS `J3DShpFlag_Visible`, `show()` CLEARS it) — confusing, but
+consistent with how `hideArmsAndEars()` and everything else in this file
+already uses it, so not itself the cause.
+
+Also confirmed in the base game's OWN code (`d_a_midna.cpp`, e.g.
+`mpShadowLeftHandShape = modelData->getMaterialNodePointer(1)->getShape();`
+at her own `create()`) that indices 1/2 (hands) on `mpShadowModel`
+genuinely resolve via this exact `getMaterialNodePointer(idx)->getShape()`
+mechanism and are actively hidden/shown by her own per-tick hand-shape
+logic (`setBodyPartMatrix()`) — so the general technique is proven valid
+on this exact model, just apparently not working for index 0 specifically
+in our own code.
+
+**Diagnostic added** (`logMidnaShapeNamesOnce()`/`hideMidnaHead()`,
+`vr_link_visibility.hpp`): (1) `getShapeNum()` logged alongside
+`getMaterialNum()` — shapes and materials are separately-tracked tables
+(`J3DModelData.h`) and COULD differ in count, in which case
+`getMaterialNodePointer(idx)->getShape()` may not correspond 1:1 with the
+real shape-table index the way assumed; (2) every raw shape-table entry's
+pointer (`getShapeNodePointer(i)` for `i` in `[0, shapeNum)`) logged
+alongside each material's `->getShape()` result, to cross-check whether
+material 0 resolves to a distinct, valid shape or something unexpected
+(null, or the same shape another index also points at); (3) capped to the
+first 5 real-frame calls to `hideMidnaHead()`, logs whether
+`checkFlag(J3DShpFlag_Visible)` reads true immediately after calling
+`hide()` on each configured index — settles directly whether the flag is
+even being set on the object we think we're hiding, vs. something else
+re-showing it later the same frame/tick.
+
+Built successfully (RelWithDebInfo) — only `vr_main.cpp` (transitively
+includes the header) recompiled, clean link, no new warnings.
+
+**Concrete next step**: reproduce (transform into a wolf, look at her
+body) and paste back the `[dusk::vr::midnamats]` and
+`[dusk::vr::midnahide]` lines from the Output window. Branch on what they
+show: if `shapeNum != matNum` or material 0's `viaMaterialShape` is null
+or matches another index's pointer, that's a real material/shape
+correspondence bug — the fix would be switching to direct
+`getShapeNodePointer(idx)` (shape-table index) instead of going through
+the material; if `flagSetAfterHide=1` for index 0 but she's still visible
+in-headset, the flag IS being set correctly and something else must be
+clearing it again later the same tick (not yet identified) — would need
+tracing what else touches `mpShadowModel`'s shapes between our call and
+the real draw, not another blind fix.
+
+**Round 6 (2026-09-15) — real capture came back inconclusive-but-
+informative (the flag really was being set correctly, every time), user
+simplified the ask ("Can you just hide her entirely and not show her
+hands") rather than chase the mystery further. Dropped per-shape hiding
+entirely for a whole-model hide — built, NOT yet tested in-headset.**
+
+Capture confirmed `flagSetAfterHide=1` for both index 0 (body) and index
+3 (eye) on all 5 logged real-frame calls, `shapeNum == matNum == 4` with
+a clean, stable 1:1 pointer correspondence between materials and shapes
+(no null, no aliasing). So the round-5 diagnostic PROVED the hide() call
+itself was landing correctly and staying set at the moment we checked it
+— the remaining, not-yet-identified explanation has to be something else
+re-showing shape 0 LATER the same frame/tick (our check only ever reads
+the flag immediately after we ourselves set it, so it can't distinguish
+"stays hidden" from "gets shown again a moment later" — a real gap in
+that diagnostic's own design, noted for next time this pattern is
+needed). Also separately noticed while re-reading `draw()`'s shadow-form
+branch for this round: `mpShadowHandsBmd` (via `mHandsInvModel`) is a
+COMPLETELY SEPARATE model from `mpShadowModel`'s own hand materials,
+drawn UNCONDITIONALLY with no flag guard at all — very plausibly the
+actual "hands" (and part of the "whole body" impression) the user kept
+seeing regardless of whatever round 5 did to `mpShadowModel`'s own
+materials, since nothing before this round had ever touched it.
+
+**Fix**: replaced `hideMidnaHead()`/`showMidnaHead()` (per-shape,
+abandoned) with `hideMidnaEntirely()`/`showMidnaEntirely()`
+(`vr_link_visibility.hpp`) — plain `hideModel()`/`showModel()` (the
+SAME whole-shape-table mechanism already proven reliable for the mask)
+applied to every model her `draw()` can submit while visible: for the
+shadow/imp form (`mpModel == NULL`, active during ordinary wolf riding)
+that's `mpShadowModel`, `mpShadowMaskBmd`, `mpShadowHandsBmd` (the
+separate hands model identified above), `mpShadowHairhandBmd`, and
+`mpGokouBmd` (the glow halo, also drawn unconditionally in that branch);
+the "real body" form's own counterparts (`mpModel`/`mpHandsBmd`/
+`mpHairhandBmd`/`mpMaskBmd`) are hidden too, defensively, for the
+`checkMidnaRealBody()`/darkworld edge case — `hideModel()` already
+null-checks, harmless when those are NULL (the common case while riding
+as a wolf). Six new read-only accessors added to `daMidna_c`
+(`getBodyModel()`/`getHandsModel()`/`getShadowHandsModel()`/
+`getHairhandModel()`/`getShadowHairhandModel()`/`getGokouModel()`,
+`d_a_midna.h`) alongside the three already added in round 4 — all were
+private fields with no existing getter.
+
+All of round 5's diagnostic scaffolding (`kMidnaHeadShapeIndices`,
+`logMidnaShapeNamesOnce()`, the `[dusk::vr::midnamats]`/
+`[dusk::vr::midnahide]` logging, the now-unused `JUTNameTab.h` include)
+was removed outright rather than kept around — the per-shape approach
+it was investigating is fully abandoned this round, not paused.
+
+**Built successfully** (RelWithDebInfo) — `include/d/actor/d_a_midna.h`,
+`src/dusk/vr/vr_link_visibility.hpp` (via `vr_main.cpp`) recompiled,
+clean link, no new warnings.
+
+**NOT yet tested in-headset.** Next step for whoever picks this up:
+transform into Wolf Link during ordinary gameplay (not a cutscene) and
+confirm she's now fully invisible while just riding (torso, head, hands,
+glow — everything), and that pressing her talk/call button brings all of
+it back for the duration of that interaction. Also worth re-confirming
+the camera anchor itself (still untested from round 2 — see
+`kWolfCameraHeightUnits`, `vr_link_visibility.hpp`, for the one tunable
+constant if the height feels wrong) and that the "Third Person" VR
+setting / wolf cutscenes/dialogue are still unaffected (Midna fully
+visible in both, matching vanilla), same as every earlier round's own
+checklist.
+
+**Round 7 (2026-09-15) — round 6 tested, body/mask/hands/glow all
+confirmed hidden ("shes hidden"), but her hair-hand grab appendage
+("the one that moves and is used to grab onto stuff") still showed.
+Real architectural finding while investigating, fix built, NOT yet
+tested in-headset.**
+
+Re-reading `daMidna_c::initMidnaModel()` found that `mpModel`/`mpMaskBmd`/
+`mpHandsBmd`/`mpHairhandBmd` (her "real body" model set, already covered
+by round 6's hide) are themselves just ALIASES assigned from `daAlink_c`'s
+own `mpWlMidnaModel`/`mpWlMidnaMaskModel`/`mpWlMidnaHandModel`/
+`mpWlMidnaHairModel` fields (via the already-public
+`getMidnaModel()`/`getMidnaMaskModel()`/`getMidnaHandModel()`/
+`getMidnaHairHandModel()` accessors on `daAlink_c`, set up once in
+`d_a_alink_wolf.inc` when entering wolf form). `getMidnaModel()`'s own
+body returns `NULL` only during a brief clothes-change-wait window,
+which means the "real body" set (not the shadow/imp set sections 4-6 of
+this feature spent most of their effort on) is very likely what's
+ACTUALLY drawn during ordinary wolf gameplay -- consistent with round 6
+succeeding on body/mask/hands (all in that same "real body" set) while
+the still-broken piece (hairhand) is the one member of that set this
+round found reason to distrust the aliasing on.
+
+**Fix**: `hideMidnaEntirely()`/`showMidnaEntirely()`
+(`vr_link_visibility.hpp`) now take `daAlink_c* link` as well as
+`daMidna_c* midna`, and additionally hide/show `link->getMidnaModel()`/
+`getMidnaMaskModel()`/`getMidnaHandModel()`/`getMidnaHairHandModel()`
+DIRECTLY -- not just through `daMidna_c`'s own (possibly stale/aliased)
+`mpModel`/`mpMaskBmd`/`mpHandsBmd`/`mpHairhandBmd` pointers. Belt-and-
+suspenders: cheap and harmless regardless of whether an aliasing gap
+turns out to be the real explanation for the ponytail specifically.
+`updateFrame()`'s call site (`vr_link_visibility.hpp`) was restructured
+to call hide/show UNCONDITIONALLY (previously wrapped in `if (midna)`,
+which would have skipped touching `link`'s own models entirely on any
+frame her actor didn't exist) -- `calledUp` is now computed as
+`midna && midna->checkCalledUp()` (false, i.e. "hide", whenever her
+actor doesn't exist) so the link-side hide still runs even before/if her
+own actor is ever created, matching the original "works for sections
+without her" design goal from round 2.
+
+**Built successfully** (RelWithDebInfo) — only `vr_main.cpp`
+(transitively includes the header) recompiled, clean link, no new
+warnings.
+
+**NOT yet tested in-headset.** Next step for whoever picks this up:
+transform into Wolf Link during ordinary gameplay and confirm her
+hair-hand appendage is now hidden along with everything else round 6
+already confirmed working, and that it (along with everything else)
+correctly reappears when she's called up. If it's STILL visible after
+this round, the aliasing theory is wrong and the real "moving ponytail"
+model hasn't been found yet -- would need a real debugger session
+(break on whatever draws it, check the Call Stack/read its `this`
+pointer/model identity directly) rather than a fourth guess at which
+field name might be it, per this project's own standing practice once
+guessing has failed more than once or twice.
+
+**Round 8 (2026-09-15) — round 7 tested, ponytail still visible ("I can
+still see the ponytail"). Per the round-7 commitment, did NOT guess a
+fifth model-pointer blind -- instrumented the two actual candidate draw
+call sites directly instead. Built, awaiting one more capture.**
+
+Three `[dusk::vr::midnahairdiag]` logs added to `d_a_midna.cpp`'s
+`draw()` (each capped to the first 5 real hits, harmless on flatscreen
+too so no VR gate needed):
+1. Right after `dComIfGd_setListDark()` (before the real-body/shadow
+   branch split): logs `mpModel`, `FLG0_NO_DRAW`, and
+   `FLG1_SHADOW_MODEL_DRAW_DEMO_FORCE` -- settles which top-level branch
+   (real-body vs. shadow/imp) is genuinely active while riding, which
+   round 7's whole fix assumed from reading `initMidnaModel()` rather
+   than confirming directly.
+2. At the REAL-BODY hairhand draw site: logs `mpHairhandBmd` alongside
+   `link->getMidnaHairHandModel()` AT THAT EXACT MOMENT (direct aliasing
+   check, replacing round 7's build-time assumption), whether shape 0's
+   `J3DShpFlag_Visible` reads hidden right there (did `hideMidnaEntirely()`'s
+   hide() call actually survive to this point), and whether the
+   `FLG1_UNK_40 | FLG1_UNK_10` gate is even letting this branch draw at
+   all.
+3. Same shape, for the SHADOW-form hairhand draw site
+   (`mpShadowHairhandBmd`, gated on `FLG1_UNK_40` alone).
+
+Built successfully (RelWithDebInfo) — only `d_a_midna.cpp` recompiled,
+clean link, no new warnings.
+
+**Concrete next step**: reproduce (wolf form, look at the ponytail) and
+paste back every `[dusk::vr::midnahairdiag]` line. Branch on what they
+show: if `mpModel` is null (log 1), the shadow-form branch is what's
+active and round 7's real-body-side fix was never reachable in the first
+place -- the shadow-form log (3) is what matters, and if ITS
+`hiddenFlag` also reads 1 despite the ponytail showing, that's now a
+THIRD confirmed case (after round 5's body/eye) of "flag correctly set,
+still visible" for this specific model family, strong enough evidence to
+stop trusting `hideModel()`/shape-flag hiding for Midna's models
+entirely and move to the debugger/RenderDoc escalation already flagged
+in round 7's own writeup; if `match=0` in log 2, the aliasing theory
+was simply wrong (two genuinely different objects) and hiding
+`link->getMidnaHairHandModel()` was never going to help -- the REAL
+object is still unidentified and needs a debugger breakpoint on this
+exact draw call to find; if `gateBlocked=1` on both branches (2 and 3)
+every time, NEITHER draw call is ever actually firing for the ponytail
+at all, meaning it's rendered by something else entirely (a real
+possibility already flagged: this project's own `hsChainShape_c`
+precedent shows at least one other Wolf-Link-adjacent system draws via
+raw immediate-mode GX calls rather than a J3DModel, which would explain
+why no shape-hide of any kind has worked on it).

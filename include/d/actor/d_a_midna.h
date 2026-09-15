@@ -372,6 +372,35 @@ public:
 
     void setShadowReturn() { field_0x84e = 4; }
 
+    // Added 2026-09-14 for the VR wolf-first-person feature (see
+    // hideMidnaHead()/showMidnaHead() in vr_link_visibility.hpp).
+    // field_0x84e walks 0 -> 1 -> 2 -> 3 -> 4 -> 5 and back through her whole appear/
+    // talk/shrink-away sequence (driven by eventInfo.checkCommandTalk() --
+    // the player pressing her talk/call button -- confirmed by reading
+    // execute() directly, not guessed) and sits at 0 the rest of the time,
+    // i.e. exactly "idle/riding, not currently summoned."
+    bool checkCalledUp() const { return field_0x84e != 0; }
+
+    // Read-only accessors for the VR wolf-first-person full hide
+    // (hideMidnaEntirely()/showMidnaEntirely(), vr_link_visibility.hpp) --
+    // all private fields, no existing public getter for any of them.
+    // Covers every model daMidna_c::draw() can submit while riding in
+    // shadow/imp form (mpModel stays NULL there) -- mpShadowModel itself,
+    // her separate hands/hairhand/mask models, and the glow halo
+    // (mpGokouBmd) -- plus the "real body" form's own counterparts
+    // (mpModel/mpHandsBmd/mpHairhandBmd) defensively, in case she's ever
+    // in that form while riding (checkMidnaRealBody()/darkworld edge
+    // case, not confirmed reachable during ordinary wolf gameplay).
+    J3DModel* getShadowModel() const { return mpShadowModel; }
+    J3DModel* getMaskModel() const { return mpMaskBmd; }
+    J3DModel* getShadowMaskModel() const { return mpShadowMaskBmd; }
+    J3DModel* getBodyModel() const { return mpModel; }
+    J3DModel* getHandsModel() const { return mpHandsBmd; }
+    J3DModel* getShadowHandsModel() const { return mpShadowHandsBmd; }
+    J3DModel* getHairhandModel() const { return mpHairhandBmd; }
+    J3DModel* getShadowHairhandModel() const { return mpShadowHairhandBmd; }
+    J3DModel* getGokouModel() const { return mpGokouBmd; }
+
     bool checkPortalObjRide() const {
         return checkStateFlg0(FLG0_PORTAL_OBJ_CALL) && checkStateFlg0(FLG0_UNK_200);
     }

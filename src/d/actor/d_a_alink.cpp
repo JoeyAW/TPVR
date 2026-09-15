@@ -19053,7 +19053,7 @@ int daAlink_c::execute() {
     // body be forced to face the headset right now" -- see that shared
     // function's own comment for exactly why each state is excluded.
     if (dusk::vr::isRenderingToHeadset() && dusk::vr::isVrForcingBodyYawToHeadset(this)) {
-        coIt nst s16 freshHeadYawS = dusk::vr::getHeadMoveAngleS();
+        const s16 freshHeadYawS = dusk::vr::getHeadMoveAngleS();
         // ROOT CAUSE (found 2026-09-11 via a real debugger session):
         // setMatrix() already ran earlier THIS SAME execute() call (see its
         // call sites above in this function) and baked mpLinkModel's actual

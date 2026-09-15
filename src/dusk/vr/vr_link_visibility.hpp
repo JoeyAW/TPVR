@@ -1115,6 +1115,24 @@ inline void hideMidnaEntirely(daAlink_c* link, daMidna_c* midna) {
     }
 }
 
+// True whenever Midna is off Wolf Link's back for ANY reason, not just
+// "called up" to talk. checkCalledUp() (field_0x84e's own narrow 0->5
+// appear/talk/return cycle) alone missed two real gameplay cases the user
+// reported still seeing her invisible in: the very first time you meet
+// her, waiting outside the jail cell (a FLG0_TAG_WAIT point, never called
+// up at all), and the wolf-tag jump-point mechanic where she floats up
+// high and you jump to her (the FLG0_UNK_100/checkMidnaLockJumpPoint()
+// branch in checkMidnaPosState()). Both of those -- along with her death
+// animations and various cutscene demo-positioning modes -- set the base
+// game's own broader FLG0_WOLF_NO_POS flag (checkWolfNoPos(): "her
+// position isn't currently being driven by riding on his back") even
+// though she's never been called up via her talk button. ORing the two
+// together covers every known off-the-back case instead of just the
+// call-up one.
+inline bool isMidnaOffWolfBack(daMidna_c* midna) {
+    return midna && (midna->checkCalledUp() || midna->checkWolfNoPos());
+}
+
 inline void showMidnaEntirely(daAlink_c* link, daMidna_c* midna) {
     if (midna) {
         showModel(midna->getShadowModel());
@@ -1548,7 +1566,7 @@ inline void updateFrame(const FrameInput& input) {
     }
 
     // Wolf-mode first-person: hide Midna entirely while riding and not
-    // currently "called up" -- see hideMidnaEntirely()'s own comment above
+    // currently off his back -- see hideMidnaEntirely()'s own comment above
     // for the round-by-round history and why this is a persistent
     // whole-model toggle (run every real frame, same "outfit-branch logic
     // can silently reverse a one-shot toggle" reasoning as the face/hat/
@@ -1557,10 +1575,13 @@ inline void updateFrame(const FrameInput& input) {
     // actor doesn't exist yet/at all -- hideMidnaEntirely()/
     // showMidnaEntirely() also toggle link's OWN mpWlMidna* models
     // directly (round 7), independent of her actor.
+    // "off his back" = isMidnaOffWolfBack() (see its own comment) --
+    // broadened from just checkCalledUp() to also cover FLG0_WOLF_NO_POS,
+    // per user report of still seeing her invisible outside the intro
+    // jail cell and during the wolf-tag jump-point mechanic.
     {
         daMidna_c* midna = daPy_py_c::getMidnaActor();
-        const bool calledUp = midna && midna->checkCalledUp();
-        if (isWolfFirstPersonView(link) && !calledUp) {
+        if (isWolfFirstPersonView(link) && !isMidnaOffWolfBack(midna)) {
             hideMidnaEntirely(link, midna);
         } else {
             showMidnaEntirely(link, midna);

@@ -999,8 +999,16 @@ void daMidna_c::setBodyPartMatrix() {
     // different, decoupled cadence -- fragile by construction, the same
     // class of race this project's own history has hit repeatedly).
     daAlink_c* link = daAlink_getAlinkActorClass();
+    // 2026-09-15 follow-up: broadened from !checkCalledUp() to
+    // !isMidnaOffWolfBack(this), matching the whole-model hide/show gate
+    // in vr_link_visibility.hpp -- otherwise this hair-hand-specific guard
+    // would stay hidden (FLG0_WOLF_NO_POS cases like the jail-cell wait or
+    // the jump-point mechanic) while the rest of her was shown by the
+    // broadened gate, reintroducing the exact "one piece keeps fighting
+    // back" mismatch rounds 6-9 already fixed, just in reverse.
     const bool vrHairHandHidden = dusk::vr::isRenderingToHeadset() &&
-                                   dusk::vr::isWolfFirstPersonView(link) && !checkCalledUp();
+                                   dusk::vr::isWolfFirstPersonView(link) &&
+                                   !dusk::vr::isMidnaOffWolfBack(this);
 
     if (mpHandsBmd != NULL) {
         mpHandsBmd->setBaseTRMtx(mpShadowModel->getBaseTRMtx());

@@ -495,6 +495,10 @@ bool isWolfFirstPersonView(daAlink_c* link) {
     return vr_link::isWolfFirstPersonView(link);
 }
 
+bool isMidnaOffWolfBack(daMidna_c* midna) {
+    return vr_link::isMidnaOffWolfBack(midna);
+}
+
 bool shouldTrackHookshotToHand(daAlink_c* link) {
     return vr_link::shouldTrackHookshotToHand(link);
 }

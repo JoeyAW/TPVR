@@ -13,6 +13,7 @@
 
 class J3DModel;
 class daAlink_c;
+class daMidna_c;
 
 namespace dusk::vr {
 
@@ -392,6 +393,19 @@ bool isVrFirstPerson(daAlink_c* link);
 // what hideMidnaEntirely() already set) while genuinely in this mode,
 // rather than trying to out-race the competing writer from VR code.
 bool isWolfFirstPersonView(daAlink_c* link);
+
+// Thin forward to vr_link::isMidnaOffWolfBack(midna) (vr_link_visibility.hpp)
+// -- 2026-09-15 follow-up to the above, same day. checkCalledUp() alone
+// (her narrow "called up to talk" field_0x84e state machine) missed two
+// real gameplay cases the user reported seeing her invisible in: the very
+// first time you meet her, waiting outside the jail cell (a FLG0_TAG_WAIT
+// point, not a call-up), and the wolf-tag jump-point mechanic where she
+// floats up high and you jump to her (FLG0_UNK_100/checkMidnaLockJumpPoint()
+// branch). Both of those set the base game's own broader
+// FLG0_WOLF_NO_POS flag ("her position isn't being driven by riding on
+// his back", checkWolfNoPos()) even though she's never been called up.
+// This ORs the two together so VR shows her whenever EITHER is true.
+bool isMidnaOffWolfBack(daMidna_c* midna);
 
 // Thin forward to vr_link::shouldTrackHookshotToHand(link)
 // (vr_link_visibility.hpp) -- see that function's own comment for the

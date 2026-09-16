@@ -1,15 +1,91 @@
 // vr_xr_bootstrap.hpp
 //
-// Minimal OpenXR instance/system/graphics-requirements bootstrap for the
-// D3D12 path, plus XR-side D3D12 device + session creation.
+// Minimal OpenXR instance/system/graphics-requirements bootstrap, plus
+// XR-side graphics device + session creation. Two graphics backends live
+// side by side here, selected by DUSK_VR_XR_GRAPHICS_VULKAN: D3D12 (PC,
+// SteamVR/Virtual Desktop/Meta Link) and Vulkan (Android/Quest). Function
+// and type names are identical across both branches so vr_main.cpp doesn't
+// need to know which one it's linked against.
 //
-// Architecture decision (confirmed this session, see VR_MOD_HANDOFF_2.md):
-// this is "outcome 2" -- Aurora's Dawn device is independent of the XR
-// runtime's required adapter, so we create a SEPARATE ID3D12Device here
-// for the XR session, and share textures across devices via
-// wgpu::SharedTextureMemory + fence sync (see vr_xr_submit.hpp).
+// Architecture decision for the D3D12 path (confirmed this session, see
+// VR_MOD_HANDOFF_2.md): this is "outcome 2" -- Aurora's Dawn device is
+// independent of the XR runtime's required adapter, so we create a
+// SEPARATE ID3D12Device here for the XR session, and share textures across
+// devices via wgpu::SharedTextureMemory + fence sync (see vr_xr_submit.hpp).
+//
+// The Vulkan branch below is an UNVERIFIED PROTOTYPE (2026-09-16), written
+// against the OpenXR 1.0 spec text for XR_KHR_vulkan_enable2,
+// XR_KHR_android_create_instance, and XR_KHR_loader_init_android, and NOT
+// compiled -- there's no Android NDK on this machine, so this file has
+// never gone through a compiler for the Vulkan branch. Treat struct/field
+// names as best-effort from spec knowledge, not confirmed against the
+// vendored headers the way the D3D12 path's own bottom comment already
+// flags for itself. If/when this actually gets configured against the
+// Android toolchain, paste the first compile error rather than have
+// anything here re-guessed blind.
+//
+// Still unwritten after this prototype: vr_xr_submit.hpp's readbackEyeCopy()
+// (the D3D12 CopyTextureRegion/upload-heap path) has no Vulkan equivalent
+// yet, and vr_stereo_render.hpp still assumes XrSwapchainImageD3D12KHR.
+// Neither is touched by this change. This file alone getting a Vulkan
+// XrSession doesn't make vr_main.cpp buildable for Android yet.
+//
+// Also NOT done yet (CMakeLists.txt's Dusklight VR fragment still hard
+// `return()`s on `if (NOT WIN32)`, deliberately untouched this pass --
+// see the comment there): defining XR_USE_GRAPHICS_API_VULKAN=1 and
+// XR_USE_PLATFORM_ANDROID=1 before this header is included (openxr_platform.h
+// gates every Vulkan/Android struct used above behind those two macros --
+// without them this file won't even declare the types it uses), and
+// sourcing an OpenXR loader .so for Android (nothing in this repo fetches
+// one today; the existing find_package(OpenXR)/vcpkg path is Windows-only).
 
 #pragma once
+
+#if defined(TARGET_ANDROID) || defined(__ANDROID__) || defined(ANDROID)
+#define DUSK_VR_XR_GRAPHICS_VULKAN 1
+#else
+#define DUSK_VR_XR_GRAPHICS_VULKAN 0
+#endif
+
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+
+// Vulkan + Android headers MUST come before openxr_platform.h, same
+// ordering requirement as the D3D12 branch below (openxr_platform.h uses
+// VkInstance/VkPhysicalDevice/VkDevice etc. without including them itself
+// when XR_USE_GRAPHICS_API_VULKAN is defined). jni.h/SDL_system.h are for
+// xrInitializeLoaderKHR and XrInstanceCreateInfoAndroidKHR below, which
+// both need the JavaVM/Activity the SDL Android shell already owns --
+// same SDL_GetAndroidJNIEnv()/SDL_GetAndroidActivity() pattern already
+// used in dusk/android_frame_rate.cpp and dusk/http/android.cpp.
+#include <vulkan/vulkan.h>
+#include <jni.h>
+#include <SDL3/SDL_system.h>
+
+#include <openxr/openxr.h>
+#include <openxr/openxr_platform.h>  // XrGraphicsRequirementsVulkanKHR, XrGraphicsBindingVulkanKHR
+#include <cstdint>
+#include <cstring>
+#include <iterator>  // std::size(requiredExtensions) in initialize() below
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+namespace vr_xr {
+
+struct Bootstrap {
+    XrInstance instance = XR_NULL_HANDLE;
+    XrSystemId systemId = XR_NULL_SYSTEM_ID;
+    XrGraphicsRequirementsVulkanKHR vulkanRequirements{XR_TYPE_GRAPHICS_REQUIREMENTS_VULKAN_KHR};
+
+    // KHR extension functions aren't statically exported by the loader -
+    // they're loaded manually via xrGetInstanceProcAddr below.
+    PFN_xrGetVulkanGraphicsRequirements2KHR xrGetVulkanGraphicsRequirements2KHR_ = nullptr;
+    PFN_xrCreateVulkanInstanceKHR xrCreateVulkanInstanceKHR_ = nullptr;
+    PFN_xrGetVulkanGraphicsDevice2KHR xrGetVulkanGraphicsDevice2KHR_ = nullptr;
+    PFN_xrCreateVulkanDeviceKHR xrCreateVulkanDeviceKHR_ = nullptr;
+};
+
+#else
 
 // Windows and D3D12 headers MUST come before openxr_platform.h.
 // openxr_platform.h uses ID3D12Device*, LUID, IUnknown etc. without
@@ -43,11 +119,116 @@ struct Bootstrap {
     PFN_xrGetD3D12GraphicsRequirementsKHR xrGetD3D12GraphicsRequirementsKHR_ = nullptr;
 };
 
+#endif  // DUSK_VR_XR_GRAPHICS_VULKAN
+
 inline void checkResult(XrResult result, const char* what) {
     if (XR_FAILED(result)) {
         throw std::runtime_error(std::string("OpenXR call failed: ") + what);
     }
 }
+
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+
+// Creates the XrInstance with the Vulkan + Android-create-instance
+// extensions enabled, resolves the HMD system, and queries the Vulkan API
+// version range the active runtime requires.
+//
+// Android has no equivalent of desktop's well-known loader search paths
+// (registry keys / /usr paths), so xrInitializeLoaderKHR() MUST run before
+// xrCreateInstance() or the loader has no way to find the installed
+// runtime at all -- this is the Android-specific step the D3D12/desktop
+// branch doesn't need. It's resolved via xrGetInstanceProcAddr(XR_NULL_HANDLE,
+// ...) since, by definition, no XrInstance exists yet to resolve it against.
+inline Bootstrap initialize() {
+    JNIEnv* env = static_cast<JNIEnv*>(SDL_GetAndroidJNIEnv());
+    if (env == nullptr) {
+        throw std::runtime_error("SDL_GetAndroidJNIEnv() returned null");
+    }
+    JavaVM* vm = nullptr;
+    env->GetJavaVM(&vm);
+    jobject activity = static_cast<jobject>(SDL_GetAndroidActivity());
+    if (activity == nullptr) {
+        throw std::runtime_error("SDL_GetAndroidActivity() returned null");
+    }
+
+    PFN_xrInitializeLoaderKHR xrInitializeLoaderKHR_ = nullptr;
+    checkResult(
+        xrGetInstanceProcAddr(XR_NULL_HANDLE, "xrInitializeLoaderKHR",
+                               reinterpret_cast<PFN_xrVoidFunction*>(&xrInitializeLoaderKHR_)),
+        "xrGetInstanceProcAddr(xrInitializeLoaderKHR)");
+
+    XrLoaderInitInfoAndroidKHR loaderInitInfo{XR_TYPE_LOADER_INIT_INFO_ANDROID_KHR};
+    loaderInitInfo.applicationVM = vm;
+    loaderInitInfo.applicationContext = activity;
+    checkResult(
+        xrInitializeLoaderKHR_(
+            reinterpret_cast<const XrLoaderInitInfoBaseHeaderKHR*>(&loaderInitInfo)),
+        "xrInitializeLoaderKHR");
+
+    Bootstrap boot;
+
+    const char* requiredExtensions[] = {
+        XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME,
+        XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME,
+    };
+
+    XrInstanceCreateInfoAndroidKHR androidInfo{XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR};
+    androidInfo.applicationVM = vm;
+    androidInfo.applicationActivity = activity;
+
+    XrInstanceCreateInfo instanceInfo{XR_TYPE_INSTANCE_CREATE_INFO};
+    instanceInfo.next = &androidInfo;
+    instanceInfo.enabledExtensionCount =
+        static_cast<uint32_t>(std::size(requiredExtensions));
+    instanceInfo.enabledExtensionNames = requiredExtensions;
+    std::strncpy(instanceInfo.applicationInfo.applicationName, "Dusklight VR",
+                 XR_MAX_APPLICATION_NAME_SIZE - 1);
+    instanceInfo.applicationInfo.applicationVersion = 1;
+    // Same reasoning as the D3D12 branch's identical line: request 1.0
+    // explicitly rather than XR_CURRENT_API_VERSION. UNVERIFIED for Meta's
+    // Android runtime specifically -- the desktop runtimes' 1.0-only
+    // ceiling was confirmed in-headset (2026-07-30), this one hasn't been.
+    instanceInfo.applicationInfo.apiVersion = XR_API_VERSION_1_0;
+
+    checkResult(xrCreateInstance(&instanceInfo, &boot.instance), "xrCreateInstance");
+
+    XrSystemGetInfo systemInfo{XR_TYPE_SYSTEM_GET_INFO};
+    systemInfo.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
+    checkResult(xrGetSystem(boot.instance, &systemInfo, &boot.systemId), "xrGetSystem");
+
+    checkResult(
+        xrGetInstanceProcAddr(boot.instance, "xrGetVulkanGraphicsRequirements2KHR",
+                               reinterpret_cast<PFN_xrVoidFunction*>(
+                                   &boot.xrGetVulkanGraphicsRequirements2KHR_)),
+        "xrGetInstanceProcAddr(xrGetVulkanGraphicsRequirements2KHR)");
+    checkResult(
+        xrGetInstanceProcAddr(boot.instance, "xrCreateVulkanInstanceKHR",
+                               reinterpret_cast<PFN_xrVoidFunction*>(
+                                   &boot.xrCreateVulkanInstanceKHR_)),
+        "xrGetInstanceProcAddr(xrCreateVulkanInstanceKHR)");
+    checkResult(
+        xrGetInstanceProcAddr(boot.instance, "xrGetVulkanGraphicsDevice2KHR",
+                               reinterpret_cast<PFN_xrVoidFunction*>(
+                                   &boot.xrGetVulkanGraphicsDevice2KHR_)),
+        "xrGetInstanceProcAddr(xrGetVulkanGraphicsDevice2KHR)");
+    checkResult(
+        xrGetInstanceProcAddr(boot.instance, "xrCreateVulkanDeviceKHR",
+                               reinterpret_cast<PFN_xrVoidFunction*>(
+                                   &boot.xrCreateVulkanDeviceKHR_)),
+        "xrGetInstanceProcAddr(xrCreateVulkanDeviceKHR)");
+
+    checkResult(
+        boot.xrGetVulkanGraphicsRequirements2KHR_(boot.instance, boot.systemId,
+                                                    &boot.vulkanRequirements),
+        "xrGetVulkanGraphicsRequirements2KHR");
+
+    // boot.vulkanRequirements.minApiVersionSupported/maxApiVersionSupported -
+    //   the Vulkan API version range createXrGraphicsDevice() below must
+    //   request, same role as d3d12Requirements.minFeatureLevel on desktop.
+    return boot;
+}
+
+#else
 
 // Creates the XrInstance with the D3D12 extension enabled, resolves the
 // HMD system, and queries the adapter LUID / minimum feature level that
@@ -96,6 +277,134 @@ inline Bootstrap initialize() {
     //   your device must support.
     return boot;
 }
+
+#endif  // DUSK_VR_XR_GRAPHICS_VULKAN
+
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+
+// --- XR-side Vulkan instance + device + session creation ---
+//
+// Whether this should end up being "outcome 2" the same way the D3D12 path
+// is (a separate VkInstance/VkDevice from whatever aurora's wgpu/Dawn
+// Vulkan backend already opened, sharing textures across devices) or
+// whether aurora's device can be reused/imported directly is an OPEN
+// QUESTION -- not resolved here, flagged in chat. This function always
+// creates a fresh XR-bound VkInstance/VkDevice via xrCreateVulkanInstanceKHR/
+// xrCreateVulkanDeviceKHR (mirrors "outcome 2" by construction, since those
+// two calls always mint new Vulkan objects), which at minimum unblocks
+// getting an XrSession. The cross-device texture-sharing equivalent of
+// vr_xr_submit.hpp's SharedTextureMemory + fence sync is unwritten.
+
+struct XrGraphicsDevice {
+    VkInstance instance = VK_NULL_HANDLE;
+    VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+    VkDevice device = VK_NULL_HANDLE;
+    uint32_t queueFamilyIndex = 0;
+    uint32_t queueIndex = 0;
+    // Fetched via vkGetDeviceQueue at the end of createXrGraphicsDevice()
+    // below -- named commandQueue (not `queue`) to match the D3D12 branch's
+    // XrGraphicsDevice::commandQueue field, since vr_main.cpp's Session
+    // construction call site (`gfx.device, gfx.commandQueue`) is shared,
+    // unbranched code.
+    VkQueue commandQueue = VK_NULL_HANDLE;
+};
+
+// Creates a VkInstance + VkDevice via XR_KHR_vulkan_enable2's
+// xrCreateVulkanInstanceKHR/xrCreateVulkanDeviceKHR, which validate and
+// mint the exact instance/device the active runtime requires (same role as
+// createXrGraphicsDevice()'s D3D12CreateDevice call against
+// boot.d3d12Requirements.adapterLuid below) and hand back both the XR
+// result and the wrapped VkResult, so a runtime-side rejection is
+// distinguishable from an XR-side one.
+inline XrGraphicsDevice createXrGraphicsDevice(const Bootstrap& boot) {
+    XrGraphicsDevice gfx;
+
+    VkApplicationInfo appInfo{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+    appInfo.pApplicationName = "Dusklight VR";
+    appInfo.applicationVersion = 1;
+    appInfo.pEngineName = "Dusklight";
+    appInfo.engineVersion = 1;
+    // Clamp to what the runtime told us it supports rather than whatever
+    // the NDK's Vulkan headers define -- same pattern as the D3D12 path
+    // using boot.d3d12Requirements.minFeatureLevel instead of a hardcoded
+    // feature level.
+    appInfo.apiVersion = boot.vulkanRequirements.minApiVersionSupported;
+
+    VkInstanceCreateInfo vkInstanceInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+    vkInstanceInfo.pApplicationInfo = &appInfo;
+
+    XrVulkanInstanceCreateInfoKHR xrInstanceCreateInfo{XR_TYPE_VULKAN_INSTANCE_CREATE_INFO_KHR};
+    xrInstanceCreateInfo.systemId = boot.systemId;
+    xrInstanceCreateInfo.pfnGetInstanceProcAddr = vkGetInstanceProcAddr;
+    xrInstanceCreateInfo.vulkanCreateInfo = &vkInstanceInfo;
+    xrInstanceCreateInfo.vulkanAllocator = nullptr;
+
+    VkResult vkInstanceResult = VK_SUCCESS;
+    checkResult(boot.xrCreateVulkanInstanceKHR_(boot.instance, &xrInstanceCreateInfo,
+                                                 &gfx.instance, &vkInstanceResult),
+                "xrCreateVulkanInstanceKHR");
+    if (vkInstanceResult != VK_SUCCESS) {
+        throw std::runtime_error(
+            "xrCreateVulkanInstanceKHR: underlying vkCreateInstance failed");
+    }
+
+    XrVulkanGraphicsDeviceGetInfoKHR deviceGetInfo{XR_TYPE_VULKAN_GRAPHICS_DEVICE_GET_INFO_KHR};
+    deviceGetInfo.systemId = boot.systemId;
+    deviceGetInfo.vulkanInstance = gfx.instance;
+    checkResult(boot.xrGetVulkanGraphicsDevice2KHR_(boot.instance, &deviceGetInfo,
+                                                      &gfx.physicalDevice),
+                "xrGetVulkanGraphicsDevice2KHR");
+
+    // Find a graphics-capable queue family -- readbackEyeCopy()'s Vulkan
+    // equivalent (unwritten, see this section's top comment) will need a
+    // command buffer submitted on it.
+    uint32_t queueFamilyCount = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(gfx.physicalDevice, &queueFamilyCount, nullptr);
+    std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+    vkGetPhysicalDeviceQueueFamilyProperties(gfx.physicalDevice, &queueFamilyCount,
+                                              queueFamilies.data());
+    gfx.queueFamilyIndex = UINT32_MAX;
+    for (uint32_t i = 0; i < queueFamilyCount; ++i) {
+        if (queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+            gfx.queueFamilyIndex = i;
+            break;
+        }
+    }
+    if (gfx.queueFamilyIndex == UINT32_MAX) {
+        throw std::runtime_error("No Vulkan queue family with VK_QUEUE_GRAPHICS_BIT found");
+    }
+
+    float queuePriority = 1.0f;
+    VkDeviceQueueCreateInfo queueCreateInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+    queueCreateInfo.queueFamilyIndex = gfx.queueFamilyIndex;
+    queueCreateInfo.queueCount = 1;
+    queueCreateInfo.pQueuePriorities = &queuePriority;
+
+    VkDeviceCreateInfo vkDeviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+    vkDeviceInfo.queueCreateInfoCount = 1;
+    vkDeviceInfo.pQueueCreateInfos = &queueCreateInfo;
+
+    XrVulkanDeviceCreateInfoKHR xrDeviceCreateInfo{XR_TYPE_VULKAN_DEVICE_CREATE_INFO_KHR};
+    xrDeviceCreateInfo.systemId = boot.systemId;
+    xrDeviceCreateInfo.pfnGetInstanceProcAddr = vkGetInstanceProcAddr;
+    xrDeviceCreateInfo.vulkanPhysicalDevice = gfx.physicalDevice;
+    xrDeviceCreateInfo.vulkanCreateInfo = &vkDeviceInfo;
+    xrDeviceCreateInfo.vulkanAllocator = nullptr;
+
+    VkResult vkDeviceResult = VK_SUCCESS;
+    checkResult(boot.xrCreateVulkanDeviceKHR_(boot.instance, &xrDeviceCreateInfo, &gfx.device,
+                                               &vkDeviceResult),
+                "xrCreateVulkanDeviceKHR");
+    if (vkDeviceResult != VK_SUCCESS) {
+        throw std::runtime_error("xrCreateVulkanDeviceKHR: underlying vkCreateDevice failed");
+    }
+
+    gfx.queueIndex = 0;
+    vkGetDeviceQueue(gfx.device, gfx.queueFamilyIndex, gfx.queueIndex, &gfx.commandQueue);
+    return gfx;
+}
+
+#else
 
 // --- XR-side D3D12 device + session creation (outcome 2: separate device
 // from Aurora's Dawn device, shared into the XR swapchain via
@@ -154,7 +463,9 @@ inline XrGraphicsDevice createXrGraphicsDevice(const Bootstrap& boot) {
     return gfx;
 }
 
-// Creates the XrSession bound to the XR-side D3D12 device above, plus the
+#endif  // DUSK_VR_XR_GRAPHICS_VULKAN
+
+// Creates the XrSession bound to the XR-side graphics device above (D3D12
 // LOCAL reference space used for tracking and a VIEW reference space used
 // as the head-center reference for per-eye stereo offsets (see
 // vr_stereo_render.hpp's eyePoseToViewMtx). dusk::vr::Session
@@ -176,9 +487,18 @@ inline XrGraphicsDevice createXrGraphicsDevice(const Bootstrap& boot) {
 // real, continuously-tracked VIEW space here fixes that at the source.
 inline XrSession createXrSession(const Bootstrap& boot, const XrGraphicsDevice& gfx,
                                   XrSpace* outLocalSpace, XrSpace* outViewSpace) {
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+    XrGraphicsBindingVulkanKHR binding{XR_TYPE_GRAPHICS_BINDING_VULKAN_KHR};
+    binding.instance = gfx.instance;
+    binding.physicalDevice = gfx.physicalDevice;
+    binding.device = gfx.device;
+    binding.queueFamilyIndex = gfx.queueFamilyIndex;
+    binding.queueIndex = gfx.queueIndex;
+#else
     XrGraphicsBindingD3D12KHR binding{XR_TYPE_GRAPHICS_BINDING_D3D12_KHR};
     binding.device = gfx.device.Get();
     binding.queue = gfx.commandQueue.Get();
+#endif
 
     XrSessionCreateInfo sessionInfo{XR_TYPE_SESSION_CREATE_INFO};
     sessionInfo.next = &binding;

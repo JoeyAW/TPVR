@@ -644,7 +644,15 @@ bool startup() {
         g_leftHandPath = handActions.leftHandPath;
         g_rightHandPath = handActions.rightHandPath;
 
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+        // Vulkan's Session constructor takes the whole XrGraphicsDevice
+        // (needs gfx.physicalDevice + gfx.queueFamilyIndex too, not just
+        // device/queue -- see vr_xr_submit.hpp's Session constructor
+        // comment) rather than the D3D12 branch's two decomposed ComPtrs.
+        g_ownedSession = std::make_unique<Session>(boot.instance, boot.systemId, session, localSpace, gfx);
+#else
         g_ownedSession = std::make_unique<Session>(boot.instance, boot.systemId, session, localSpace, gfx.device, gfx.commandQueue);
+#endif
         // Real "is this SteamVR" signal for Session::effectiveGammaExponent()
         // -- see isSteamVr_'s own comment (vr_xr_submit.hpp) for why this can
         // no longer be inferred from which swapchain format ended up chosen.

@@ -833,14 +833,34 @@ install_bundled_mods()
 #        vr_xr_submit.hpp
 #      And create src/dusk/vr/vr_main.cpp (the frame-loop integration,
 #      not yet written — see the comment at the bottom of this file).
+#
+# PREREQUISITES (Android/Quest, in addition to the above):
+#
+#   1. OpenXR loader for Android
+#      Download Meta's OpenXR Mobile SDK (https://developer.oculus.com/downloads/package/oculus-openxr-mobile-sdk/),
+#      extract it, and set OPENXR_MOBILE_SDK_DIR in your cmake configure or
+#      CMakePresets.json:
+#        "OPENXR_MOBILE_SDK_DIR": "C:/path/to/ovr_openxr_mobile_sdk"
+#      This section expects that SDK's published layout
+#      (OpenXR/Include, OpenXR/Libs/Android/<abi>/Release/libopenxr_loader.so)
+#      -- UNVERIFIED against whatever version you actually download; adjust
+#      the paths below if Meta has since restructured the package.
+#
+#   2026-09-16 UNVERIFIED PROTOTYPE: this Android branch has never been run
+#   through cmake configure (no Android NDK on the machine that wrote it).
+#   vr_xr_submit.hpp and vr_stereo_render.hpp are also still D3D12-only, so
+#   even once this configures clean, target_sources(dusklight ...) below
+#   will fail to COMPILE on Android until those two get their own Vulkan
+#   branches. This section only gets OpenXR+Vulkan themselves configured
+#   and linkable.
 # ============================================================
 
-# --- Guard: Windows-only for now ---
-# The D3D12 / DXGI shared-handle path in vr_xr_submit.hpp is Windows-specific.
-# Vulkan + Linux support can be added later by adding a second submit backend
-# (vr_xr_submit_vulkan.hpp) and selecting via cmake option.
-if (NOT WIN32)
-    message(STATUS "Dusklight VR: skipping — Windows only for now")
+# --- Guard: Windows or Android only for now ---
+# The D3D12 / DXGI shared-handle path in vr_xr_submit.hpp is Windows-specific,
+# and vr_xr_bootstrap.hpp's Vulkan branch is Android-specific (see its own
+# top comment) -- no other platform has either wired up.
+if (NOT WIN32 AND NOT ANDROID)
+    message(STATUS "Dusklight VR: skipping — Windows/Android only for now")
     return()
 endif ()
 
@@ -857,32 +877,69 @@ message(STATUS "Dusklight VR: configuring")
 # 1. Find OpenXR
 # ============================================================
 
-# Try vcpkg / system find_package first, then fall back to a manual SDK path.
-find_package(OpenXR CONFIG QUIET)
-
-if (NOT OpenXR_FOUND)
-    # Manual SDK path: set OPENXR_SDK_DIR in cmake configure or environment.
-    if (DEFINED ENV{OPENXR_SDK_DIR})
-        set(OPENXR_SDK_DIR "$ENV{OPENXR_SDK_DIR}")
+if (ANDROID)
+    # Meta's Mobile SDK ships a prebuilt loader .so per ABI rather than a
+    # CMake config package, so there's no find_package() to try first here
+    # (unlike the Windows vcpkg path below). Manual SDK path only.
+    if (DEFINED ENV{OPENXR_MOBILE_SDK_DIR} AND NOT DEFINED OPENXR_MOBILE_SDK_DIR)
+        set(OPENXR_MOBILE_SDK_DIR "$ENV{OPENXR_MOBILE_SDK_DIR}")
     endif ()
 
-    if (OPENXR_SDK_DIR)
-        message(STATUS "Dusklight VR: using OpenXR SDK at ${OPENXR_SDK_DIR}")
+    if (OPENXR_MOBILE_SDK_DIR)
+        set(_xr_android_lib
+            "${OPENXR_MOBILE_SDK_DIR}/OpenXR/Libs/Android/${ANDROID_ABI}/Release/libopenxr_loader.so")
+        if (NOT EXISTS "${_xr_android_lib}")
+            message(WARNING
+                "Dusklight VR: expected OpenXR loader at ${_xr_android_lib} "
+                "but it doesn't exist. UNVERIFIED path layout (see this "
+                "section's prerequisites comment above) -- Meta may have "
+                "restructured the SDK package since this was written. "
+                "Building without VR support.")
+            return()
+        endif ()
+        message(STATUS "Dusklight VR: using OpenXR Mobile SDK at ${OPENXR_MOBILE_SDK_DIR}")
         add_library(OpenXR::openxr_loader SHARED IMPORTED)
         set_target_properties(OpenXR::openxr_loader PROPERTIES
-            IMPORTED_IMPLIB   "${OPENXR_SDK_DIR}/lib/openxr_loader.lib"
-            IMPORTED_LOCATION "${OPENXR_SDK_DIR}/bin/openxr_loader.dll"
+            IMPORTED_LOCATION "${_xr_android_lib}"
         )
         target_include_directories(OpenXR::openxr_loader INTERFACE
-            "${OPENXR_SDK_DIR}/include"
+            "${OPENXR_MOBILE_SDK_DIR}/OpenXR/Include"
         )
     else ()
         message(WARNING
-            "Dusklight VR: OpenXR SDK not found. "
-            "Install via vcpkg (vcpkg install openxr-loader:x64-windows) "
-            "or set OPENXR_SDK_DIR to the SDK root. "
+            "Dusklight VR: OPENXR_MOBILE_SDK_DIR not set. Download Meta's "
+            "OpenXR Mobile SDK and set OPENXR_MOBILE_SDK_DIR to its root. "
             "Building without VR support.")
         return()
+    endif ()
+else ()
+    # Try vcpkg / system find_package first, then fall back to a manual SDK path.
+    find_package(OpenXR CONFIG QUIET)
+
+    if (NOT OpenXR_FOUND)
+        # Manual SDK path: set OPENXR_SDK_DIR in cmake configure or environment.
+        if (DEFINED ENV{OPENXR_SDK_DIR})
+            set(OPENXR_SDK_DIR "$ENV{OPENXR_SDK_DIR}")
+        endif ()
+
+        if (OPENXR_SDK_DIR)
+            message(STATUS "Dusklight VR: using OpenXR SDK at ${OPENXR_SDK_DIR}")
+            add_library(OpenXR::openxr_loader SHARED IMPORTED)
+            set_target_properties(OpenXR::openxr_loader PROPERTIES
+                IMPORTED_IMPLIB   "${OPENXR_SDK_DIR}/lib/openxr_loader.lib"
+                IMPORTED_LOCATION "${OPENXR_SDK_DIR}/bin/openxr_loader.dll"
+            )
+            target_include_directories(OpenXR::openxr_loader INTERFACE
+                "${OPENXR_SDK_DIR}/include"
+            )
+        else ()
+            message(WARNING
+                "Dusklight VR: OpenXR SDK not found. "
+                "Install via vcpkg (vcpkg install openxr-loader:x64-windows) "
+                "or set OPENXR_SDK_DIR to the SDK root. "
+                "Building without VR support.")
+            return()
+        endif ()
     endif ()
 endif ()
 
@@ -891,6 +948,13 @@ endif ()
 #    (lives inside the aurora submodule's vendored Dawn)
 # ============================================================
 
+# WIN32-only: this is Dawn's D3D12 native backend header (ExternalImageDXGI,
+# GetD3D12Device, etc.), used by vr_xr_submit.hpp's cross-device texture
+# sharing. Android's equivalent (vr_xr_submit.hpp's still-unwritten Vulkan
+# readback path -- see vr_xr_bootstrap.hpp's top comment) would need Dawn's
+# dawn/native/VulkanBackend.h instead, once that path exists; not looked up
+# here since nothing in this prototype pass uses it yet.
+if (WIN32)
 # Aurora vendors Dawn at extern/aurora/extern/dawn (populated by submodule).
 # Aurora fetches Dawn as a prebuilt package via FetchContent.
 # The headers land in the build directory under _deps/dawn_prebuilt-src/include/
@@ -923,6 +987,9 @@ if (NOT DAWN_NATIVE_INCLUDE_DIR)
 endif ()
 
 message(STATUS "Dusklight VR: Dawn native headers at ${DAWN_NATIVE_INCLUDE_DIR}")
+else ()
+    set(DAWN_NATIVE_INCLUDE_DIR "")
+endif ()
 
 # ============================================================
 # 3. INTERFACE library: dusklight_vr
@@ -935,24 +1002,48 @@ add_library(dusklight_vr INTERFACE)
 target_include_directories(dusklight_vr INTERFACE
     # VR headers we wrote — lives next to the rest of dusk's platform code
     "${CMAKE_SOURCE_DIR}/src/dusk/vr"
+)
+if (DAWN_NATIVE_INCLUDE_DIR)
     # Dawn native D3D12 backend (for ExternalImageDXGI, GetD3D12Device, etc.)
-    "${DAWN_NATIVE_INCLUDE_DIR}"
-)
+    # -- WIN32-only, see section 2's comment above.
+    target_include_directories(dusklight_vr INTERFACE "${DAWN_NATIVE_INCLUDE_DIR}")
+endif ()
 
-target_link_libraries(dusklight_vr INTERFACE
-    OpenXR::openxr_loader
-    # D3D12 and DXGI are already available via the Windows SDK; list them
-    # explicitly so the linker finds ID3D12Device, CreateSharedHandle, etc.
-    d3d12
-    dxgi
-)
-
-target_compile_definitions(dusklight_vr INTERFACE
-    DUSK_VR_ENABLED=1
-    # Tell OpenXR platform headers to enable the D3D12 extension structs.
-    XR_USE_GRAPHICS_API_D3D12=1
-    XR_USE_PLATFORM_WIN32=1
-)
+if (ANDROID)
+    # find_package(Vulkan) resolves against the NDK's bundled Vulkan headers
+    # + libvulkan.so via the Android CMake toolchain file (same toolchain
+    # the android-arm64/android-x86_64 presets already use to build
+    # dusklight itself) -- UNVERIFIED that this resolves cleanly the first
+    # time; if it doesn't, the NDK's libvulkan.so can be linked directly
+    # (it's stable across API levels) instead of going through this module.
+    find_package(Vulkan REQUIRED)
+    target_link_libraries(dusklight_vr INTERFACE
+        OpenXR::openxr_loader
+        Vulkan::Vulkan
+    )
+    target_compile_definitions(dusklight_vr INTERFACE
+        DUSK_VR_ENABLED=1
+        # Tell OpenXR platform headers to enable the Vulkan + Android
+        # extension structs (XrGraphicsBindingVulkanKHR,
+        # XrInstanceCreateInfoAndroidKHR, XrLoaderInitInfoAndroidKHR, ...).
+        XR_USE_GRAPHICS_API_VULKAN=1
+        XR_USE_PLATFORM_ANDROID=1
+    )
+else ()
+    target_link_libraries(dusklight_vr INTERFACE
+        OpenXR::openxr_loader
+        # D3D12 and DXGI are already available via the Windows SDK; list them
+        # explicitly so the linker finds ID3D12Device, CreateSharedHandle, etc.
+        d3d12
+        dxgi
+    )
+    target_compile_definitions(dusklight_vr INTERFACE
+        DUSK_VR_ENABLED=1
+        # Tell OpenXR platform headers to enable the D3D12 extension structs.
+        XR_USE_GRAPHICS_API_D3D12=1
+        XR_USE_PLATFORM_WIN32=1
+    )
+endif ()
 
 # Require C++20 for designated initialisers ({.field = value} syntax used
 # in the VR headers). Dusklight's existing code already targets C++20 per
@@ -976,18 +1067,35 @@ target_link_libraries(dusklight PRIVATE
     dusklight_vr
 )
 
-# Copy the OpenXR loader DLL next to the dusklight executable at build time
-# so you can run from the build directory without installing.
-if (TARGET OpenXR::openxr_loader)
-    get_target_property(_xr_dll OpenXR::openxr_loader IMPORTED_LOCATION)
-    if (_xr_dll)
-        add_custom_command(TARGET dusklight POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${_xr_dll}"
-                "$<TARGET_FILE_DIR:dusklight>"
-            COMMENT "Copying openxr_loader.dll"
-        )
+if (WIN32)
+    # Copy the OpenXR loader DLL next to the dusklight executable at build
+    # time so you can run from the build directory without installing.
+    if (TARGET OpenXR::openxr_loader)
+        get_target_property(_xr_dll OpenXR::openxr_loader IMPORTED_LOCATION)
+        if (_xr_dll)
+            add_custom_command(TARGET dusklight POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${_xr_dll}"
+                    "$<TARGET_FILE_DIR:dusklight>"
+                COMMENT "Copying openxr_loader.dll"
+            )
+        endif ()
     endif ()
+elseif (ANDROID)
+    # NOT DONE: on Windows, dusklight links openxr_loader.dll directly and
+    # the POST_BUILD step above copies it next to the exe. On Android there
+    # is no equivalent step yet -- libopenxr_loader.so needs to reach
+    # platforms/android/app/src/main/jniLibs/${ANDROID_ABI}/ the same way
+    # libmain.so does via platforms/android/scripts/stage-jni-libs.sh, but
+    # that script isn't touched by this CMake fragment and wasn't edited
+    # for this prototype (its current output path assumptions weren't
+    # re-verified against what this section actually produces). Until it's
+    # updated to also stage OpenXR::openxr_loader's IMPORTED_LOCATION, the
+    # APK will be missing the loader .so even after a clean native build.
+    message(STATUS
+        "Dusklight VR: Android build won't auto-stage libopenxr_loader.so "
+        "into jniLibs yet -- see comment above. Update "
+        "platforms/android/scripts/stage-jni-libs.sh before packaging an APK.")
 endif ()
 
 message(STATUS "Dusklight VR: configured OK")

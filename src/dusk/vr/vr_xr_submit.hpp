@@ -1,32 +1,65 @@
 #pragma once
 
 // vr_xr_submit.hpp
-// XR session/swapchain management + Dawn D3D12 interop for submitting
-// rendered eye textures to the OpenXR runtime.
+// XR session/swapchain management + graphics-API interop for submitting
+// rendered eye textures to the OpenXR runtime. Two backends, selected by
+// vr_xr_bootstrap.hpp's DUSK_VR_XR_GRAPHICS_VULKAN: D3D12 (PC) and Vulkan
+// (Android/Quest, UNVERIFIED PROTOTYPE, 2026-09-16 -- see this comment's
+// end).
 //
-// FENCE SYNC: the fence-sync types are the base WebGPU-spec wgpu::SharedFence
-// family, confirmed present in dawn/webgpu_cpp.h -- NOT
-// dawn::native::d3d12::SharedFence* (that does not exist in this Dawn build;
-// D3D12Backend.h has zero fence-related exports). Actual fence *creation* is
-// plain D3D12 (ID3D12Device::CreateFence + CreateSharedHandle), done on the
-// XR-side device from vr_xr_bootstrap.hpp's createXrGraphicsDevice(). Dawn
-// only *imports* the resulting HANDLE via device.ImportSharedFence(...).
-// After EndAccess, the XR-side queue is signaled to the value Dawn reports
-// signaling, so the NEXT frame's BeginAccess wait is against real completed
-// work rather than a stale/zero value. See VR_MOD_HANDOFF_4.md for the full
-// investigation trail.
+// FENCE SYNC (D3D12 branch only): the fence-sync types are the base
+// WebGPU-spec wgpu::SharedFence family, confirmed present in
+// dawn/webgpu_cpp.h -- NOT dawn::native::d3d12::SharedFence* (that does not
+// exist in this Dawn build; D3D12Backend.h has zero fence-related exports).
+// Actual fence *creation* is plain D3D12 (ID3D12Device::CreateFence +
+// CreateSharedHandle), done on the XR-side device from
+// vr_xr_bootstrap.hpp's createXrGraphicsDevice(). Dawn only *imports* the
+// resulting HANDLE via device.ImportSharedFence(...). After EndAccess, the
+// XR-side queue is signaled to the value Dawn reports signaling, so the
+// NEXT frame's BeginAccess wait is against real completed work rather than
+// a stale/zero value. See VR_MOD_HANDOFF_4.md for the full investigation
+// trail.
+//
+// VULKAN BRANCH SCOPE (2026-09-16, unverified/uncompiled -- no Android NDK
+// on the machine that wrote it): ensureFenceSync()/importSwapchainImage()/
+// probeSwapchainImageShareable() are the abandoned cross-device
+// shared-texture-memory approach -- confirmed dead code even on the D3D12
+// branch (grepped vr_main.cpp: none of the three are called; the CPU
+// round-trip copy path below, encodeEyeCopy()/readbackEyeCopy(), is what's
+// actually wired up and confirmed working in-headset on PC). The Vulkan
+// branch only ports the CPU round-trip path and omits those three
+// entirely, rather than inventing a new Vulkan shared-memory scheme nobody
+// asked for and nothing here has tested. getD3D12DeviceAndQueue() and
+// adapterMatchesXrRequirement() (bottom of file) are similarly D3D12/DXGI-
+// specific and unused outside this file -- also D3D12-only below.
 
 #include <openxr/openxr.h>
-#include <d3d12.h>
-#include <dxgi1_4.h>
-#include <wrl/client.h>
 #include <algorithm>
+#include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <vector>
 
-#include <dawn/native/D3D12Backend.h>
 #include <webgpu/webgpu_cpp.h>
+
+#include "dusk/vr/vr_xr_bootstrap.hpp"  // DUSK_VR_XR_GRAPHICS_VULKAN, vr_xr::XrGraphicsDevice
+
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+// Already pulled in transitively via vr_xr_bootstrap.hpp above (it needs
+// vulkan.h before openxr_platform.h internally), but re-included here
+// explicitly -- same as the D3D12 branch's own re-inclusion of d3d12.h
+// below -- since this file uses raw Vulkan types/calls directly (VkBuffer,
+// vkCreateBuffer, command pools, ...), not just the XR-side structs
+// bootstrap.hpp itself needs.
+#include <vulkan/vulkan.h>
+#include <android/log.h>
+#else
+#include <d3d12.h>
+#include <dxgi1_4.h>
+#include <wrl/client.h>
+
+#include <dawn/native/D3D12Backend.h>
 
 // For aurora::webgpu::g_sharedFenceDxgiSupported -- ensureFenceSync() below
 // must check this before calling ImportSharedFence(), since Aurora's
@@ -34,11 +67,43 @@
 // requesting/using an unsupported feature) as fatal, not a recoverable one.
 // Path is relative from src/dusk/vr/vr_xr_submit.hpp to
 // extern/aurora/lib/webgpu/gpu.hpp (both confirmed paths, not guessed).
+// D3D12-only: only ensureFenceSync() (dead code, see this file's top
+// comment) reads this flag.
 #include "../../../extern/aurora/lib/webgpu/gpu.hpp"
-
-#include "dusk/vr/vr_xr_bootstrap.hpp"
+#endif
 
 namespace dusk::vr {
+
+// Portable stand-ins for OutputDebugStringA/_snprintf_s(buf, _TRUNCATE,
+// fmt, ...), used throughout this file's diagnostic logging. Android has
+// neither. Defined once, for both branches, so every call site below uses
+// one spelling regardless of platform -- the D3D12 branch's duskVrLog is a
+// trivial passthrough to the exact call this file always made.
+//
+// duskVrSnprintf reproduces _snprintf_s's own truncation-detection
+// contract exactly (return the char count written on success, -1 if it
+// didn't fit) via standard vsnprintf, since createSwapchain()'s
+// format-list loop below relies on that -1 to know when to stop
+// appending -- this is a like-for-like behavior swap on the D3D12 branch
+// too, not just an Android addition.
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+inline void duskVrLog(const char* msg) {
+    __android_log_print(ANDROID_LOG_INFO, "dusklight_vr", "%s", msg);
+}
+#else
+inline void duskVrLog(const char* msg) { OutputDebugStringA(msg); }
+#endif
+
+inline int duskVrSnprintf(char* buf, size_t cap, const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    const int n = std::vsnprintf(buf, cap, fmt, args);
+    va_end(args);
+    if (n < 0 || static_cast<size_t>(n) >= cap) {
+        return -1;
+    }
+    return n;
+}
 
 // Maps Aurora's wgpu::TextureFormat (from aurora::gfx::color_format(),
 // gfx.hpp:54) to the DXGI_FORMAT that Session::createSwapchain() needs for
@@ -51,6 +116,33 @@ namespace dusk::vr {
 // fallback -- a wrong-but-compiling format here would manifest as a
 // corrupted/black headset image that's hard to trace back to this call,
 // so fail loud at startup() instead.
+//
+// Kept named "Dxgi" on the Vulkan branch too (it returns a VkFormat, not a
+// DXGI one there) purely so vr_main.cpp's existing call site
+// (toDxgiSwapchainFormat(aurora::gfx::color_format())) doesn't need to
+// change -- same "identical names across branches" convention
+// vr_xr_bootstrap.hpp already uses throughout.
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+inline int64_t toDxgiSwapchainFormat(wgpu::TextureFormat format) {
+    switch (format) {
+        case wgpu::TextureFormat::RGBA8Unorm:
+            return VK_FORMAT_R8G8B8A8_UNORM;
+        case wgpu::TextureFormat::RGBA8UnormSrgb:
+            return VK_FORMAT_R8G8B8A8_SRGB;
+        case wgpu::TextureFormat::BGRA8Unorm:
+            return VK_FORMAT_B8G8R8A8_UNORM;
+        case wgpu::TextureFormat::BGRA8UnormSrgb:
+            return VK_FORMAT_B8G8R8A8_SRGB;
+        case wgpu::TextureFormat::RGBA16Float:
+            return VK_FORMAT_R16G16B16A16_SFLOAT;
+        default:
+            throw std::runtime_error(
+                "toDxgiSwapchainFormat: unhandled wgpu::TextureFormat from "
+                "aurora::gfx::color_format() -- add a case rather than assume "
+                "RGBA8Unorm (see VR_MOD_HANDOFF_7.md TODO list).");
+    }
+}
+#else
 inline int64_t toDxgiSwapchainFormat(wgpu::TextureFormat format) {
     switch (format) {
         case wgpu::TextureFormat::RGBA8Unorm:
@@ -70,6 +162,7 @@ inline int64_t toDxgiSwapchainFormat(wgpu::TextureFormat format) {
                 "RGBA8Unorm (see VR_MOD_HANDOFF_7.md TODO list).");
     }
 }
+#endif
 
 // Root cause of "works in Virtual Desktop, xrCreateSwapchain fails on
 // SteamVR" (confirmed 2026-07-30): different OpenXR runtimes support
@@ -130,6 +223,46 @@ inline int64_t toDxgiSwapchainFormat(wgpu::TextureFormat format) {
 // Returns 0 if `format` has no such counterpart (e.g. RGBA16Float, which
 // has neither) -- 0 signals "no fallback on this axis" to the caller
 // rather than silently guessing.
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+inline int64_t channelSwapCounterpart(int64_t format) {
+    switch (format) {
+        case VK_FORMAT_B8G8R8A8_UNORM:
+            return VK_FORMAT_R8G8B8A8_UNORM;
+        case VK_FORMAT_R8G8B8A8_UNORM:
+            return VK_FORMAT_B8G8R8A8_UNORM;
+        case VK_FORMAT_B8G8R8A8_SRGB:
+            return VK_FORMAT_R8G8B8A8_SRGB;
+        case VK_FORMAT_R8G8B8A8_SRGB:
+            return VK_FORMAT_B8G8R8A8_SRGB;
+        default:
+            return 0;
+    }
+}
+
+inline int64_t srgbToggleCounterpart(int64_t format) {
+    switch (format) {
+        case VK_FORMAT_B8G8R8A8_UNORM:
+            return VK_FORMAT_B8G8R8A8_SRGB;
+        case VK_FORMAT_B8G8R8A8_SRGB:
+            return VK_FORMAT_B8G8R8A8_UNORM;
+        case VK_FORMAT_R8G8B8A8_UNORM:
+            return VK_FORMAT_R8G8B8A8_SRGB;
+        case VK_FORMAT_R8G8B8A8_SRGB:
+            return VK_FORMAT_R8G8B8A8_UNORM;
+        default:
+            return 0;
+    }
+}
+
+// Vulkan counterpart of DXGI_FORMAT_R10G10B10A2_UNORM used below as the
+// last-resort packed-10bpc swapchain format candidate. Bit-compatible with
+// DXGI's layout (confirmed against the Vulkan spec's packed-format naming
+// rule -- components are listed MSB-first, so A2B10G10R10 places R in bits
+// 0-9, G 10-19, B 20-29, A 30-31, exactly matching DXGI_FORMAT_R10G10B10A2
+// -- so packR10G10B10A2Unorm()'s existing bit-packing below is reused
+// as-is, no separate Vulkan version needed).
+inline constexpr int64_t kPackedFallbackFormat = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+#else
 inline int64_t channelSwapCounterpart(int64_t format) {
     switch (format) {
         case DXGI_FORMAT_B8G8R8A8_UNORM:
@@ -159,6 +292,9 @@ inline int64_t srgbToggleCounterpart(int64_t format) {
             return 0;
     }
 }
+
+inline constexpr int64_t kPackedFallbackFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
+#endif
 
 // Preferred fallback over any SRGB variant (see the big comment above):
 // DXGI_FORMAT_R10G10B10A2_UNORM has no automatic gamma-decode/encode
@@ -352,6 +488,25 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 class Session {
 public:
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+    // xrGfx is the XR-bound Vulkan instance/physical device/device/queue
+    // from vr_xr::createXrGraphicsDevice -- taken as the whole struct
+    // (unlike the D3D12 branch's two separate ComPtr args below) because
+    // the Vulkan copy path also needs the physical device (memory-type
+    // queries in ensureCpuCopyBuffers()) and queue family index (the
+    // command pool in ensureCpuCopyCmdList()), not just a device/queue
+    // pair. vr_main.cpp's construction call site is branched accordingly.
+    Session(XrInstance instance, XrSystemId systemId, XrSession session, XrSpace localSpace,
+            const vr_xr::XrGraphicsDevice& xrGfx)
+        : instance_(instance),
+          systemId_(systemId),
+          session_(session),
+          localSpace_(localSpace),
+          xrPhysicalDevice_(xrGfx.physicalDevice),
+          xrDevice_(xrGfx.device),
+          xrQueue_(xrGfx.commandQueue),
+          xrQueueFamilyIndex_(xrGfx.queueFamilyIndex) {}
+#else
     // xrDevice/xrQueue are the XR-side ID3D12Device/ID3D12CommandQueue
     // (from vr_xr::createXrGraphicsDevice) -- needed here to create and
     // signal the shared fence used for cross-device sync with Dawn's device.
@@ -364,6 +519,7 @@ public:
           localSpace_(localSpace),
           xrDevice_(std::move(xrDevice)),
           xrQueue_(std::move(xrQueue)) {}
+#endif
 
     XrSession session() const { return session_; }
     XrSpace localSpace() const { return localSpace_; }
@@ -449,7 +605,7 @@ public:
             {bothSwapped, SwapchainPixelConversion::ChannelSwap},
             {nativeFormat, SwapchainPixelConversion::None},
             {channelSwapped, SwapchainPixelConversion::ChannelSwap},
-            {DXGI_FORMAT_R10G10B10A2_UNORM, SwapchainPixelConversion::PackR10G10B10A2},
+            {kPackedFallbackFormat, SwapchainPixelConversion::PackR10G10B10A2},
         };
 
         int64_t chosenFormat = 0;
@@ -464,28 +620,28 @@ public:
 
         if (chosenFormat == 0) {
             char msg[512];
-            int off = _snprintf_s(msg, _TRUNCATE,
+            int off = duskVrSnprintf(msg, sizeof(msg),
                                   "[dusk::vr] createSwapchain: none of native format %lld or its "
                                   "sRGB/channel-swap/10bpc variants supported; runtime offers:",
                                   static_cast<long long>(nativeFormat));
             for (size_t i = 0; i < supported.size() && off > 0 && off < 480; ++i) {
-                int written = _snprintf_s(msg + off, sizeof(msg) - off, _TRUNCATE, " %lld",
+                int written = duskVrSnprintf(msg + off, sizeof(msg) - off, " %lld",
                                            static_cast<long long>(supported[i]));
                 if (written < 0) break;
                 off += written;
             }
-            OutputDebugStringA(msg);
-            OutputDebugStringA("\n");
+            duskVrLog(msg);
+            duskVrLog("\n");
             return false;
         }
         if (chosenFormat != nativeFormat) {
             char msg[200];
-            _snprintf_s(msg, _TRUNCATE,
+            duskVrSnprintf(msg, sizeof(msg),
                         "[dusk::vr] createSwapchain: native format %lld not supported by this "
                         "runtime, using %lld instead (conversion=%d)\n",
                         static_cast<long long>(nativeFormat), static_cast<long long>(chosenFormat),
                         static_cast<int>(conversion));
-            OutputDebugStringA(msg);
+            duskVrLog(msg);
         }
 
         XrSwapchainCreateInfo ci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
@@ -504,8 +660,13 @@ public:
 
         swapchainDxgiFormat_ = chosenFormat;
         swapchainPixelConversion_ = conversion;
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+        swapchainIsSrgb_ = chosenFormat == VK_FORMAT_B8G8R8A8_SRGB ||
+                           chosenFormat == VK_FORMAT_R8G8B8A8_SRGB;
+#else
         swapchainIsSrgb_ = chosenFormat == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB ||
                            chosenFormat == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+#endif
         // Generalized 2026-08-16 (see kSteamVrGammaCompensationExponent's
         // comment): the GPU gamma-compensation compute pass now runs for
         // every candidate EXCEPT PackR10G10B10A2 -- the shader only ever
@@ -515,7 +676,11 @@ public:
 
         uint32_t imageCount = 0;
         xrEnumerateSwapchainImages(swapchain_, 0, &imageCount, nullptr);
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+        swapchainImages_.resize(imageCount, {XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR});
+#else
         swapchainImages_.resize(imageCount, {XR_TYPE_SWAPCHAIN_IMAGE_D3D12_KHR});
+#endif
         xrEnumerateSwapchainImages(
             swapchain_, imageCount, &imageCount,
             reinterpret_cast<XrSwapchainImageBaseHeader*>(swapchainImages_.data()));
@@ -524,6 +689,7 @@ public:
 
     XrSwapchain swapchain() const { return swapchain_; }
 
+#if !DUSK_VR_XR_GRAPHICS_VULKAN
     // Lazily creates the D3D12 fence (on the XR-side device) and imports it
     // into Dawn as a wgpu::SharedFence. Called once, on first use, from
     // importSwapchainImage(). Not done at construction time because Dawn's
@@ -662,6 +828,7 @@ public:
         pendingTextures_.push_back(sharedTex);
         return sharedTex;
     }
+#endif  // !DUSK_VR_XR_GRAPHICS_VULKAN
 
     // ------------------------------------------------------------------
     // CPU ROUND-TRIP COPY PATH (VR_MOD_HANDOFF_10 #3/#9, revised)
@@ -807,12 +974,12 @@ public:
             // every frame, that alone would fully explain "compositor sees
             // the app, submits nothing" with zero other evidence anywhere.
             char msg[256];
-            _snprintf_s(msg, _TRUNCATE,
+            duskVrSnprintf(msg, sizeof(msg),
                         "[dusk::vr] readbackEyeCopy: MapAsync failed/timed "
                         "out (mapDone=%d, mapOk=%d) -- skipping this eye's "
                         "swapchain copy\n",
                         mapDone, mapOk);
-            OutputDebugStringA(msg);
+            duskVrLog(msg);
             return;
         }
 
@@ -825,9 +992,16 @@ public:
         // per-row byte count (eyeWidth * 4) and respect each side's own
         // pitch, tracked separately in CpuCopyBuffers).
         const uint32_t rowBytes = eyeWidth * 4; // RGBA8/BGRA8 -- 4 bytes/texel
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+        // Persistently mapped in ensureCpuCopyBuffers() (HOST_COHERENT --
+        // no explicit Map()/flush needed, unlike the D3D12 upload heap's
+        // per-call Map()/Unmap() below).
+        void* uploadMapped = res.uploadMapped;
+#else
         void* uploadMapped = nullptr;
         D3D12_RANGE noRead{0, 0};
         res.uploadHeap->Map(0, &noRead, &uploadMapped);
+#endif
         // swapchainPixelConversion_ (see createSwapchain()'s comment): what
         // the runtime's actually-accepted format requires we do to the
         // bytes before upload -- otherwise this would silently corrupt
@@ -894,14 +1068,109 @@ public:
                     break;
             }
         }
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+        // Nothing to unmap -- HOST_COHERENT persistent mapping, see above.
+#else
         D3D12_RANGE written{0, static_cast<SIZE_T>(res.uploadRowPitch) * eyeHeight};
         res.uploadHeap->Unmap(0, &written);
+#endif
 
         res.readback.Unmap();
 
-        // --- Record + execute the upload heap -> swapchain image copy on
+        // --- Record + execute the upload buffer -> swapchain image copy on
         // the XR-side device/queue, offset into the correct eye's half of
         // the double-wide destination. ---
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+        vkResetCommandPool(xrDevice_, copyCmdPool_, 0);
+        VkCommandBufferBeginInfo cbBegin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        cbBegin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(copyCmdBuf_, &cbBegin);
+
+        VkImage dstImage = swapchainImages_[swapchainIndex].image;
+
+        VkImageSubresourceRange colorRange{};
+        colorRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        colorRange.baseMipLevel = 0;
+        colorRange.levelCount = 1;
+        colorRange.baseArrayLayer = 0;
+        colorRange.layerCount = 1;
+
+        VkImageMemoryBarrier toDst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        toDst.srcAccessMask = 0;
+        toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        // UNDEFINED as oldLayout is deliberate, not "don't know the real
+        // layout" laziness -- we're about to overwrite the whole image via
+        // copy anyway, so discarding whatever it held is correct and is
+        // the standard Vulkan idiom for a copy-destination transition (same
+        // role D3D12_RESOURCE_STATE_COMMON plays as the D3D12 branch's
+        // resting state below).
+        toDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toDst.image = dstImage;
+        toDst.subresourceRange = colorRange;
+        vkCmdPipelineBarrier(copyCmdBuf_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toDst);
+
+        VkBufferImageCopy region{};
+        region.bufferOffset = 0;
+        // bufferRowLength/bufferImageHeight are in TEXELS, not bytes; 0
+        // would mean "tightly packed" (== imageExtent.width), but
+        // res.uploadRowPitch is 256-byte-aligned like the D3D12 upload
+        // heap, so it must be stated explicitly whenever real padding was
+        // added. Assumes 4 bytes/texel -- true for every
+        // SwapchainPixelConversion candidate this file produces (8bpc
+        // RGBA/BGRA and the 10/10/10/2 pack are both 4-byte words).
+        region.bufferRowLength = res.uploadRowPitch / 4;
+        region.bufferImageHeight = eyeHeight;
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel = 0;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount = 1;
+        // dstXOffset lands this eye's copy in the correct half of the
+        // double-wide resource; y/z stay 0 (full height, single layer).
+        region.imageOffset = {static_cast<int32_t>(dstXOffset), 0, 0};
+        region.imageExtent = {eyeWidth, eyeHeight, 1};
+        vkCmdCopyBufferToImage(copyCmdBuf_, res.uploadBuffer, dstImage,
+                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+        // UNVERIFIED which layout the runtime actually expects a Vulkan
+        // color swapchain image left in at xrReleaseSwapchainImage/
+        // xrEndFrame time -- OpenXR's spec doesn't pin this down as
+        // tightly as D3D12's resource-state model does. COLOR_ATTACHMENT_
+        // OPTIMAL matches this swapchain's own
+        // XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT usage flag (set in
+        // createSwapchain(), shared with the D3D12 branch) and what
+        // Vulkan OpenXR samples typically leave a color swapchain image
+        // in after rendering into it -- if the compositor rejects or
+        // corrupts the submitted layer, try VK_IMAGE_LAYOUT_GENERAL or
+        // VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL here first, in that
+        // order.
+        VkImageMemoryBarrier toPresent = toDst;
+        toPresent.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        toPresent.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        toPresent.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        toPresent.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        vkCmdPipelineBarrier(copyCmdBuf_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                              VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr,
+                              1, &toPresent);
+
+        vkEndCommandBuffer(copyCmdBuf_);
+
+        VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &copyCmdBuf_;
+        vkResetFences(xrDevice_, 1, &copyFence_);
+        vkQueueSubmit(xrQueue_, 1, &submitInfo, copyFence_);
+
+        // Block until the XR-side GPU has finished the copy before this
+        // function returns -- the upload buffer gets reused/remapped next
+        // call, so it must not still be in flight. Same "correctness
+        // first, perf TODO" note as the D3D12 branch and the MapAsync wait
+        // above.
+        vkWaitForFences(xrDevice_, 1, &copyFence_, VK_TRUE, UINT64_MAX);
+#else
         copyCmdAlloc_->Reset();
         copyCmdList_->Reset(copyCmdAlloc_.Get(), nullptr);
 
@@ -958,6 +1227,7 @@ public:
             WaitForSingleObject(event, INFINITE);
             CloseHandle(event);
         }
+#endif
     }
 
 private:
@@ -1057,13 +1327,20 @@ public:
     // value so the FOLLOWING frame's BeginAccess wait is against real
     // completed work rather than a stale/zero value.
     void endAccessAll() {
+        // On both branches, pendingMemory_/pendingTextures_ only ever get
+        // populated by importSwapchainImage() -- D3D12-only, dead code even
+        // there (see this file's top comment) -- so this loop body is
+        // unreached in practice either way; kept exactly as before so it's
+        // still correct if that path is ever revived.
         for (size_t i = 0; i < pendingMemory_.size(); ++i) {
             wgpu::SharedTextureMemoryEndAccessState endState{};
             pendingMemory_[i].EndAccess(pendingTextures_[i], &endState);
 
+#if !DUSK_VR_XR_GRAPHICS_VULKAN
             if (fenceInitialized_ && endState.signaledValueCount > 0) {
                 fenceValue_ = endState.signaledValues[0];
             }
+#endif
             // NOTE: no manual FreeMembers() call here -- it's private on
             // this struct (unlike SharedBufferMemoryEndAccessState, whose
             // FreeMembers is public). SharedTextureMemoryEndAccessState is
@@ -1075,10 +1352,12 @@ public:
         pendingMemory_.clear();
         pendingTextures_.clear();
 
+#if !DUSK_VR_XR_GRAPHICS_VULKAN
         if (fenceInitialized_ && xrQueue_) {
             ++fenceValue_;
             xrQueue_->Signal(d3dFence_.Get(), fenceValue_);
         }
+#endif
     }
 
 private:
@@ -1243,11 +1522,24 @@ private:
     wgpu::ComputePipeline gammaPipeline_;
     wgpu::BindGroupLayout gammaBindGroupLayout_;
 
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+    std::vector<XrSwapchainImageVulkanKHR> swapchainImages_;
+#else
     std::vector<XrSwapchainImageD3D12KHR> swapchainImages_;
+#endif
 
     std::vector<wgpu::SharedTextureMemory> pendingMemory_;
     std::vector<wgpu::Texture> pendingTextures_;
 
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+    // No fence-sync state on this branch -- see this file's top comment:
+    // ensureFenceSync()/importSwapchainImage() (the only things that would
+    // populate it) are dead code, D3D12-only, not ported.
+    VkPhysicalDevice xrPhysicalDevice_ = VK_NULL_HANDLE;
+    VkDevice xrDevice_ = VK_NULL_HANDLE;
+    VkQueue xrQueue_ = VK_NULL_HANDLE;
+    uint32_t xrQueueFamilyIndex_ = 0;
+#else
     // --- fence sync state ---
     Microsoft::WRL::ComPtr<ID3D12Device> xrDevice_;
     Microsoft::WRL::ComPtr<ID3D12CommandQueue> xrQueue_;
@@ -1255,14 +1547,21 @@ private:
     wgpu::SharedFence dawnFence_;
     uint64_t fenceValue_ = 0;
     bool fenceInitialized_ = false;
+#endif
 
     // --- CPU round-trip copy path state (see submitEyeCpuCopy above) ---
     struct CpuCopyBuffers {
         wgpu::Buffer readback;                              // Dawn side, MapRead|CopyDst
         uint32_t bytesPerRow = 0;                            // Dawn-side row pitch (256-aligned)
         uint32_t width = 0, height = 0;
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+        VkBuffer uploadBuffer = VK_NULL_HANDLE;              // XR side, HOST_VISIBLE|HOST_COHERENT
+        VkDeviceMemory uploadMemory = VK_NULL_HANDLE;
+        void* uploadMapped = nullptr;                        // persistently mapped, see ensureCpuCopyBuffers()
+#else
         Microsoft::WRL::ComPtr<ID3D12Resource> uploadHeap;   // XR side, D3D12_HEAP_TYPE_UPLOAD
-        uint32_t uploadRowPitch = 0;                         // D3D12-side row pitch (256-aligned)
+#endif
+        uint32_t uploadRowPitch = 0;                         // XR-side row pitch (256-aligned, both APIs)
         // Only created/used when useGammaComputePath_ is true (see
         // ensureGammaComputeResources()). gammaStorage is written by the
         // compute pass, then CopyBufferToBuffer'd into `readback` (the same
@@ -1280,14 +1579,46 @@ private:
     // mechanism and the crash this caused.
     std::vector<CpuCopyBuffers> cpuCopyBuffers_;
 
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+    VkCommandPool copyCmdPool_ = VK_NULL_HANDLE;
+    VkCommandBuffer copyCmdBuf_ = VK_NULL_HANDLE;
+    // Binary fence, reset+waited every call -- unlike the D3D12 branch's
+    // monotonic copyFenceValue_ counter, Vulkan's vkWaitForFences on a
+    // freshly-reset VkFence needs no counter to track, same "block fully
+    // every frame, correctness first" behavior either way.
+    VkFence copyFence_ = VK_NULL_HANDLE;
+#else
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> copyCmdAlloc_;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> copyCmdList_;
     Microsoft::WRL::ComPtr<ID3D12Fence> copyFence_;
     uint64_t copyFenceValue_ = 0;
+#endif
     bool copyCmdListReady_ = false;
 
     static uint32_t align256(uint32_t v) { return (v + 255u) & ~255u; }
 
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+    void ensureCpuCopyCmdList() {
+        if (copyCmdListReady_) {
+            return;
+        }
+        VkCommandPoolCreateInfo poolCI{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+        poolCI.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        poolCI.queueFamilyIndex = xrQueueFamilyIndex_;
+        vkCreateCommandPool(xrDevice_, &poolCI, nullptr, &copyCmdPool_);
+
+        VkCommandBufferAllocateInfo cbAllocInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        cbAllocInfo.commandPool = copyCmdPool_;
+        cbAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cbAllocInfo.commandBufferCount = 1;
+        vkAllocateCommandBuffers(xrDevice_, &cbAllocInfo, &copyCmdBuf_);
+
+        VkFenceCreateInfo fenceCI{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        vkCreateFence(xrDevice_, &fenceCI, nullptr, &copyFence_);
+
+        copyCmdListReady_ = true;
+    }
+#else
     void ensureCpuCopyCmdList() {
         if (copyCmdListReady_) {
             return;
@@ -1299,6 +1630,7 @@ private:
         xrDevice_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&copyFence_));
         copyCmdListReady_ = true;
     }
+#endif
 
     // width/height here are the PER-EYE dimensions (eyeWidth/eyeHeight from
     // encodeEyeCopy) -- these staging buffers hold one eye's pixels, not
@@ -1325,6 +1657,62 @@ private:
         bufDesc.usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead;
         res.readback = aurora::webgpu::g_device.CreateBuffer(&bufDesc);
 
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+        const VkDeviceSize uploadSize = static_cast<VkDeviceSize>(res.uploadRowPitch) * height;
+
+        if (res.uploadMapped) {
+            vkUnmapMemory(xrDevice_, res.uploadMemory);
+            res.uploadMapped = nullptr;
+        }
+        if (res.uploadBuffer != VK_NULL_HANDLE) {
+            vkDestroyBuffer(xrDevice_, res.uploadBuffer, nullptr);
+            res.uploadBuffer = VK_NULL_HANDLE;
+        }
+        if (res.uploadMemory != VK_NULL_HANDLE) {
+            vkFreeMemory(xrDevice_, res.uploadMemory, nullptr);
+            res.uploadMemory = VK_NULL_HANDLE;
+        }
+
+        VkBufferCreateInfo bufCI{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bufCI.size = uploadSize;
+        bufCI.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        bufCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        vkCreateBuffer(xrDevice_, &bufCI, nullptr, &res.uploadBuffer);
+
+        VkMemoryRequirements memReq{};
+        vkGetBufferMemoryRequirements(xrDevice_, res.uploadBuffer, &memReq);
+
+        VkPhysicalDeviceMemoryProperties memProps{};
+        vkGetPhysicalDeviceMemoryProperties(xrPhysicalDevice_, &memProps);
+        const VkMemoryPropertyFlags required =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        uint32_t memTypeIndex = UINT32_MAX;
+        for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
+            if ((memReq.memoryTypeBits & (1u << i)) &&
+                (memProps.memoryTypes[i].propertyFlags & required) == required) {
+                memTypeIndex = i;
+                break;
+            }
+        }
+        if (memTypeIndex == UINT32_MAX) {
+            throw std::runtime_error(
+                "ensureCpuCopyBuffers: no HOST_VISIBLE|HOST_COHERENT Vulkan memory type "
+                "for the XR-side upload buffer");
+        }
+
+        VkMemoryAllocateInfo allocInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocInfo.allocationSize = memReq.size;
+        allocInfo.memoryTypeIndex = memTypeIndex;
+        vkAllocateMemory(xrDevice_, &allocInfo, nullptr, &res.uploadMemory);
+        vkBindBufferMemory(xrDevice_, res.uploadBuffer, res.uploadMemory, 0);
+
+        // Persistently mapped for the buffer's lifetime -- HOST_COHERENT
+        // means no explicit flush is needed after CPU writes, matching the
+        // D3D12 upload heap's per-call Map()/Unmap() dance in effect
+        // (always immediately re-mappable) without needing to repeat it
+        // every readbackEyeCopy() call.
+        vkMapMemory(xrDevice_, res.uploadMemory, 0, uploadSize, 0, &res.uploadMapped);
+#else
         D3D12_HEAP_PROPERTIES heapProps{};
         heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
 
@@ -1342,6 +1730,7 @@ private:
         xrDevice_->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &resDesc,
                                             D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
                                             IID_PPV_ARGS(&res.uploadHeap));
+#endif
 
         if (useGammaComputePath_) {
             ensureGammaComputeResources();
@@ -1381,6 +1770,7 @@ private:
     }
 };
 
+#if !DUSK_VR_XR_GRAPHICS_VULKAN
 inline void getD3D12DeviceAndQueue(const wgpu::Device& wgpuDevice,
                                     Microsoft::WRL::ComPtr<ID3D12Device>& outDevice,
                                     Microsoft::WRL::ComPtr<ID3D12CommandQueue>& outQueue) {
@@ -1428,6 +1818,7 @@ inline bool adapterMatchesXrRequirement(const wgpu::AdapterInfo& adapterInfo,
     }
     return false;  // no DXGI adapter matched Dawn's vendor/device ID at all
 }
+#endif  // !DUSK_VR_XR_GRAPHICS_VULKAN
 
 // NOTE: this Dawn build has no way to recover a wgpu::Texture from a
 // wgpu::TextureView (no GetTexture() method, no wgpuTextureViewGetTexture C

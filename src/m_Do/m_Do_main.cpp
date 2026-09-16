@@ -908,7 +908,15 @@ int game_main(int argc, char* argv[]) {
     bool dvd_opened = false;
     if (parsed_arg_options.count("dvd")) {
         dvd_path = parsed_arg_options["dvd"].as<std::string>();
-        if (dusk::iso::inspect(dvd_path.c_str(), discInfo) == dusk::iso::ValidationError::Success) {
+        // TEMP DIAGNOSTIC (remove once confirmed): the generic "failed
+        // validation" log below never said WHICH ValidationError came back
+        // (IOError/InvalidImage/WrongGame/WrongVersion/Unknown), which
+        // mattered a lot the first time this was hit on Android with a
+        // real .rvz that opens fine on the PC build with the exact same
+        // file -- narrowing this down without guessing needed the actual
+        // enum value.
+        const auto cliInspectResult = dusk::iso::inspect(dvd_path.c_str(), discInfo);
+        if (cliInspectResult == dusk::iso::ValidationError::Success) {
             DuskLog.info("Loading DVD image from command line: {}", dvd_path);
             dvd_opened = aurora_dvd_open(dvd_path.c_str());
             if (!dvd_opened) {
@@ -922,7 +930,8 @@ int game_main(int argc, char* argv[]) {
                 dusk::IsGameLaunched = true;
             }
         } else {
-            DuskLog.warn("DVD image from command line failed validation: {}, opening prelaunch UI", dvd_path);
+            DuskLog.warn("DVD image from command line failed validation: {} (ValidationError={}), opening prelaunch UI",
+                          dvd_path, static_cast<int>(cliInspectResult));
             forcePreLaunchUI = true;
         }
     }

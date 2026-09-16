@@ -76,16 +76,22 @@ for abi in $ANDROID_STAGE_ABIS; do
   esac
   copy_lib "$abi" "$src"
 
-  # VR: stage the OpenXR loader .so alongside libmain.so. Matches the
-  # layout CMakeLists.txt's Dusklight VR fragment expects
-  # (OPENXR_MOBILE_SDK_DIR/OpenXR/Libs/Android/<abi>/Release/
-  # libopenxr_loader.so) -- see that file's own comment for the
-  # "UNVERIFIED against whatever SDK version you actually downloaded"
-  # caveat; the same one applies here, unverified for the same reason
-  # (no Android NDK/SDK on the machine that wrote this). Optional: only
-  # staged when OPENXR_MOBILE_SDK_DIR is set, so the plain flatscreen
-  # Android build (no VR) isn't broken by this addition.
-  if [[ -n "${OPENXR_MOBILE_SDK_DIR:-}" ]]; then
+  # VR: stage the OpenXR loader .so alongside libmain.so. As of 2026-09-16,
+  # CMakeLists.txt's Dusklight VR fragment builds the loader FROM SOURCE
+  # for Android (KhronosGroup/OpenXR-SDK-Source via FetchContent) rather
+  # than expecting a prebuilt binary from Meta's OpenXR Mobile SDK (that
+  # package ships only Meta's preview/extension headers, no loader -- see
+  # CMakeLists.txt's own comment). The built .so lands inside the CMake
+  # build tree at _deps/openxr_sdk_source-build/src/loader/ -- confirmed
+  # directly against a real build this session, not guessed. Falls back to
+  # the old OPENXR_MOBILE_SDK_DIR-based path (kept for anyone who still has
+  # that env var set / a manual SDK layout) if the FetchContent build
+  # output isn't found.
+  xr_src="$(dirname "$src")/_deps/openxr_sdk_source-build/src/loader/libopenxr_loader.so"
+  if [[ -f "$xr_src" ]]; then
+    cp -f "$xr_src" "$APP_DIR/$abi/libopenxr_loader.so"
+    echo "Staged $xr_src -> $APP_DIR/$abi/libopenxr_loader.so"
+  elif [[ -n "${OPENXR_MOBILE_SDK_DIR:-}" ]]; then
     xr_src="$OPENXR_MOBILE_SDK_DIR/OpenXR/Libs/Android/$abi/Release/libopenxr_loader.so"
     if [[ -f "$xr_src" ]]; then
       cp -f "$xr_src" "$APP_DIR/$abi/libopenxr_loader.so"
@@ -93,6 +99,8 @@ for abi in $ANDROID_STAGE_ABIS; do
     else
       echo "OPENXR_MOBILE_SDK_DIR set but libopenxr_loader.so not found at $xr_src -- skipping VR loader staging" >&2
     fi
+  else
+    echo "libopenxr_loader.so not found in the CMake build tree ($xr_src) -- skipping VR loader staging. Did the android-arm64/-x86_64 native build run?" >&2
   fi
 
   if [[ -n "$STRIP_TOOL" ]]; then

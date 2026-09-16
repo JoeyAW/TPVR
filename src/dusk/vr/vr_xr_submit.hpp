@@ -642,9 +642,39 @@ public:
 #if DUSK_VR_XR_GRAPHICS_VULKAN
         swapchainIsSrgb_ = chosenFormat == VK_FORMAT_B8G8R8A8_SRGB ||
                            chosenFormat == VK_FORMAT_R8G8B8A8_SRGB;
+        // FOUND 2026-09-16 (first real Quest 3 hardware test, everything
+        // rendering with a blue tint despite correct geometry/lighting --
+        // real bug, not a gamma/brightness issue): kGammaComputeShaderSource's
+        // swapRB flag was being derived from SwapchainPixelConversion (None
+        // vs ChannelSwap), which only ever encodes "does the chosen format
+        // differ from aurora's assumed native format" -- a concept baked in
+        // when this file was Windows/D3D12-only, where the native format
+        // really is BGRA, so swapRB=0 (the shader's non-swapped case)
+        // correctly meant "pack as BGRA". On Android/Vulkan the chosen
+        // format is R8G8B8A8 (confirmed via a real device log: native
+        // format 37 = VK_FORMAT_R8G8B8A8_UNORM, chosen 43 =
+        // VK_FORMAT_R8G8B8A8_SRGB -- SAME channel order, hence
+        // conversion=None), so swapRB stayed 0 and the shader kept packing
+        // BGRA bytes into a buffer the swapchain expects as RGBA -- R and B
+        // swapped on every pixel. Fix: compute the shader's byte-order flag
+        // from what the CHOSEN format's real channel layout actually is,
+        // not from the None/ChannelSwap distinction (which stays exactly
+        // what it was for the CPU-side conversion switch above -- that one
+        // is about whether a swap is needed RELATIVE to nativeFormat, a
+        // different question this new flag doesn't replace).
+        swapchainIsBgra_ = chosenFormat == VK_FORMAT_B8G8R8A8_UNORM ||
+                           chosenFormat == VK_FORMAT_B8G8R8A8_SRGB;
 #else
         swapchainIsSrgb_ = chosenFormat == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB ||
                            chosenFormat == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+        // See the Vulkan branch's comment above for why this exists. On the
+        // D3D12 path every real candidate this project has ever chosen has
+        // been BGRA-family (native format itself, per this whole file's
+        // "native format is BGRA" history) -- computed properly anyway,
+        // the same way as Vulkan, rather than hardcoding true, in case a
+        // future candidate ever picks an RGBA-family DXGI format here.
+        swapchainIsBgra_ = chosenFormat == DXGI_FORMAT_B8G8R8A8_UNORM ||
+                           chosenFormat == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
 #endif
         // Generalized 2026-08-16 (see kSteamVrGammaCompensationExponent's
         // comment): the GPU gamma-compensation compute pass now runs for
@@ -1239,11 +1269,19 @@ private:
             // WriteBuffer call here -- borrowed/valid for this call only,
             // but that's exactly the per-frame-work use case gfx.hpp
             // documents it for.
+            // swapRB=0 makes the shader pack BGRA bytes (its "native" case,
+            // see kGammaComputeShaderSource's comment) -- correct only when
+            // the CHOSEN swapchain format really is BGRA-ordered. Was
+            // wrongly derived from SwapchainPixelConversion::ChannelSwap
+            // (a different question -- see swapchainIsBgra_'s own comment
+            // at its assignment in createSwapchain() for the real Quest 3
+            // blue-tint bug this fixed) -- now tied directly to the actual
+            // chosen format's real channel layout instead.
             const GammaComputeParams params{
                 p.eyeWidth,
                 p.eyeHeight,
                 res.bytesPerRow / 4,
-                self->swapchainPixelConversion_ == SwapchainPixelConversion::ChannelSwap ? 1u : 0u,
+                self->swapchainIsBgra_ ? 0u : 1u,
                 self->effectiveGammaExponent(),
             };
             ctx.queue.WriteBuffer(res.gammaUniform, 0, &params, sizeof(params));
@@ -1360,6 +1398,13 @@ private:
     // once createSwapchain() started preferring SRGB for every runtime, not
     // just SteamVR (see isSteamVr_ below for the real replacement).
     bool swapchainIsSrgb_ = false;
+    // True when chosenFormat's real channel layout is B8G8R8A8 (as opposed
+    // to R8G8B8A8) -- drives kGammaComputeShaderSource's swapRB flag. See
+    // its assignment in createSwapchain() for the real Quest 3 blue-tint
+    // bug (R/B swapped) this exists to fix -- SwapchainPixelConversion
+    // alone wasn't enough to answer "should the shader pack BGRA or RGBA
+    // bytes", only "does this differ from aurora's assumed native format".
+    bool swapchainIsBgra_ = false;
 
     // Set once at startup (vr_main.cpp's startup(), right after
     // xrGetSystemProperties()) from a substring check on the real runtime

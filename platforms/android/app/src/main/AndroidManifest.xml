@@ -9,6 +9,21 @@
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
     <uses-feature android:name="android.hardware.type.pc" android:required="false" />
 
+    <!-- VR (Quest): without com.oculus.intent.category.VR on the launcher
+         intent-filter below, the Horizon OS shell launches this activity as
+         an ordinary 2D floating panel instead of handing it a real XR
+         session, confirmed directly on a real Quest 3 (2026-09-16): the
+         app ran fine but stayed a flat panel, and dusk::vr::startup() was
+         never even reached (zero "dusklight_vr" logcat lines), while
+         com.oculus.vrshell (the Home shell) was the one making all the
+         OpenXR anchor/space calls instead. android.hardware.vr.headtracking
+         isn't strictly required for a sideloaded/adb-installed debug build
+         to launch, but it's the standard declaration real VR apps carry, so
+         it's included for correctness. Harmless no-op on non-Oculus Android
+         (these are all Oculus-namespaced and ignored elsewhere), so this
+         doesn't affect the plain flatscreen Android build target. -->
+    <uses-feature android:name="android.hardware.vr.headtracking" android:version="1" android:required="false" />
+
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
@@ -24,6 +39,16 @@
 
         <meta-data android:name="android.game_mode_config"
             android:resource="@xml/game_mode_config" />
+
+        <!-- Lets the app receive real XR_SESSION_STATE transitions (e.g.
+             VISIBLE/FOCUSED loss when the user opens the Quest universal
+             menu) instead of being suspended outright, standard for a
+             native OpenXR app on Horizon OS. -->
+        <meta-data android:name="com.oculus.vr.focusaware" android:value="true" />
+        <!-- Informational only (store/filtering); doesn't affect a
+             sideloaded/adb-installed debug build. Update if support is ever
+             extended to other Quest models. -->
+        <meta-data android:name="com.oculus.supportedDevices" android:value="quest3|quest3s" />
 
         <provider
             android:name="dev.twilitrealm.dusk.DuskDocumentsProvider"
@@ -47,6 +72,11 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+                <!-- Tells the Horizon OS shell to launch this as a real VR
+                     app (immersive XR session) instead of a 2D panel, see
+                     the uses-feature comment above for how this was
+                     diagnosed. No effect on non-Oculus Android. -->
+                <category android:name="com.oculus.intent.category.VR" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />

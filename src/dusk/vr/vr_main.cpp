@@ -14,10 +14,12 @@
 
 #include <openxr/openxr.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <thread>
 #include <vector>
 
 #include <dolphin/pad.h>  // PADStatus, PADSetVirtualStatus/PADClearVirtualStatus -- gameplay controller input
@@ -396,7 +398,11 @@ bool waitForSessionReadyAndBegin(XrInstance instance, XrSession session) {
 
         if (result == XR_EVENT_UNAVAILABLE) {
             // No event pending yet -- give the runtime a moment and retry.
-            Sleep(16);
+            // Win32 Sleep(16) replaced with the portable equivalent (was
+            // unconditional, undeclared identifier on Android where
+            // <windows.h> isn't pulled in transitively via the D3D12
+            // branch of vr_xr_bootstrap.hpp).
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
             continue;
         }
 

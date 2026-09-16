@@ -11,7 +11,10 @@
 #include <cstdio>
 #ifdef TARGET_PC
 #include <set>
+#if defined(_WIN32)
 #include <windows.h>
+#endif
+#include "dusk/vr/vr_debug_log.hpp"  // dusk::vr::duskVrLog/duskVrSnprintf -- portable OutputDebugStringA/_snprintf_s stand-ins
 extern "C" bool g_duskVRRenderingToHeadset;
 extern "C" bool g_duskVRSessionActive;
 #endif
@@ -1527,9 +1530,9 @@ JPABaseEmitter* dPa_control_c::set(u8 param_0, u16 param_1, cXyz const* i_pos,
             const char* name =
                 (param_1 < ID_PARTICLE_MAX) ? dPa_name::getName(param_1) : NULL;
             char msg[192];
-            _snprintf_s(msg, _TRUNCATE, "[dusk::particle] set id=0x%04x name=%s\n",
+            dusk::vr::duskVrSnprintf(msg, sizeof(msg), "[dusk::particle] set id=0x%04x name=%s\n",
                         param_1, name != NULL ? name : "(unnamed/scene-id)");
-            OutputDebugStringA(msg);
+            dusk::vr::duskVrLog(msg);
         }
     }
 #endif
@@ -1750,9 +1753,9 @@ u32 dPa_control_c::setSimple(u16 param_0, cXyz const* i_pos, dKy_tevstr_c const*
             const char* name =
                 (param_0 < ID_PARTICLE_MAX) ? dPa_name::getName(param_0) : NULL;
             char msg[192];
-            _snprintf_s(msg, _TRUNCATE, "[dusk::particle] setSimple id=0x%04x name=%s\n",
+            dusk::vr::duskVrSnprintf(msg, sizeof(msg), "[dusk::particle] setSimple id=0x%04x name=%s\n",
                         param_0, name != NULL ? name : "(unnamed/scene-id)");
-            OutputDebugStringA(msg);
+            dusk::vr::duskVrLog(msg);
         }
     }
 #endif

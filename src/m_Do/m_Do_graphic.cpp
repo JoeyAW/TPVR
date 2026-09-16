@@ -4,11 +4,11 @@
  */
 
 #include <cstdio>
-#ifdef TARGET_PC
+#if defined(TARGET_PC) && defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX // avoid windows.h's min/max macros breaking std::numeric_limits<T>::max() below
 #endif
-#include <windows.h> // OutputDebugStringA (TEMP DIAGNOSTIC)
+#include <windows.h> // OutputDebugStringA (TEMP DIAGNOSTIC) -- not actually called in this file
 #undef interface // windows.h #defines this to `struct` (COM interop) -- collides with
                   // JAWExtSystem.h's use of `interface` as a plain parameter name below
 #endif

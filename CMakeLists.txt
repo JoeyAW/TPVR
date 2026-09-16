@@ -74,6 +74,38 @@ set(AURORA_ENABLE_RMLUI ON CACHE BOOL "Enable RmlUi UI support" FORCE)
 add_subdirectory(extern/aurora EXCLUDE_FROM_ALL)
 target_compile_definitions(aurora_mtx PRIVATE MTX_USE_PS=1)
 
+# ANDROID NOTE (2026-09-16, unrelated to VR -- a base Android-port gap in
+# aurora's own `nod` Rust dependency, hit for the first time this session
+# since nothing appears to have ever actually built android-arm64 end to
+# end before): corrosion (the CMake<->Rust bridge nod-ffi uses) sets
+# CC_<target>/CXX_<target> to the bare NDK clang.exe with no
+# --target=...<API level>, which makes nod-ffi's transitive bzip2-sys/
+# liblzma-sys/zstd-sys build scripts fail with "Unversioned target triples
+# are not supported!". CONFIRMED this CANNOT be fixed from this
+# CMakeLists.txt: neither -DCMAKE_C_COMPILER=<versioned wrapper> (the NDK
+# toolchain file force-resets it) nor corrosion_set_env_vars() (its
+# per-target overrides get appended BEFORE corrosion's own defaults in the
+# generated command, so the defaults still win last) has any effect --
+# this was verified by tracing corrosion's actual generated build command
+# line, not guessed.
+#
+# ACTUAL FIX lives outside this repo, at the NDK installation itself (see
+# platforms/android/README.md's prerequisites): a `clang.cfg` /
+# `clang++.cfg` file dropped next to the NDK's
+# toolchains/llvm/prebuilt/<host>/bin/clang(++).exe, containing
+# `-D__ANDROID_MIN_SDK_VERSION__=28` -- Clang auto-loads a config file
+# matching its own invoked name (confirmed via -v testing: a
+# target-triple-prefixed cfg name is NOT auto-discovered when invoked as
+# bare clang.exe with a separate --target= flag, only the plain
+# "clang.cfg" is). This satisfies the exact macro sys/cdefs.h checks
+# (__ANDROID_MIN_SDK_VERSION__, not __ANDROID_API__, which already has its
+# own header-level fallback) without touching --target= at all, so it
+# doesn't fight the flag-precedence issue a naive --target= injection
+# would have. Confirmed harmless against already-correct fully-versioned
+# invocations too (e.g. --target=aarch64-linux-android28 via the CMake
+# build itself) -- redefining the same macro to the same value is a
+# no-op, not a conflict.
+
 add_subdirectory(libs/freeverb)
 
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -837,22 +869,30 @@ install_bundled_mods()
 # PREREQUISITES (Android/Quest, in addition to the above):
 #
 #   1. OpenXR loader for Android
-#      Download Meta's OpenXR Mobile SDK (https://developer.oculus.com/downloads/package/oculus-openxr-mobile-sdk/),
-#      extract it, and set OPENXR_MOBILE_SDK_DIR in your cmake configure or
-#      CMakePresets.json:
-#        "OPENXR_MOBILE_SDK_DIR": "C:/path/to/ovr_openxr_mobile_sdk"
-#      This section expects that SDK's published layout
-#      (OpenXR/Include, OpenXR/Libs/Android/<abi>/Release/libopenxr_loader.so)
-#      -- UNVERIFIED against whatever version you actually download; adjust
-#      the paths below if Meta has since restructured the package.
+#      Built automatically from source (KhronosGroup/OpenXR-SDK-Source,
+#      via FetchContent) -- no separate download/env var needed for this
+#      part. Needs a Python 3 interpreter on PATH for the spec's header
+#      codegen step (confirmed present via `find_package(Python3)`;
+#      falls back to pre-generated headers if genuinely absent).
 #
-#   2026-09-16 UNVERIFIED PROTOTYPE: this Android branch has never been run
-#   through cmake configure (no Android NDK on the machine that wrote it).
-#   vr_xr_submit.hpp and vr_stereo_render.hpp are also still D3D12-only, so
-#   even once this configures clean, target_sources(dusklight ...) below
-#   will fail to COMPILE on Android until those two get their own Vulkan
-#   branches. This section only gets OpenXR+Vulkan themselves configured
-#   and linkable.
+#   2. Meta's OpenXR Mobile SDK is a SEPARATE thing from the loader above
+#      -- it's Meta's preview/extension headers only (OpenXR/
+#      meta_openxr_preview/*.h), confirmed by inspecting an actual
+#      download 2026-09-16: no core openxr.h, no prebuilt loader .so in
+#      it at all (an earlier version of this comment assumed otherwise --
+#      wrong; Meta's own sample apps get the loader the same
+#      from-source way this section now does, per their
+#      Samples/SampleXrFramework/CMakeLists.txt). Not needed unless/until
+#      this mod actually uses a Meta-specific extension -- the base
+#      OpenXR API this bootstrap uses doesn't require it.
+#
+#   2026-09-16, CONFIRMED CONFIGURING (not yet fully building): this
+#   Android branch now gets through `cmake --preset android-arm64`
+#   configure cleanly on real hardware (Android Studio SDK + NDK
+#   30.0.16248370 + rustup's aarch64-linux-android target). Full native
+#   build (vr_xr_submit.hpp/vr_stereo_render.hpp still need their own
+#   Vulkan branches beyond the bootstrap/submit work already done) not
+#   yet attempted end to end -- update this note once it has been.
 # ============================================================
 
 # --- Guard: Windows or Android only for now ---
@@ -878,40 +918,45 @@ message(STATUS "Dusklight VR: configuring")
 # ============================================================
 
 if (ANDROID)
-    # Meta's Mobile SDK ships a prebuilt loader .so per ABI rather than a
-    # CMake config package, so there's no find_package() to try first here
-    # (unlike the Windows vcpkg path below). Manual SDK path only.
-    if (DEFINED ENV{OPENXR_MOBILE_SDK_DIR} AND NOT DEFINED OPENXR_MOBILE_SDK_DIR)
-        set(OPENXR_MOBILE_SDK_DIR "$ENV{OPENXR_MOBILE_SDK_DIR}")
-    endif ()
+    # CORRECTED 2026-09-16 (previous version of this branch assumed Meta's
+    # OpenXR Mobile SDK download ships a prebuilt libopenxr_loader.so per
+    # ABI -- checked the actual downloaded package this session and that's
+    # wrong: it only contains Meta's preview/extension headers
+    # (OpenXR/meta_openxr_preview/*.h), no loader, no core openxr.h. Meta's
+    # OWN sample apps (Samples/SampleXrFramework/CMakeLists.txt) get the
+    # loader via find_package(OpenXR), built from a vendored Khronos
+    # OpenXR-SDK-Source checkout (Samples/3rdParty/khronos/openxr/
+    # OpenXR-SDK) -- so that's what this does too: fetch and build
+    # OpenXR-SDK-Source's loader from source, same as Meta's own samples,
+    # rather than expecting a prebuilt binary that doesn't ship anymore
+    # (if it ever did). Confirmed release-1.1.63 is the current latest tag
+    # via `git ls-remote --tags` this session (2026-09-16) -- re-check for
+    # a newer one if this has aged.
+    include(FetchContent)
+    set(BUILD_LOADER ON CACHE BOOL "" FORCE)
+    set(BUILD_API_LAYERS OFF CACHE BOOL "" FORCE)
+    set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(BUILD_CONFORMANCE_TESTS OFF CACHE BOOL "" FORCE)
+    set(BUILD_ALL_EXTENSIONS OFF CACHE BOOL "" FORCE)
+    set(DYNAMIC_LOADER ON CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        openxr_sdk_source
+        GIT_REPOSITORY https://github.com/KhronosGroup/OpenXR-SDK-Source.git
+        GIT_TAG release-1.1.63
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(openxr_sdk_source)
 
-    if (OPENXR_MOBILE_SDK_DIR)
-        set(_xr_android_lib
-            "${OPENXR_MOBILE_SDK_DIR}/OpenXR/Libs/Android/${ANDROID_ABI}/Release/libopenxr_loader.so")
-        if (NOT EXISTS "${_xr_android_lib}")
-            message(WARNING
-                "Dusklight VR: expected OpenXR loader at ${_xr_android_lib} "
-                "but it doesn't exist. UNVERIFIED path layout (see this "
-                "section's prerequisites comment above) -- Meta may have "
-                "restructured the SDK package since this was written. "
-                "Building without VR support.")
-            return()
-        endif ()
-        message(STATUS "Dusklight VR: using OpenXR Mobile SDK at ${OPENXR_MOBILE_SDK_DIR}")
-        add_library(OpenXR::openxr_loader SHARED IMPORTED)
-        set_target_properties(OpenXR::openxr_loader PROPERTIES
-            IMPORTED_LOCATION "${_xr_android_lib}"
-        )
-        target_include_directories(OpenXR::openxr_loader INTERFACE
-            "${OPENXR_MOBILE_SDK_DIR}/OpenXR/Include"
-        )
-    else ()
-        message(WARNING
-            "Dusklight VR: OPENXR_MOBILE_SDK_DIR not set. Download Meta's "
-            "OpenXR Mobile SDK and set OPENXR_MOBILE_SDK_DIR to its root. "
-            "Building without VR support.")
-        return()
+    if (NOT TARGET OpenXR::openxr_loader)
+        # OpenXR-SDK-Source's own CMakeLists.txt names the target plain
+        # "openxr_loader" (no namespace) when pulled in via
+        # add_subdirectory/FetchContent rather than consumed as an
+        # installed find_package() config -- alias it so the rest of this
+        # fragment (and the Windows branch below) can refer to
+        # OpenXR::openxr_loader either way.
+        add_library(OpenXR::openxr_loader ALIAS openxr_loader)
     endif ()
+    message(STATUS "Dusklight VR: building OpenXR loader from source (OpenXR-SDK-Source release-1.1.63)")
 else ()
     # Try vcpkg / system find_package first, then fall back to a manual SDK path.
     find_package(OpenXR CONFIG QUIET)

@@ -9,7 +9,10 @@
 #include "d/d_com_inf_game.h"
 #include "m_Do/m_Do_graphic.h"
 #ifdef TARGET_PC
+#if defined(_WIN32)
 #include <windows.h>
+#endif
+#include "dusk/vr/vr_debug_log.hpp"  // dusk::vr::duskVrLog/duskVrSnprintf -- portable OutputDebugStringA/_snprintf_s stand-ins
 #endif
 
 static daGrdWater_HIO_c l_HIO;
@@ -278,10 +281,10 @@ int daGrdWater_c::Draw() {
         if (!*flag) {
             *flag = true;
             char msg[256];
-            _snprintf_s(msg, _TRUNCATE,
+            dusk::vr::duskVrSnprintf(msg, sizeof(msg),
                         "[dusk::grdwater] Draw() VR=%d pos=(%.1f,%.1f,%.1f)\n",
                         inVR ? 1 : 0, current.pos.x, current.pos.y, current.pos.z);
-            OutputDebugStringA(msg);
+            dusk::vr::duskVrLog(msg);
         }
     }
 #endif
@@ -328,7 +331,7 @@ int daGrdWater_c::Draw() {
         if (!*flag) {
             *flag = true;
             char msg[300];
-            _snprintf_s(msg, _TRUNCATE,
+            dusk::vr::duskVrSnprintf(msg, sizeof(msg),
                         "[dusk::grdwater] VR=%d hasTexMtx0=%d TevColor=(%d,%d,%d,%d) "
                         "AmbCol=(%d,%d,%d,%d) TevKColor=(%d,%d,%d,%d) mLightInf=(%d,%d,%d,%d)\n",
                         inVR ? 1 : 0, material->getTexGenBlock()->getTexMtx(0) != NULL ? 1 : 0,
@@ -336,7 +339,7 @@ int daGrdWater_c::Draw() {
                         tevStr.AmbCol.r, tevStr.AmbCol.g, tevStr.AmbCol.b, tevStr.AmbCol.a,
                         tevStr.TevKColor.r, tevStr.TevKColor.g, tevStr.TevKColor.b, tevStr.TevKColor.a,
                         tevStr.mLightInf.r, tevStr.mLightInf.g, tevStr.mLightInf.b, tevStr.mLightInf.a);
-            OutputDebugStringA(msg);
+            dusk::vr::duskVrLog(msg);
         }
     }
 #endif
@@ -364,14 +367,14 @@ int daGrdWater_c::Draw() {
                 if (!*flag) {
                     *flag = true;
                     char msg[300];
-                    _snprintf_s(msg, _TRUNCATE,
+                    dusk::vr::duskVrSnprintf(msg, sizeof(msg),
                                 "[dusk::grdwater] VR=%d fovy=%.2f aspect=%.3f effectMtx row0=(%.4f,%.4f,%.4f,%.4f) "
                                 "row1=(%.4f,%.4f,%.4f,%.4f) row2=(%.4f,%.4f,%.4f,%.4f)\n",
                                 inVR ? 1 : 0, waterFovy, waterAspect,
                                 afStack_50[0][0], afStack_50[0][1], afStack_50[0][2], afStack_50[0][3],
                                 afStack_50[1][0], afStack_50[1][1], afStack_50[1][2], afStack_50[1][3],
                                 afStack_50[2][0], afStack_50[2][1], afStack_50[2][2], afStack_50[2][3]);
-                    OutputDebugStringA(msg);
+                    dusk::vr::duskVrLog(msg);
                 }
             }
 #endif

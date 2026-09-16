@@ -7,7 +7,10 @@
 #include "m_Do/m_Do_main.h"
 #include <dolphin/vi.h>
 #include <cstring>
-#include <windows.h>  // OutputDebugStringA (TEMP DIAGNOSTIC below)
+#if defined(TARGET_PC) && defined(_WIN32)
+#include <windows.h>  // RenderDoc capture-trigger hooks below (GetModuleHandleA/GetAsyncKeyState/etc.)
+#endif
+#include "dusk/vr/vr_debug_log.hpp"  // dusk::vr::duskVrLog/duskVrSnprintf -- portable OutputDebugStringA/_snprintf_s stand-ins
 #include "DynamicLink.h"
 #include "JSystem/JAudio2/JASAudioThread.h"
 #include "JSystem/JAudio2/JAUSectionHeap.h"
@@ -59,7 +62,7 @@
 #include "dusk/game_clock.h"
 #include "dusk/vr/vr_main.hpp"
 
-#ifdef TARGET_PC
+#if defined(TARGET_PC) && defined(_WIN32)
 // TEMP DIAGNOSTIC (VR water-black investigation): manual RenderDoc capture
 // trigger. RenderDoc's own hotkey capture only sees the DESKTOP window's
 // Present() calls, which are essentially empty while VR is active (see the
@@ -299,7 +302,7 @@ void main01(void) {
 
         eventsDone:;
 
-#ifdef TARGET_PC
+#if defined(TARGET_PC) && defined(_WIN32)
         static bool rdocKeyWasDown = false;
         static bool rdocCapturing = false;
         bool rdocKeyDown = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
@@ -315,7 +318,7 @@ void main01(void) {
 
         if (!aurora_begin_frame()) {
             DuskLog.debug("aurora_begin_frame returned false, skipping draw this frame");
-#ifdef TARGET_PC
+#if defined(TARGET_PC) && defined(_WIN32)
             // FOUND 2026-08-09 (RenderDoc F9 capture investigation): without
             // this, a capture opened by the StartFrameCapture block above
             // stays open across this `continue` -- rdocCapturing is only
@@ -377,11 +380,11 @@ void main01(void) {
                 loggedInitial = true;
                 lastInterpolating = pacing.is_interpolating;
                 char msg[160];
-                _snprintf_s(msg, _TRUNCATE,
+                dusk::vr::duskVrSnprintf(msg, sizeof(msg),
                             "[dusk::main] pacing.is_interpolating -> %d (vr::isActive=%d)\n",
                             pacing.is_interpolating ? 1 : 0,
                             dusk::vr::isActive() ? 1 : 0);
-                OutputDebugStringA(msg);
+                dusk::vr::duskVrLog(msg);
             }
         }
         if (pacing.is_interpolating) {
@@ -479,7 +482,7 @@ void main01(void) {
         // own comment: it's a no-op if tick() didn't render stereo eyes.
         dusk::vr::submitFrame();
 
-#ifdef TARGET_PC
+#if defined(TARGET_PC) && defined(_WIN32)
         if (rdocCapturing) {
             // TEMP DIAGNOSTIC (2026-08-09, capture-truncation investigation):
             // user's RenderDoc captures consistently stop at a small event

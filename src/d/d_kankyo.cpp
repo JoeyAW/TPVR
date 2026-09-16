@@ -38,7 +38,9 @@
 #include "dusk/frame_interpolation.h"
 #include "dusk/game_clock.h"
 #include "dusk/vr/vr_main.hpp"
-#include <windows.h>
+#if defined(_WIN32)
+#include <windows.h>  // not actually used in this file
+#endif
 static f32 timeScale = 1.0f;
 #endif
 

@@ -49,12 +49,13 @@
 // RmlUi's own render target, similar in kind to the existing desktop-
 // mirror feature) -- deliberately not attempted here.
 
-#include <windows.h>
 #include <cmath>
 #include <cstdio>
 
 #include <SDL3/SDL_gamepad.h>
 #include <SDL3/SDL_joystick.h>
+
+#include "dusk/vr/vr_debug_log.hpp"  // duskVrLog/duskVrSnprintf
 
 #include <dolphin/pad.h>  // PAD_CHAN1
 
@@ -75,7 +76,7 @@ inline SDL_JoystickID g_vrMenuGamepadInstanceId = 0;
 // itself, not from this callback, since userdata round-tripping through a
 // C function pointer is more indirection than this needs for one log line).
 inline void SDLCALL vrMenuGamepadCleanup(void* /*userdata*/) {
-    OutputDebugStringA("[dusk::vr::menugamepad] virtual joystick Cleanup callback fired\n");
+    duskVrLog("[dusk::vr::menugamepad] virtual joystick Cleanup callback fired\n");
 }
 
 }  // namespace detail
@@ -132,19 +133,19 @@ inline bool ensureVrMenuGamepadAttached() {
     const SDL_JoystickID instance = SDL_AttachVirtualJoystick(&desc);
     if (instance == 0) {
         char msg[256];
-        _snprintf_s(msg, _TRUNCATE,
+        duskVrSnprintf(msg, sizeof(msg),
                     "[dusk::vr::menugamepad] SDL_AttachVirtualJoystick FAILED: %s\n",
                     SDL_GetError());
-        OutputDebugStringA(msg);
+        duskVrLog(msg);
         return false;
     }
 
     detail::g_vrMenuGamepadInstanceId = instance;
     char msg[128];
-    _snprintf_s(msg, _TRUNCATE,
+    duskVrSnprintf(msg, sizeof(msg),
                 "[dusk::vr::menugamepad] attached, instance id=%u\n",
                 static_cast<unsigned>(instance));
-    OutputDebugStringA(msg);
+    duskVrLog(msg);
     return true;
 }
 
@@ -736,7 +737,7 @@ inline void detachVrMenuGamepad() {
     }
     SDL_DetachVirtualJoystick(detail::g_vrMenuGamepadInstanceId);
     detail::g_vrMenuGamepadInstanceId = 0;
-    OutputDebugStringA("[dusk::vr::menugamepad] detached\n");
+    duskVrLog("[dusk::vr::menugamepad] detached\n");
 }
 
 }  // namespace dusk::vr

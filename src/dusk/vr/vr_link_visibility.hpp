@@ -29,7 +29,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <windows.h>  // TEMP DIAGNOSTIC: OutputDebugStringA for [dusk::vr::coreanchor] logging below
+
+#include "dusk/vr/vr_debug_log.hpp"  // dusk::vr::duskVrLog, for [dusk::vr::coreanchor] logging below
 
 namespace vr_link {
 
@@ -3333,7 +3334,7 @@ inline cXyz computeRawCoreAnchoredEye(daAlink_c* link) {
                               "[dusk::vr::coreanchor] TELEPORT DETECTED dist=%.1f "
                               "(threshold=%.1f) -- forcing recalibration\n",
                               std::sqrt(distSq), kCoreAnchorTeleportDistanceUnits);
-                OutputDebugStringA(buf);
+                dusk::vr::duskVrLog(buf);
             }
             s_coreAnchorLastTickPos = link->current.pos;
             s_coreAnchorLastTickPosSimTick = posSimTick;
@@ -3394,7 +3395,7 @@ inline cXyz computeRawCoreAnchoredEye(daAlink_c* link) {
                     "consecutivePlausible=%d realEye.y=%.2f current.pos.y=%.2f\n",
                     s_coreAnchorCalibrationAttempts, candidate, plausible ? 1 : 0,
                     s_coreAnchorConsecutivePlausible, realEye.y, link->current.pos.y);
-                OutputDebugStringA(buf);
+                dusk::vr::duskVrLog(buf);
             }
 
             if (settled || forcedByMaxAttempts) {
@@ -3406,7 +3407,7 @@ inline cXyz computeRawCoreAnchoredEye(daAlink_c* link) {
                               "afterAttempts=%d\n",
                               candidate, settled ? "SETTLED" : "MAX_ATTEMPTS_FALLBACK",
                               s_coreAnchorCalibrationAttempts);
-                OutputDebugStringA(buf);
+                dusk::vr::duskVrLog(buf);
             }
         }
     }
@@ -4125,7 +4126,7 @@ inline void logBodyRotationDiagOnce(daAlink_c* link, s16 freshHeadYawS, s16 delt
         link->current.pos.z, posOffset.x, posOffset.y, posOffset.z, freshEye.x, freshEye.y,
         freshEye.z, smoothedEye.x, smoothedEye.y, smoothedEye.z,
         bigOffset ? " <-- BIG OFFSET WHILE THIS RAN" : "");
-    OutputDebugStringA(buf);
+    dusk::vr::duskVrLog(buf);
 }
 
 inline void applyVrBodyYawOffset(J3DModel* bodyModel, s16 freshHeadYawS) {

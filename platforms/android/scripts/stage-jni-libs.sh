@@ -75,6 +75,26 @@ for abi in $ANDROID_STAGE_ABIS; do
       ;;
   esac
   copy_lib "$abi" "$src"
+
+  # VR: stage the OpenXR loader .so alongside libmain.so. Matches the
+  # layout CMakeLists.txt's Dusklight VR fragment expects
+  # (OPENXR_MOBILE_SDK_DIR/OpenXR/Libs/Android/<abi>/Release/
+  # libopenxr_loader.so) -- see that file's own comment for the
+  # "UNVERIFIED against whatever SDK version you actually downloaded"
+  # caveat; the same one applies here, unverified for the same reason
+  # (no Android NDK/SDK on the machine that wrote this). Optional: only
+  # staged when OPENXR_MOBILE_SDK_DIR is set, so the plain flatscreen
+  # Android build (no VR) isn't broken by this addition.
+  if [[ -n "${OPENXR_MOBILE_SDK_DIR:-}" ]]; then
+    xr_src="$OPENXR_MOBILE_SDK_DIR/OpenXR/Libs/Android/$abi/Release/libopenxr_loader.so"
+    if [[ -f "$xr_src" ]]; then
+      cp -f "$xr_src" "$APP_DIR/$abi/libopenxr_loader.so"
+      echo "Staged $xr_src -> $APP_DIR/$abi/libopenxr_loader.so"
+    else
+      echo "OPENXR_MOBILE_SDK_DIR set but libopenxr_loader.so not found at $xr_src -- skipping VR loader staging" >&2
+    fi
+  fi
+
   if [[ -n "$STRIP_TOOL" ]]; then
     stl="$(dirname "$STRIP_TOOL")/../sysroot/usr/lib/$triple/libc++_shared.so"
     if [[ -f "$stl" ]]; then

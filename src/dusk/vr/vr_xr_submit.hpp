@@ -44,6 +44,7 @@
 #include <webgpu/webgpu_cpp.h>
 
 #include "dusk/vr/vr_xr_bootstrap.hpp"  // DUSK_VR_XR_GRAPHICS_VULKAN, vr_xr::XrGraphicsDevice
+#include "dusk/vr/vr_debug_log.hpp"     // dusk::vr::duskVrLog/duskVrSnprintf
 
 #if DUSK_VR_XR_GRAPHICS_VULKAN
 // Already pulled in transitively via vr_xr_bootstrap.hpp above (it needs
@@ -74,36 +75,14 @@
 
 namespace dusk::vr {
 
-// Portable stand-ins for OutputDebugStringA/_snprintf_s(buf, _TRUNCATE,
-// fmt, ...), used throughout this file's diagnostic logging. Android has
-// neither. Defined once, for both branches, so every call site below uses
-// one spelling regardless of platform -- the D3D12 branch's duskVrLog is a
-// trivial passthrough to the exact call this file always made.
-//
-// duskVrSnprintf reproduces _snprintf_s's own truncation-detection
-// contract exactly (return the char count written on success, -1 if it
-// didn't fit) via standard vsnprintf, since createSwapchain()'s
-// format-list loop below relies on that -1 to know when to stop
-// appending -- this is a like-for-like behavior swap on the D3D12 branch
-// too, not just an Android addition.
-#if DUSK_VR_XR_GRAPHICS_VULKAN
-inline void duskVrLog(const char* msg) {
-    __android_log_print(ANDROID_LOG_INFO, "dusklight_vr", "%s", msg);
-}
-#else
-inline void duskVrLog(const char* msg) { OutputDebugStringA(msg); }
-#endif
-
-inline int duskVrSnprintf(char* buf, size_t cap, const char* fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    const int n = std::vsnprintf(buf, cap, fmt, args);
-    va_end(args);
-    if (n < 0 || static_cast<size_t>(n) >= cap) {
-        return -1;
-    }
-    return n;
-}
+// duskVrLog/duskVrSnprintf (portable stand-ins for OutputDebugStringA/
+// _snprintf_s(buf, _TRUNCATE, fmt, ...), used throughout this file's
+// diagnostic logging) now live in vr_debug_log.hpp, included above --
+// pulled out into their own header in the same pass that ported
+// vr_link_visibility.hpp/vr_menu_gamepad.hpp's logging, both of which
+// vr_main.cpp includes alongside this file; leaving a second definition
+// here would redefine the same dusk::vr:: symbols in that translation
+// unit.
 
 // Maps Aurora's wgpu::TextureFormat (from aurora::gfx::color_format(),
 // gfx.hpp:54) to the DXGI_FORMAT that Session::createSwapchain() needs for

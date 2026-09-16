@@ -256,8 +256,8 @@ void logTickReasonOnChange(const char* reason) {
     }
     g_lastTickReason = reason;
     char msg[128];
-    _snprintf_s(msg, _TRUNCATE, "[dusk::vr::tick] reason -> %s\n", reason);
-    OutputDebugStringA(msg);
+    duskVrSnprintf(msg, sizeof(msg), "[dusk::vr::tick] reason -> %s\n", reason);
+    duskVrLog(msg);
 }
 
 // NEW this session: backs isRenderingToHeadset(). tick() has several early-
@@ -364,10 +364,10 @@ bool waitForSessionReadyAndBegin(XrInstance instance, XrSession session) {
                     *reinterpret_cast<const XrEventDataSessionStateChanged*>(&event);
 
                 char msg[128];
-                _snprintf_s(msg, _TRUNCATE,
+                duskVrSnprintf(msg, sizeof(msg),
                             "[dusk::vr::startup] session state -> %d\n",
                             static_cast<int>(stateEvent.state));
-                OutputDebugStringA(msg);
+                duskVrLog(msg);
                 // Event-driven (only fires when the runtime actually sends
                 // a state change, at most a handful of times during
                 // startup) -- cheap enough for real DuskLog, unlike a
@@ -591,7 +591,7 @@ bool startup() {
     // is actually being called from m_Do_main.cpp at all -- I've only seen the
     // v7 handoff's description of that call site, never the file itself, so
     // this closes that gap rather than assuming it's wired correctly.
-    OutputDebugStringA("[dusk::vr::startup] called\n");
+    duskVrLog("[dusk::vr::startup] called\n");
     // Declared here, outside the try block, so the catch block below can
     // still reference it (with an empty systemName, from the aggregate
     // init's zero-fill) even if the exception happened before
@@ -692,7 +692,7 @@ bool startup() {
             // swapchain problem specifically. Visible via DebugView (Sysinternals)
             // or a debugger's Output window; not routed to real DuskLog since
             // that call site still isn't confirmed (see catch block below).
-            OutputDebugStringA("[dusk::vr::startup] FAILED: enumerateViewConfigurationViews returned 0 views\n");
+            duskVrLog("[dusk::vr::startup] FAILED: enumerateViewConfigurationViews returned 0 views\n");
             VrLog.error("startup failed: enumerateViewConfigurationViews returned 0 views (runtime: {})",
                         sysProps.systemName);
             return false;
@@ -713,10 +713,10 @@ bool startup() {
             // distinct from the "0 views" case above and from the catch block's
             // "threw before getting this far" case.
             char msg[256];
-            _snprintf_s(msg, _TRUNCATE,
+            duskVrSnprintf(msg, sizeof(msg),
                         "[dusk::vr::startup] FAILED: createSwapchain(%u, %u, dxgiFormat=%lld) returned false\n",
                         eyeWidth * 2, eyeHeight, static_cast<long long>(dxgiFormat));
-            OutputDebugStringA(msg);
+            duskVrLog(msg);
             VrLog.error("startup failed: createSwapchain({}, {}, dxgiFormat={}) returned false (runtime: {})",
                         eyeWidth * 2, eyeHeight, dxgiFormat, sysProps.systemName);
             return false;
@@ -728,7 +728,7 @@ bool startup() {
         // the time startup() returns true, the session is genuinely running
         // and tick()'s xrWaitFrame() has something to wait on.
         if (!waitForSessionReadyAndBegin(boot.instance, g_ownedSession->session())) {
-            OutputDebugStringA(
+            duskVrLog(
                 "[dusk::vr::startup] FAILED: session never reached READY / "
                 "xrBeginSession failed (see session-state log lines above)\n");
             VrLog.error("startup failed: session never reached READY / xrBeginSession failed (runtime: {})",
@@ -749,10 +749,10 @@ bool startup() {
         // dimensions/format used so we can also sanity-check those.
         {
             char msg[256];
-            _snprintf_s(msg, _TRUNCATE,
+            duskVrSnprintf(msg, sizeof(msg),
                         "[dusk::vr::startup] SUCCEEDED: swapchain %ux%u dxgiFormat=%lld\n",
                         eyeWidth * 2, eyeHeight, static_cast<long long>(dxgiFormat));
-            OutputDebugStringA(msg);
+            duskVrLog(msg);
         }
         VrLog.info("startup succeeded: runtime={} swapchain={}x{} dxgiFormat={}",
                    sysProps.systemName, eyeWidth * 2, eyeHeight, dxgiFormat);
@@ -780,8 +780,8 @@ bool startup() {
         // itself failing) -- that's fine, an empty runtime name is itself
         // informative (means it failed before even reaching the runtime).
         char msg[512];
-        _snprintf_s(msg, _TRUNCATE, "[dusk::vr::startup] EXCEPTION: %s\n", e.what());
-        OutputDebugStringA(msg);
+        duskVrSnprintf(msg, sizeof(msg), "[dusk::vr::startup] EXCEPTION: %s\n", e.what());
+        duskVrLog(msg);
         VrLog.error("startup failed: exception: {} (runtime: {})", e.what(), sysProps.systemName);
         return false;
     }
@@ -851,10 +851,10 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
         // really the mechanism, and how often it's actually happening.
         static int s_reentrantCount = 0;
         char msg[96];
-        _snprintf_s(msg, _TRUNCATE,
+        duskVrSnprintf(msg, sizeof(msg),
             "[dusk::vr::tick] RE-ENTRANT CALL #%d DETECTED -- skipping\n",
             ++s_reentrantCount);
-        OutputDebugStringA(msg);
+        duskVrLog(msg);
         return;
     }
 
@@ -982,7 +982,7 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     XrFrameState frameState{XR_TYPE_FRAME_STATE};
     if (XR_FAILED(xrWaitFrame(g_session->session(), &waitInfo, &frameState))) {
         logTickReasonOnChange("xrWaitFrame-failed");
-        OutputDebugStringA("[dusk::vr::tick] FAILED: xrWaitFrame\n");
+        duskVrLog("[dusk::vr::tick] FAILED: xrWaitFrame\n");
         return;
     }
     g_session->setFrameState(frameState);
@@ -1000,7 +1000,7 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     XrFrameBeginInfo beginInfo{XR_TYPE_FRAME_BEGIN_INFO};
     if (XR_FAILED(xrBeginFrame(g_session->session(), &beginInfo))) {
         logTickReasonOnChange("xrBeginFrame-failed");
-        OutputDebugStringA("[dusk::vr::tick] FAILED: xrBeginFrame\n");
+        duskVrLog("[dusk::vr::tick] FAILED: xrBeginFrame\n");
         return;
     }
 
@@ -1031,7 +1031,7 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
         // inferring it from the crash site alone.
         static bool loggedOnce = false;
         if (!loggedOnce) {
-            OutputDebugStringA("[dusk::vr::tick] view not ready yet (dComIfGd_getView() == nullptr) -- skipping VR render this frame\n");
+            duskVrLog("[dusk::vr::tick] view not ready yet (dComIfGd_getView() == nullptr) -- skipping VR render this frame\n");
             loggedOnce = true;
         }
         XrFrameEndInfo endInfo{XR_TYPE_FRAME_END_INFO};
@@ -1446,13 +1446,13 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
             const float speedPacingDt = pacingDt > 0.0 ? static_cast<float>(dist / pacingDt) : -1.f;
             if (leftSwingEvent.triggered || (s_frameCounter % 10) == 0) {
                 char msg[256];
-                _snprintf_s(msg, _TRUNCATE,
+                duskVrSnprintf(msg, sizeof(msg),
                     "[dusk::vr::swingdiag] pos=(%.4f,%.4f,%.4f) predDt=%.5f pacingDt=%.5f "
                     "dist=%.4f speedPredDt=%.3f speedPacingDt=%.3f TRIGGERED=%d\n",
                     leftPose.position.x, leftPose.position.y, leftPose.position.z,
                     predDt, pacingDt, dist, speedPredDt, speedPacingDt,
                     leftSwingEvent.triggered ? 1 : 0);
-                OutputDebugStringA(msg);
+                duskVrLog(msg);
             }
         }
         s_prevPos = leftPose.position;
@@ -1953,10 +1953,10 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     const XrResult acquireResult = xrAcquireSwapchainImage(g_session->swapchain(), &acquireInfo, &swapchainIndex);
     if (XR_FAILED(acquireResult)) {
         char msg[128];
-        _snprintf_s(msg, _TRUNCATE,
+        duskVrSnprintf(msg, sizeof(msg),
                     "[dusk::vr::tick] FAILED: xrAcquireSwapchainImage, XrResult=%d\n",
                     static_cast<int>(acquireResult));
-        OutputDebugStringA(msg);
+        duskVrLog(msg);
         XrFrameEndInfo endInfo{XR_TYPE_FRAME_END_INFO};
         endInfo.displayTime = frameState.predictedDisplayTime;
         endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
@@ -1969,7 +1969,7 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     XrSwapchainImageWaitInfo waitImgInfo{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
     waitImgInfo.timeout = XR_INFINITE_DURATION;
     if (XR_FAILED(xrWaitSwapchainImage(g_session->swapchain(), &waitImgInfo))) {
-        OutputDebugStringA("[dusk::vr::tick] FAILED: xrWaitSwapchainImage\n");
+        duskVrLog("[dusk::vr::tick] FAILED: xrWaitSwapchainImage\n");
         XrSwapchainImageReleaseInfo releaseInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
         xrReleaseSwapchainImage(g_session->swapchain(), &releaseInfo);
         XrFrameEndInfo endInfo{XR_TYPE_FRAME_END_INFO};
@@ -2339,7 +2339,7 @@ void submitFrame() {
     XrSwapchainImageReleaseInfo releaseInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
     // TEMP DIAGNOSTIC (this session): see tick()'s matching comment above.
     if (XR_FAILED(xrReleaseSwapchainImage(g_session->swapchain(), &releaseInfo))) {
-        OutputDebugStringA("[dusk::vr::submitFrame] FAILED: xrReleaseSwapchainImage\n");
+        duskVrLog("[dusk::vr::submitFrame] FAILED: xrReleaseSwapchainImage\n");
     }
 
     XrCompositionLayerProjection projLayer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
@@ -2356,7 +2356,7 @@ void submitFrame() {
     endInfo.layerCount = 1;
     endInfo.layers = layers;
     if (XR_FAILED(xrEndFrame(g_session->session(), &endInfo))) {
-        OutputDebugStringA("[dusk::vr::submitFrame] FAILED: xrEndFrame\n");
+        duskVrLog("[dusk::vr::submitFrame] FAILED: xrEndFrame\n");
     }
 }
 

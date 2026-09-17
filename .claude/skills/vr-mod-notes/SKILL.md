@@ -13671,3 +13671,140 @@ either different hardware or the Dawn-version lead above. Both fixes are
 D3D12/PC-only, per explicit user scoping at the very start of this
 session -- the Vulkan/Android branch was NOT touched and remains exactly
 as unverified/unbuilt as it already was.
+
+### Android/Quest first-run disc-image picker (no adb required) + a real fresh-install VR-blank-splash fix -- BOTH CONFIRMED FIXED IN-HEADSET 2026-09-17
+
+**Goal** (explicit user question): "for the android version specifically,
+if someone wants to run the game and has the game file, but they are not
+running a command prompt with adb like we did, how would they select the
+disc image?" -- this session's Android investigation
+([[dusklight_vr_android_port]]) had only ever worked around this via
+`adb shell am start ... --es dusk_args "'--dvd /path'"` (the "Boot-flow
+gotcha" section elsewhere in this file), never solved for a real end user
+with no adb access at all.
+
+**Investigation found the actual mechanism was already almost entirely
+built**: `dusk::ui::Prelaunch` (`src/dusk/ui/prelaunch.cpp`) is a real,
+already-shipping RmlUi document with its own "Select Disc Image" button,
+async disc-verification thread, and `open_iso_picker()` (already public,
+`prelaunch.hpp`), which calls `ShowFileSelect()`
+(`src/dusk/file_select.cpp`) -- on Android this already routes through
+`SDL_ShowOpenFileDialog()`, i.e. Android's real Storage Access Framework
+picker (`ACTION_OPEN_DOCUMENT`), with existing JNI plumbing
+(`getDisplayNameForUri`) already wired up. **None of this needed building
+-- it already worked on flatscreen Android.** The only actual gap:
+`launchUILoop()` (`m_Do_main.cpp`) -- the loop that drives this whole
+document before the game itself launches -- never starts a VR session or
+renders anything into the headset at all (confirmed: `dusk::vr::startup()`
+is only ever called later, inside the MAIN game loop, never from
+`launchUILoop()`), so the flat 2D "Select Disc Image" button the player
+would need to press is completely invisible on Quest -- exactly the
+already-documented "Boot-flow gotcha" symptom, just now precisely
+diagnosed instead of only worked around.
+
+**Fix, deliberately NOT a new VR render path**: rather than build a second,
+gameplay-independent VR renderer just to make our own flat button visible
+(a materially bigger, riskier undertaking), `main01()` now auto-triggers
+`dusk::ui::open_iso_picker()` on Android, once, right when it's about to
+push the (invisible) `Prelaunch` document and only when no disc is
+configured yet (`dvd_path.empty()`) -- `#if TARGET_ANDROID` in
+`m_Do_main.cpp`, right before the existing `launchUILoop()` call. The
+native SAF picker Activity is a real, SEPARATE Android window, not part of
+our own suppressed flat compositing layer -- Quest's normal handling of a
+non-VR Activity launched from within a VR app overlays it as its own
+visible panel (this was the one real unknown going in; **confirmed working
+in-headset, first try** -- the picker was visible and usable without
+touching adb). Everything downstream -- async validation, persisting
+`backend.isoPath`, and auto-setting `IsGameLaunched = true` once a valid
+disc is chosen -- already runs off `Prelaunch::update()`'s existing
+per-frame polling inside `launchUILoop()`, invisible or not, so nothing
+else needed to change for the flow to complete on its own once a file is
+picked.
+
+**A second, separate, real bug found immediately after** via the first
+real in-headset test of the fix above: picking a file completed
+correctly (config saved, `dusk::vr::startup succeeded`), but the headset
+showed only Quest's "3 dots" loading splash forever -- this is the
+SEPARATE, already-flagged "VR never renders on a fresh install" bug from
+earlier in this same Android investigation (see
+[[dusklight_vr_android_port]]'s "Real, universal (NOT Android-specific)
+bug" section) -- `dusk::vr::tick()` is only ever reachable from inside
+`m_Do_main.cpp`'s `if (pacing.is_interpolating)` branch, and
+`enableFrameInterpolation` defaults to `Off` on a config-less fresh
+install, so the whole branch (and all real per-eye VR rendering) never
+ran even though the game was running normally in the background. This had
+previously only ever been worked around by manually seeding
+`"game.enableFrameInterpolation": 1` into `config.json` before first
+launch -- never fixed in code, explicitly flagged as "worth prioritizing"
+since it affects PC too, not just Android.
+
+**Real fix applied this time** (`src/dusk/game_clock.cpp`'s
+`advance_main_loop()`): `should_interpolate` now also goes true whenever
+`dusk::vr::isActive()`, independent of the `enableFrameInterpolation`
+config default --
+```cpp
+const bool should_interpolate = (dusk::getSettings().game.enableFrameInterpolation.getValue() !=
+                                    dusk::FrameInterpMode::Off ||
+                                dusk::vr::isActive()) &&
+                                !dusk::getTransientSettings().skipFrameRateLimit;
+```
+Needed a new `#include "dusk/vr/vr_main.hpp"` in `game_clock.cpp` (safe --
+that header already includes `game_clock.h`, not a cycle;
+`dusk::vr::isActive()` is already called unconditionally elsewhere in
+`m_Do_main.cpp` with no `DUSK_VR_ENABLED` guard, so it's always callable).
+Deliberately still respects `skipFrameRateLimit` (a separate, narrower
+dev/transient toggle, left untouched) -- only the `enableFrameInterpolation
+== Off` half of the old condition gets overridden, and only while a VR
+session genuinely exists. This directly implements the first of the three
+options this file's Android section had already scoped out ("force
+`enableFrameInterpolation` on whenever `dusk::vr::isActive()`/VR startup
+succeeds") -- picked over the other two (wiring `tick()` into the
+non-interpolating `else` branch too, or just changing the compiled
+default) as the smallest, most targeted change: it fixes exactly the
+"VR session exists but interpolation defaulted off" gap without touching
+the `else` branch's own separate, still-unread `fapGm_Execute()` internals,
+and without silently changing frame-pacing behavior for everyone who's
+never touched VR at all.
+
+**Unrelated pre-existing Android build break found and fixed along the
+way**: the previous session's D3D12-only same-device GPU-direct
+swapchain-copy work (`Session::beginSwapchainAccessForFrame()`/
+`encodeSwapchainCopy()`, guarded `#if !DUSK_VR_XR_GRAPHICS_VULKAN` inside
+`vr_xr_submit.hpp` where they're defined) was called from `vr_main.cpp`
+with only a runtime check (`usesGpuDirectSwapchainCopy()`), no matching
+compile-time guard at the CALL SITES -- meaning the Android/Vulkan build
+failed to even compile at all, not just misbehave at runtime. Confirmed
+this had nothing to do with today's own changes (pure pre-existing
+breakage from the last, PC-only-tested session). Fixed by wrapping both
+call sites (`tick()`'s `beginSwapchainAccessForFrame()` call and
+`endEye()`'s `encodeSwapchainCopy()`/`encodeEyeCopy()` branch) in the same
+`#if !DUSK_VR_XR_GRAPHICS_VULKAN` guard used where the methods are
+defined -- `usesGpuDirectSwapchainCopy()` itself stays unconditional
+(correctly returns false on Vulkan at runtime; `sameDeviceAsAurora_` is
+never set true there), only the two D3D12-only method CALLS needed the
+extra guard.
+
+**Both fixes confirmed together in-headset, same session, on a real Quest
+3, via the persistent DuskLog file** (not just a code-reading assumption):
+a `config.json`-deleted fresh install now shows `Disc verification status:
+unknown (path: <none>)` at boot, the native picker appears and is usable
+with zero adb involvement, `Disc verification status: verified` ->
+`startup succeeded: runtime=Meta Quest 3` -> `fapGm_Execute frame=0` all
+follow automatically, and -- after the interpolation fix specifically --
+the headset actually renders gameplay instead of sitting on the loading
+splash. Zero FATAL/real ERROR lines in either session's full log (only
+the pre-existing, harmless `/etc/os-release` probe warning and the
+already-known, already-documented "offscreen pass" warning spam). User
+confirmation, verbatim: "it's working now."
+
+**Reusable lesson**: a fix that appears to work (config saved, VR session
+started, no crash) can still fail completely silently if it depends on a
+SECOND, separate default that also needs to hold -- don't declare victory
+on the first green signal (config persisted correctly) without actually
+seeing the intended end state (something rendered in the headset). Also
+worth remembering for next time: this file's own Android section had
+already fully scoped and named the fix for the interpolation-default bug
+months of narrative ago ("worth prioritizing") -- it just hadn't been
+picked up; a quick grep/read of the already-written diagnosis was faster
+than re-deriving it from scratch once the symptom (3 dots on a fresh
+install) reappeared.

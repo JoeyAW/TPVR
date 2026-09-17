@@ -972,6 +972,30 @@ int game_main(int argc, char* argv[]) {
         if (!skipPreLaunchUI) {
             dusk::ui::push_document(std::make_unique<dusk::ui::Prelaunch>(), true);
 
+#if TARGET_ANDROID
+            // The flat 2D prelaunch UI (including its own "Select Disc Image"
+            // button) never composites at all once the app is declared a VR
+            // app -- Horizon OS shows its own loading splash instead of this
+            // window's Present() (see the vr-mod-notes skill's "Boot-flow
+            // gotcha"). Rather than strand the player on a blank splash with
+            // no way to see or press a button, auto-trigger the native
+            // Android file picker (SDL_ShowOpenFileDialog, via
+            // open_iso_picker()) as soon as we know there's no usable disc
+            // image configured yet. The system picker is a real, separate
+            // Android Activity -- unlike our own suppressed flat layer, it's
+            // expected to overlay as its own visible panel the way Quest
+            // normally handles a non-VR Activity launched from a VR app
+            // (not independently verified for this app/manifest yet; test
+            // in-headset). Everything downstream (async disc validation,
+            // persisting isoPath, auto-launching once a valid disc is
+            // chosen) already runs off Prelaunch's own per-frame update()
+            // polling inside launchUILoop() below -- no VR-specific
+            // rendering is needed for any of it.
+            if (dvd_path.empty()) {
+                dusk::ui::open_iso_picker();
+            }
+#endif
+
             // pre game launch ui main loop
             if (!launchUILoop()) {
                 dusk::crash_reporting::shutdown();

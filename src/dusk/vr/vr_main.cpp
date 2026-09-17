@@ -2016,11 +2016,20 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     // frame, so BeginAccess must only be opened once, not once per eye.
     // Full (double-wide) dimensions, matching exactly what startup()'s
     // createSwapchain(eyeWidth * 2, eyeHeight, ...) call actually allocated.
+#if !DUSK_VR_XR_GRAPHICS_VULKAN
+    // beginSwapchainAccessForFrame() only exists on the D3D12 build of
+    // Session (see vr_xr_submit.hpp's matching #if !DUSK_VR_XR_GRAPHICS_VULKAN
+    // guard around its definition) -- usesGpuDirectSwapchainCopy() itself
+    // compiles everywhere and just returns false on Vulkan (sameDeviceAsAurora_
+    // is never set true there), but calling this method unconditionally would
+    // still fail to COMPILE on Android/Vulkan, where the method doesn't exist
+    // on the class at all.
     if (g_session->usesGpuDirectSwapchainCopy()) {
         g_session->beginSwapchainAccessForFrame(
             swapchainIndex, configViews[0].recommendedImageRectWidth * 2,
             configViews[0].recommendedImageRectHeight);
     }
+#endif
 
     g_tAfterAcquire = std::chrono::steady_clock::now();
 
@@ -2250,11 +2259,17 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
         // (encodeEyeCopy() + submitFrame()'s later readbackEyeCopy()) with
         // one same-device GPU copy straight into the swapchain image,
         // already BeginAccess'd once this frame above.
+#if !DUSK_VR_XR_GRAPHICS_VULKAN
+        // encodeSwapchainCopy() only exists on the D3D12 build of Session --
+        // see the matching #if guard on beginSwapchainAccessForFrame()'s call
+        // site above for why this can't just be a runtime-only check.
         if (g_session->usesGpuDirectSwapchainCopy()) {
             g_session->encodeSwapchainCopy(
                 targets.colorTexture, eye, swapchainIndex, eyeParams.width, eyeParams.height,
                 eye * eyeParams.width, aurora::gfx::color_format());
-        } else {
+        } else
+#endif
+        {
             g_session->encodeEyeCopy(
                 targets.colorTexture, eye, swapchainIndex, eyeParams.width, eyeParams.height,
                 eye * eyeParams.width, aurora::gfx::color_format());

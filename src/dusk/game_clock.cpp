@@ -5,6 +5,7 @@
 #include <cmath>
 #include <unordered_map>
 #include <dusk/frame_interpolation.h>
+#include "dusk/vr/vr_main.hpp"
 
 namespace dusk::game_clock {
 
@@ -46,8 +47,19 @@ MainLoopPacer advance_main_loop() {
     MainLoopPacer out{};
     out.presentation_dt_seconds = presentation_dt;
 
-    const bool should_interpolate = dusk::getSettings().game.enableFrameInterpolation.getValue() !=
-                                        dusk::FrameInterpMode::Off &&
+    // VR real per-eye rendering ONLY ever runs from inside the interpolating
+    // branch of m_Do_main.cpp's main loop (dusk::vr::tick() is called there,
+    // nowhere else) -- on a genuinely fresh config with no config.json yet,
+    // enableFrameInterpolation defaults to Off, which used to mean this whole
+    // branch (and therefore all real VR rendering) never ran at all: the game
+    // played completely normally in the background, but the headset just sat
+    // on the runtime's own loading splash forever. Force interpolation on
+    // whenever a VR session is active, independent of the config default, so
+    // a fresh install doesn't need a manual config.json edit to ever render
+    // anything in the headset.
+    const bool should_interpolate = (dusk::getSettings().game.enableFrameInterpolation.getValue() !=
+                                        dusk::FrameInterpMode::Off ||
+                                    dusk::vr::isActive()) &&
                                     !dusk::getTransientSettings().skipFrameRateLimit;
     out.is_interpolating = should_interpolate;
     out.sim_pace = sim_pace();

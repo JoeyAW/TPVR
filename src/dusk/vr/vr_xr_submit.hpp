@@ -35,6 +35,7 @@
 
 #include <openxr/openxr.h>
 #include <algorithm>
+#include <chrono>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -139,6 +140,38 @@ inline int64_t toDxgiSwapchainFormat(wgpu::TextureFormat format) {
                 "toDxgiSwapchainFormat: unhandled wgpu::TextureFormat from "
                 "aurora::gfx::color_format() -- add a case rather than assume "
                 "RGBA8Unorm (see VR_MOD_HANDOFF_7.md TODO list).");
+    }
+}
+
+// Reverse of toDxgiSwapchainFormat() -- needed by Session::
+// ensureSwapchainTexture() (GPU-direct swapchain copy path, see
+// sameDeviceAsAurora_'s comment): Dawn's TextureDescriptor::format passed
+// to SharedTextureMemory::CreateTexture() must match the REAL format the
+// underlying ID3D12Resource was created with (swapchainDxgiFormat_ --
+// which may differ from aurora::gfx::color_format() whenever
+// createSwapchain() had to fall back to a channel-swapped/sRGB-toggled
+// candidate), not aurora's own native color format. Only covers the 8bpc
+// RGBA/BGRA UNORM/SRGB candidates createSwapchain() can actually choose
+// for the gamma-compute-path formats (the only ones
+// usesGpuDirectSwapchainCopy() ever applies to -- see that flag's own
+// comment) -- the rare kPackedFallbackFormat (10bpc packed) case never
+// reaches this function, since that path stays on the old CPU copy
+// unconditionally.
+inline wgpu::TextureFormat fromDxgiSwapchainFormat(int64_t dxgiFormat) {
+    switch (dxgiFormat) {
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+            return wgpu::TextureFormat::RGBA8Unorm;
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+            return wgpu::TextureFormat::RGBA8UnormSrgb;
+        case DXGI_FORMAT_B8G8R8A8_UNORM:
+            return wgpu::TextureFormat::BGRA8Unorm;
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+            return wgpu::TextureFormat::BGRA8UnormSrgb;
+        default:
+            throw std::runtime_error(
+                "fromDxgiSwapchainFormat: unhandled DXGI format -- "
+                "usesGpuDirectSwapchainCopy() should never be true for "
+                "whatever format reached here (see its own comment).");
     }
 }
 #endif
@@ -943,6 +976,115 @@ public:
         aurora::gfx::push_encoder_task(cpuCopyTaskId_, &payload, sizeof(payload));
     }
 
+#if !DUSK_VR_XR_GRAPHICS_VULKAN
+    // GPU-DIRECT SWAPCHAIN-COPY PATH (sameDeviceAsAurora_ / see that field's
+    // comment for the full "why this exists" writeup). Only meaningful when
+    // sameDeviceAsAurora_ is true -- vr_main.cpp only ever calls these two
+    // functions (beginSwapchainAccessForFrame/encodeSwapchainCopy) when
+    // usesGpuDirectSwapchainCopy() said yes.
+
+    // Lazily wraps swapchainImages_[index].texture (an ID3D12Resource
+    // created on Aurora's OWN device -- see sameDeviceAsAurora_'s comment
+    // for why that's what makes this safe/documented, unlike
+    // importSwapchainImage() above) as a Dawn wgpu::Texture via
+    // SharedTextureMemory. No fence needed (unlike ensureFenceSync()'s dead
+    // cross-device code) -- same device AND same command queue (both handed
+    // to xrCreateSession via getD3D12DeviceAndQueue()), so Dawn's own
+    // internal command-submission ordering already serializes our copy
+    // against anything the XR runtime itself does with this queue.
+    void ensureSwapchainTexture(uint32_t index, uint32_t width, uint32_t height) {
+        if (swapchainTextures_.size() <= index) {
+            swapchainMemory_.resize(index + 1);
+            swapchainTextures_.resize(index + 1);
+        }
+        if (swapchainTextures_[index]) {
+            return; // already imported -- same underlying image every time this index is acquired
+        }
+
+        dawn::native::d3d12::SharedTextureMemoryD3D12ResourceDescriptor d3dDesc;
+        d3dDesc.resource = swapchainImages_[index].texture;
+
+        wgpu::SharedTextureMemoryDescriptor stmDesc{};
+        stmDesc.nextInChain = &d3dDesc;
+        swapchainMemory_[index] = aurora::webgpu::g_device.ImportSharedTextureMemory(&stmDesc);
+
+        wgpu::TextureDescriptor texDesc{};
+        // MUST be the swapchain's REAL format (swapchainDxgiFormat_), not
+        // aurora's own native color format -- see fromDxgiSwapchainFormat()'s
+        // comment for why those can differ.
+        texDesc.format = fromDxgiSwapchainFormat(swapchainDxgiFormat_);
+        texDesc.size = {width, height, 1};
+        // RenderAttachment mirrors the swapchain's own declared XR usage
+        // (XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT, createSwapchain()) --
+        // CopyDst is what CopyBufferToTexture below actually needs. Same
+        // combination importSwapchainImage()'s already-compiling dead code
+        // above used, not a new guess.
+        texDesc.usage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopyDst;
+        swapchainTextures_[index] = swapchainMemory_[index].CreateTexture(&texDesc);
+    }
+
+    // Call ONCE per frame, right after xrAcquireSwapchainImage/
+    // xrWaitSwapchainImage succeed -- NOT per eye (both eyes write into the
+    // same double-wide swapchain image/index this frame; BeginAccess must
+    // only be opened once per actual use of the resource, not once per
+    // logical eye). endAccessAll() (already called once per frame from
+    // submitFrame(), unchanged) closes this out via the existing
+    // pendingMemory_/pendingTextures_ bookkeeping -- reused as-is, not
+    // duplicated.
+    void beginSwapchainAccessForFrame(uint32_t index, uint32_t width, uint32_t height) {
+        ensureSwapchainTexture(index, width, height);
+
+        wgpu::SharedTextureMemoryBeginAccessDescriptor beginDesc{};
+        // Content doesn't need to be preserved -- both eyes fully overwrite
+        // their half of the image every frame -- but `initialized` also
+        // gates whether Dawn treats the resource as safe to touch at all
+        // (an uninitialized-content resource can still be a validly
+        // usable one); true matches what the swapchain's own
+        // xrWaitSwapchainImage contract already guarantees (a real,
+        // previously-released image, not raw uninitialized memory).
+        beginDesc.initialized = true;
+        swapchainMemory_[index].BeginAccess(swapchainTextures_[index], &beginDesc);
+
+        pendingMemory_.push_back(swapchainMemory_[index]);
+        pendingTextures_.push_back(swapchainTextures_[index]);
+    }
+
+    // The GPU-direct equivalent of encodeEyeCopy() -- call once per eye,
+    // same call site/timing (right after endEye(), inside tick()). Pushes
+    // the SAME encoder task type encodeEyeCopy() uses (cpuCopyTaskId_) --
+    // encoderTaskCallback() itself branches on sameDeviceAsAurora_ to decide
+    // whether its tail writes into res.readback (CPU path) or straight into
+    // swapchainTextures_[swapchainIndex] (this path) -- so no second task
+    // type/registration is needed.
+    void encodeSwapchainCopy(const wgpu::Texture& srcTexture, uint32_t eyeIndex, uint32_t swapchainIndex,
+                              uint32_t eyeWidth, uint32_t eyeHeight, uint32_t dstXOffset,
+                              wgpu::TextureFormat format) {
+        // Still needed: the gamma compute pass's OWN buffers (gammaStorage/
+        // gammaUniform) -- everything about that pass is unchanged, only
+        // its final destination (this function's caller's
+        // encoderTaskCallback branch) differs. res.readback/uploadHeap
+        // (the CPU-path-only members this also allocates) simply go
+        // unused on this path -- harmless, not worth special-casing out.
+        ensureCpuCopyBuffers(eyeIndex, eyeWidth, eyeHeight, format);
+
+        if (pendingCopySrc_.size() <= eyeIndex) {
+            pendingCopySrc_.resize(eyeIndex + 1);
+        }
+        pendingCopySrc_[eyeIndex] = srcTexture;
+
+        const CpuCopyTaskPayload payload{
+            .eyeIndex = eyeIndex,
+            .eyeWidth = eyeWidth,
+            .eyeHeight = eyeHeight,
+            .swapchainIndex = swapchainIndex,
+            .dstXOffset = dstXOffset,
+        };
+        static_assert(sizeof(CpuCopyTaskPayload) <= aurora::gfx::InlineDrawPayloadSize,
+                      "CpuCopyTaskPayload too large for inline encoder task payload");
+        aurora::gfx::push_encoder_task(cpuCopyTaskId_, &payload, sizeof(payload));
+    }
+#endif  // !DUSK_VR_XR_GRAPHICS_VULKAN
+
     // Call once per eye AFTER aurora_end_frame() has returned for this
     // frame -- see the WHY THIS IS SPLIT IN TWO note above. Same
     // eyeIndex/swapchainIndex/eyeWidth/eyeHeight/dstXOffset/format as the
@@ -956,8 +1098,52 @@ public:
     // image), only offset differently via dstXOffset.
     void readbackEyeCopy(uint32_t eyeIndex, uint32_t swapchainIndex, uint32_t eyeWidth, uint32_t eyeHeight,
                           uint32_t dstXOffset, wgpu::TextureFormat format) {
+        // Defensive, belt-and-suspenders (vr_main.cpp's submitFrame() is
+        // also expected to skip calling this entirely when
+        // usesGpuDirectSwapchainCopy() -- see that flag's comment): if
+        // called anyway, res.readback was never written this frame (the
+        // GPU-direct path replaced its CopyBufferToBuffer with a direct
+        // CopyBufferToTexture into the swapchain image already -- see
+        // encoderTaskCallback()), so mapping and re-uploading it here
+        // would overwrite the swapchain image with stale/empty data,
+        // corrupting the very frame the fast path just correctly wrote.
+        if (usesGpuDirectSwapchainCopy()) {
+            return;
+        }
         ensureCpuCopyCmdList();
         auto& res = cpuCopyBuffers_[eyeIndex];
+
+#if !DUSK_VR_XR_GRAPHICS_VULKAN
+        // DOUBLE-BUFFERED (2026-09-16 perf follow-up): pick this call's
+        // upload-heap/command-list slot, lazily create it on first use,
+        // then wait ONLY if this specific slot's own last-submitted copy
+        // hasn't completed yet -- on first use slotFenceValue is 0 and
+        // GetCompletedValue() starts at 0 too, so this is always a no-op
+        // then; on reuse (2 calls later, i.e. next frame for this same
+        // eye) a whole frame has elapsed, so it's almost always still a
+        // no-op rather than the guaranteed stall the old single-buffered
+        // version had at the END of every single call.
+        const uint32_t slot = res.slotIndex;
+        if (!res.slotCmdList[slot]) {
+            xrDevice_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                               IID_PPV_ARGS(&res.slotCmdAlloc[slot]));
+            xrDevice_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, res.slotCmdAlloc[slot].Get(),
+                                          nullptr, IID_PPV_ARGS(&res.slotCmdList[slot]));
+            res.slotCmdList[slot]->Close(); // Reset() below expects a closed list first time
+        }
+        if (copyFence_->GetCompletedValue() < res.slotFenceValue[slot]) {
+            HANDLE event = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
+            copyFence_->SetEventOnCompletion(res.slotFenceValue[slot], event);
+            WaitForSingleObject(event, INFINITE);
+            CloseHandle(event);
+        }
+#endif
+
+        // Perf instrumentation added to gather real timing data on the
+        // CPU-readback round trip before optimizing it further -- see the
+        // "correctness-first pass... perf TODO" notes on the MapAsync wait
+        // and GPU fence wait below. NOT yet acted on; just measuring.
+        const auto perfT0 = std::chrono::steady_clock::now();
 
         // --- Map the staging buffer (written by encodeEyeCopy's task,
         // already submitted to the GPU as part of this frame's single
@@ -995,6 +1181,8 @@ public:
         const uint8_t* mapped = static_cast<const uint8_t*>(
             res.readback.GetConstMappedRange(0, static_cast<size_t>(res.bytesPerRow) * eyeHeight));
 
+        const auto perfTMapped = std::chrono::steady_clock::now();
+
         // --- Copy row-by-row into the D3D12 upload heap. ---
         // Two independent row-pitch alignments (Dawn's and D3D12's are both
         // 256 today, but don't assume they stay equal -- copy the real
@@ -1009,7 +1197,7 @@ public:
 #else
         void* uploadMapped = nullptr;
         D3D12_RANGE noRead{0, 0};
-        res.uploadHeap->Map(0, &noRead, &uploadMapped);
+        res.uploadHeap[slot]->Map(0, &noRead, &uploadMapped);
 #endif
         // swapchainPixelConversion_ (see createSwapchain()'s comment): what
         // the runtime's actually-accepted format requires we do to the
@@ -1081,10 +1269,12 @@ public:
         // Nothing to unmap -- HOST_COHERENT persistent mapping, see above.
 #else
         D3D12_RANGE written{0, static_cast<SIZE_T>(res.uploadRowPitch) * eyeHeight};
-        res.uploadHeap->Unmap(0, &written);
+        res.uploadHeap[slot]->Unmap(0, &written);
 #endif
 
         res.readback.Unmap();
+
+        const auto perfTCopied = std::chrono::steady_clock::now();
 
         // --- Record + execute the upload buffer -> swapchain image copy on
         // the XR-side device/queue, offset into the correct eye's half of
@@ -1180,8 +1370,10 @@ public:
         // above.
         vkWaitForFences(xrDevice_, 1, &copyFence_, VK_TRUE, UINT64_MAX);
 #else
-        copyCmdAlloc_->Reset();
-        copyCmdList_->Reset(copyCmdAlloc_.Get(), nullptr);
+        ID3D12CommandAllocator* slotAlloc = res.slotCmdAlloc[slot].Get();
+        ID3D12GraphicsCommandList* slotList = res.slotCmdList[slot].Get();
+        slotAlloc->Reset();
+        slotList->Reset(slotAlloc, nullptr);
 
         Microsoft::WRL::ComPtr<ID3D12Resource> dstResource = swapchainImages_[swapchainIndex].texture;
 
@@ -1191,7 +1383,7 @@ public:
         toDest.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
         toDest.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
         toDest.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        copyCmdList_->ResourceBarrier(1, &toDest);
+        slotList->ResourceBarrier(1, &toDest);
 
         D3D12_TEXTURE_COPY_LOCATION dst{};
         dst.pResource = dstResource.Get();
@@ -1199,7 +1391,7 @@ public:
         dst.SubresourceIndex = 0;
 
         D3D12_TEXTURE_COPY_LOCATION src{};
-        src.pResource = res.uploadHeap.Get();
+        src.pResource = res.uploadHeap[slot].Get();
         src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
         src.PlacedFootprint.Offset = 0;
         // Must match the swapchain's ACTUAL format (swapchainDxgiFormat_),
@@ -1214,29 +1406,68 @@ public:
 
         // dstXOffset lands this eye's copy in the correct half of the
         // double-wide resource; dstY/dstZ stay 0 (full height, single layer).
-        copyCmdList_->CopyTextureRegion(&dst, dstXOffset, 0, 0, &src, nullptr);
+        slotList->CopyTextureRegion(&dst, dstXOffset, 0, 0, &src, nullptr);
 
         D3D12_RESOURCE_BARRIER toCommon = toDest;
         std::swap(toCommon.Transition.StateBefore, toCommon.Transition.StateAfter);
-        copyCmdList_->ResourceBarrier(1, &toCommon);
+        slotList->ResourceBarrier(1, &toCommon);
 
-        copyCmdList_->Close();
-        ID3D12CommandList* lists[] = {copyCmdList_.Get()};
+        slotList->Close();
+        ID3D12CommandList* lists[] = {slotList};
         xrQueue_->ExecuteCommandLists(1, lists);
 
-        // Block until the XR-side GPU has finished the copy before this
-        // function returns -- the upload heap gets reused/remapped next
-        // call, so it must not still be in flight. Same "correctness
-        // first, perf TODO" note as the MapAsync wait above.
+        // NOT blocking anymore (2026-09-16 perf follow-up -- this used to
+        // be a guaranteed WaitForSingleObject(..., INFINITE) here, every
+        // single call, confirmed via real in-headset timing to be a large
+        // chunk of the whole CPU-readback round trip's cost). Record which
+        // fence value this slot's copy will reach, then return. The NEXT
+        // time this same slot comes up (2 calls from now -- this same eye,
+        // next frame), the wait at the TOP of this function checks this
+        // value instead -- by then a whole frame has elapsed, so that
+        // check is a no-op in the common case rather than a guaranteed
+        // stall every single call. Safe without any wait here because (a)
+        // this slot's own buffer/command-list won't be touched again until
+        // that later check passes, and (b) the swapchain image's own
+        // resource-state transitions are correctly ordered by the GPU
+        // itself since both eyes submit to the same queue in sequence --
+        // D3D12 command lists on one queue execute in submission order
+        // without needing CPU-side waits between them.
         ++copyFenceValue_;
         xrQueue_->Signal(copyFence_.Get(), copyFenceValue_);
-        if (copyFence_->GetCompletedValue() < copyFenceValue_) {
-            HANDLE event = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
-            copyFence_->SetEventOnCompletion(copyFenceValue_, event);
-            WaitForSingleObject(event, INFINITE);
-            CloseHandle(event);
-        }
+        res.slotFenceValue[slot] = copyFenceValue_;
+        res.slotIndex = (slot + 1) % CpuCopyBuffers::kUploadSlotCount;
 #endif
+
+        // Throttled perf breakdown of the CPU-readback round trip -- logs
+        // one sample every kPerfLogInterval calls PER EYE so the logging
+        // itself doesn't perturb the very thing being measured. Static
+        // counters here (not member fields) since this is diagnostic-only
+        // and there's exactly one Session in practice.
+        {
+            const auto perfTDone = std::chrono::steady_clock::now();
+            static uint64_t perfCallCount[2] = {0, 0};
+            constexpr uint64_t kPerfLogInterval = 90;
+            if (eyeIndex < 2 && (++perfCallCount[eyeIndex] % kPerfLogInterval) == 0) {
+                const auto us = [](auto d) {
+                    return std::chrono::duration_cast<std::chrono::microseconds>(d).count();
+                };
+                char msg[256];
+                duskVrSnprintf(msg, sizeof(msg),
+                               "[dusk::vr::perf] eye=%u mapWait=%lldus cpuCopy=%lldus "
+                               // Renamed from gpuSubmitWait (2026-09-16):
+                               // on D3D12 this no longer waits for GPU
+                               // completion at all (see the double-buffer
+                               // fix above) -- just record+submit time
+                               // now. Still a real wait on the untouched
+                               // Vulkan branch.
+                               "gpuSubmit=%lldus total=%lldus\n",
+                               eyeIndex, static_cast<long long>(us(perfTMapped - perfT0)),
+                               static_cast<long long>(us(perfTCopied - perfTMapped)),
+                               static_cast<long long>(us(perfTDone - perfTCopied)),
+                               static_cast<long long>(us(perfTDone - perfT0)));
+                duskVrLog(msg);
+            }
+        }
     }
 
 private:
@@ -1244,6 +1475,11 @@ private:
         uint32_t eyeIndex;
         uint32_t eyeWidth;
         uint32_t eyeHeight;
+        // Only consulted when sameDeviceAsAurora_/usesGpuDirectSwapchainCopy()
+        // -- unused (left zero-initialized by encodeEyeCopy()'s payload) on
+        // the plain CPU-copy path, harmless either way.
+        uint32_t swapchainIndex = 0;
+        uint32_t dstXOffset = 0;
     };
 
     // Runs on the render worker thread, positioned between render passes on
@@ -1309,6 +1545,39 @@ private:
             pass.SetBindGroup(0, bindGroup);
             pass.DispatchWorkgroups((p.eyeWidth + 7) / 8, (p.eyeHeight + 7) / 8, 1);
             pass.End();
+
+#if !DUSK_VR_XR_GRAPHICS_VULKAN
+            // GPU-DIRECT PATH (2026-09-16, see sameDeviceAsAurora_'s comment):
+            // the compute pass above already wrote final, correctly-ordered,
+            // gamma-corrected bytes into res.gammaStorage -- exactly the byte
+            // layout the XR swapchain image expects. Copy straight into the
+            // (already BeginAccess'd -- see beginSwapchainAccessForFrame(),
+            // called once per frame from tick() right after
+            // xrAcquireSwapchainImage/xrWaitSwapchainImage succeed)
+            // Dawn-wrapped swapchain texture, GPU-side, same device/queue as
+            // everything else in this frame -- no CPU touch, no separate
+            // device, no manual submit/wait. Replaces the old
+            // CopyBufferToBuffer-into-res.readback + readbackEyeCopy()'s
+            // whole MapAsync/upload-heap/CopyTextureRegion dance for this
+            // path entirely.
+            if (self->sameDeviceAsAurora_) {
+                wgpu::TexelCopyBufferInfo srcBuf{};
+                srcBuf.buffer = res.gammaStorage;
+                srcBuf.layout.offset = 0;
+                srcBuf.layout.bytesPerRow = res.bytesPerRow;
+                srcBuf.layout.rowsPerImage = p.eyeHeight;
+
+                wgpu::TexelCopyTextureInfo dstTex{};
+                dstTex.texture = self->swapchainTextures_[p.swapchainIndex];
+                dstTex.mipLevel = 0;
+                dstTex.origin = {p.dstXOffset, 0, 0};
+                dstTex.aspect = wgpu::TextureAspect::All;
+
+                wgpu::Extent3D extent{p.eyeWidth, p.eyeHeight, 1};
+                mutableCmd.CopyBufferToTexture(&srcBuf, &dstTex, &extent);
+                return;
+            }
+#endif
 
             mutableCmd.CopyBufferToBuffer(res.gammaStorage, 0, res.readback, 0,
                                            static_cast<uint64_t>(res.bytesPerRow) * p.eyeHeight);
@@ -1431,6 +1700,50 @@ private:
     // swapchainIsSrgb_-only gate (SteamVR only) -- see
     // kSteamVrGammaCompensationExponent's comment for why.
     bool useGammaComputePath_ = false;
+
+    // Set once at startup (vr_main.cpp's startup(), D3D12 branch only) when
+    // adapterMatchesXrRequirement() confirmed the XR runtime's required
+    // adapter is the SAME one Aurora's own Dawn device already landed on --
+    // in which case startup() reused Aurora's own ID3D12Device/CommandQueue
+    // (via getD3D12DeviceAndQueue()) as the XR graphics-binding device
+    // instead of creating createXrGraphicsDevice()'s separate one. This is
+    // the real fix for the CPU-readback round trip flagged throughout this
+    // file's history (see readbackEyeCopy()'s own "perf TODO" comments and
+    // the 2026-09-16 investigation that finally measured it: mapWait alone
+    // ran 10-24ms/frame on Quest, submitFrameInternal 6.5-10.8ms/frame on a
+    // strong PC rig) -- when true, encodeSwapchainCopy()/
+    // usesGpuDirectSwapchainCopy() replace encodeEyeCopy()/readbackEyeCopy()
+    // for the gamma-compute-path formats (effectively always -- see
+    // useGammaComputePath_ above): the rendered eye texture is copied
+    // straight into the XR swapchain image via a same-device, same-queue
+    // Dawn CopyBufferToTexture, with zero CPU touch and zero cross-device
+    // hop, because SharedTextureMemoryD3D12ResourceDescriptor's own
+    // documented contract ("this ID3D12Resource must be created from the
+    // same ID3D12Device used in the WGPUDevice") is now genuinely satisfied
+    // -- unlike importSwapchainImage()/ensureFenceSync() above, which tried
+    // to import a resource from a DIFFERENT device and needed (and never
+    // got working) cross-device shared-handle + fence sync. Stays false
+    // (falls back to the old CPU round-trip, unchanged) whenever the
+    // adapters don't match (rare -- multi-GPU laptops) or on the Vulkan/
+    // Android branch (not yet ported this pass -- see vr_main.cpp's
+    // startup() for the D3D12-only detection).
+    bool sameDeviceAsAurora_ = false;
+
+public:
+    void setSameDeviceAsAurora(bool v) { sameDeviceAsAurora_ = v; }
+    bool sameDeviceAsAurora() const { return sameDeviceAsAurora_; }
+
+    // True exactly when encodeSwapchainCopy() should be used in place of
+    // encodeEyeCopy(), and readbackEyeCopy() should be skipped entirely --
+    // see sameDeviceAsAurora_'s comment. False for the rare PackR10G10B10A2
+    // fallback format even when sameDeviceAsAurora_ is true: that path
+    // never runs the gamma compute pass (see useGammaComputePath_), and
+    // this first pass doesn't build a second GPU-direct route for it --
+    // low-value (rarely chosen) and higher-risk to get right blind, so it
+    // keeps using the proven CPU path instead.
+    bool usesGpuDirectSwapchainCopy() const { return sameDeviceAsAurora_ && useGammaComputePath_; }
+
+private:
 
     // Live-adjustable gamma exponent for every NON-SteamVR runtime (see
     // effectiveGammaExponent()'s comment for why SteamVR is decoupled from
@@ -1555,6 +1868,17 @@ private:
     std::vector<wgpu::SharedTextureMemory> pendingMemory_;
     std::vector<wgpu::Texture> pendingTextures_;
 
+#if !DUSK_VR_XR_GRAPHICS_VULKAN
+    // GPU-direct swapchain-copy path (sameDeviceAsAurora_) -- one
+    // SharedTextureMemory/Texture pair per swapchain image, lazily created
+    // by ensureSwapchainTexture() and reused every frame (BeginAccess/
+    // EndAccess bracket each frame's actual USE of the already-created
+    // Texture object; the object itself doesn't need recreating). Indexed
+    // by swapchainIndex, same as swapchainImages_ itself.
+    std::vector<wgpu::SharedTextureMemory> swapchainMemory_;
+    std::vector<wgpu::Texture> swapchainTextures_;
+#endif
+
 #if DUSK_VR_XR_GRAPHICS_VULKAN
     // No fence-sync state on this branch -- see this file's top comment:
     // ensureFenceSync()/importSwapchainImage() (the only things that would
@@ -1583,7 +1907,26 @@ private:
         VkDeviceMemory uploadMemory = VK_NULL_HANDLE;
         void* uploadMapped = nullptr;                        // persistently mapped, see ensureCpuCopyBuffers()
 #else
-        Microsoft::WRL::ComPtr<ID3D12Resource> uploadHeap;   // XR side, D3D12_HEAP_TYPE_UPLOAD
+        // DOUBLE-BUFFERED (2026-09-16, "remove the second blocking wait"
+        // perf follow-up -- see readbackEyeCopy()'s own comment for the
+        // full reasoning): two upload heaps + command allocators/lists per
+        // eye, alternated via slotIndex, so readbackEyeCopy() can skip
+        // blocking on the XR-side D3D12 copy's completion before
+        // returning every single call. A slot only gets reused/reset 2
+        // calls later (this same eye, next frame) -- by then the GPU has
+        // almost always already finished with it, so the fence check
+        // before reuse is a no-op in the common case instead of a
+        // guaranteed stall.
+        static constexpr uint32_t kUploadSlotCount = 2;
+        Microsoft::WRL::ComPtr<ID3D12Resource> uploadHeap[kUploadSlotCount];      // XR side, D3D12_HEAP_TYPE_UPLOAD
+        Microsoft::WRL::ComPtr<ID3D12CommandAllocator> slotCmdAlloc[kUploadSlotCount];
+        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> slotCmdList[kUploadSlotCount];
+        // The copyFence_/copyFenceValue_ value that will be reached once
+        // this slot's last-submitted copy completes -- checked (and
+        // waited on only if not yet reached) before the slot's buffer/
+        // command list are reused.
+        uint64_t slotFenceValue[kUploadSlotCount] = {0, 0};
+        uint32_t slotIndex = 0;
 #endif
         uint32_t uploadRowPitch = 0;                         // XR-side row pitch (256-aligned, both APIs)
         // Only created/used when useGammaComputePath_ is true (see
@@ -1612,8 +1955,18 @@ private:
     // every frame, correctness first" behavior either way.
     VkFence copyFence_ = VK_NULL_HANDLE;
 #else
-    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> copyCmdAlloc_;
-    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> copyCmdList_;
+    // copyCmdAlloc_/copyCmdList_ used to live here as a single pair shared
+    // between both eyes and every frame -- moved into CpuCopyBuffers::
+    // slotCmdAlloc/slotCmdList (double-buffered per eye) 2026-09-16, see
+    // ensureCpuCopyCmdList()'s and readbackEyeCopy()'s comments. A single
+    // shared allocator/list can't safely be Reset() between eye0's and
+    // eye1's submissions within the same frame without blocking in
+    // between, which is exactly the stall this change removes. The fence
+    // itself (a single monotonic counter) is still safe to share -- D3D12
+    // executes command lists submitted to the same queue in submission
+    // order, so GetCompletedValue() reaching a given signaled value still
+    // means everything submitted before it has completed too, regardless
+    // of which slot/eye signaled it.
     Microsoft::WRL::ComPtr<ID3D12Fence> copyFence_;
     uint64_t copyFenceValue_ = 0;
 #endif
@@ -1643,14 +1996,15 @@ private:
         copyCmdListReady_ = true;
     }
 #else
+    // DOUBLE-BUFFERED (2026-09-16): per-slot command allocators/lists now
+    // live inside each eye's own CpuCopyBuffers (lazily created in
+    // readbackEyeCopy() on first use of a given slot) instead of one
+    // shared pair here -- see CpuCopyBuffers::slotCmdAlloc/slotCmdList's
+    // comment. Only the fence itself still lives here, shared.
     void ensureCpuCopyCmdList() {
         if (copyCmdListReady_) {
             return;
         }
-        xrDevice_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&copyCmdAlloc_));
-        xrDevice_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, copyCmdAlloc_.Get(), nullptr,
-                                      IID_PPV_ARGS(&copyCmdList_));
-        copyCmdList_->Close(); // Reset() below expects a closed list first time
         xrDevice_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&copyFence_));
         copyCmdListReady_ = true;
     }
@@ -1750,10 +2104,13 @@ private:
         resDesc.SampleDesc.Count = 1;
         resDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 
-        res.uploadHeap.Reset();
-        xrDevice_->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &resDesc,
-                                            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
-                                            IID_PPV_ARGS(&res.uploadHeap));
+        for (uint32_t slot = 0; slot < CpuCopyBuffers::kUploadSlotCount; ++slot) {
+            res.uploadHeap[slot].Reset();
+            xrDevice_->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &resDesc,
+                                                D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                IID_PPV_ARGS(&res.uploadHeap[slot]));
+        }
+        res.slotIndex = 0;
 #endif
 
         if (useGammaComputePath_) {

@@ -302,6 +302,17 @@ struct PendingFrameSubmit {
 };
 PendingFrameSubmit g_pendingSubmit;
 
+// Perf instrumentation (see plan/investigation notes): coarse wall-clock
+// waypoints spanning the FULL xrWaitFrame-succeeds-to-xrEndFrame window --
+// the same span a Virtual Desktop-style overlay's "Game" time measures --
+// broken into phases, since the piecewise readbackEyeCopy()/synchronize()
+// timers already added don't cover tick()'s own setup/render/encode work
+// or the gap between tick() returning and submitFrame() being called
+// (m_Do_main.cpp's other per-frame work + aurora_end_frame()'s Submit()).
+std::chrono::steady_clock::time_point g_tFrameStart{};
+std::chrono::steady_clock::time_point g_tAfterAcquire{};
+std::chrono::steady_clock::time_point g_tTickEnd{};
+
 // FIXED this session: these now come from real xrCreateActionSpace calls
 // (vr_xr_bootstrap.hpp's createHandActionSet()/attachAndCreateHandSpaces(),
 // called from startup() below) instead of staying XR_NULL_HANDLE forever --
@@ -615,7 +626,67 @@ bool startup() {
         vr_xr::Bootstrap boot = vr_xr::initialize();
         xrGetSystemProperties(boot.instance, boot.systemId, &sysProps);
 
-        vr_xr::XrGraphicsDevice gfx = vr_xr::createXrGraphicsDevice(boot);
+        vr_xr::XrGraphicsDevice gfx;
+        // Real fix for the CPU-readback round trip this file's own
+        // [dusk::vr::perf] instrumentation measured (see Session::
+        // sameDeviceAsAurora_'s comment in vr_xr_submit.hpp for the full
+        // "why" -- the short version: createXrGraphicsDevice() below always
+        // mints a SECOND, separate ID3D12Device for the XR session, which
+        // is exactly why every eye used to need a blocking CPU round trip
+        // to reach the swapchain image at all). If the XR runtime's
+        // required adapter is the SAME one Aurora's own Dawn device already
+        // landed on (the common case -- most VR rigs are single-dGPU),
+        // reuse THAT device/queue for the XR session instead --
+        // SharedTextureMemoryD3D12ResourceDescriptor then works exactly as
+        // Dawn's own header documents it (same-device resource import, no
+        // cross-device shared handle/fence needed), and each eye becomes a
+        // single GPU-side copy instead of a blocking MapAsync + manual
+        // cross-device upload. Falls back to the old separate-device path
+        // (unchanged, still fully correct) whenever the adapters don't
+        // match or can't be verified -- see adapterMatchesXrRequirement()'s
+        // own comment for why "can't verify" defaults to false/fallback
+        // rather than assuming a match.
+        bool reusedAuroraDevice = false;
+#if !DUSK_VR_XR_GRAPHICS_VULKAN
+        LUID actualAuroraLuid{};
+        const bool adaptersMatch = dusk::vr::adapterMatchesXrRequirement(
+            aurora::webgpu::g_adapterInfo, boot.d3d12Requirements.adapterLuid, &actualAuroraLuid);
+        // ALSO requires aurora::webgpu::g_sharedTextureMemoryD3D12Supported
+        // -- confirmed 2026-09-16 in-headset (real crash, AMD RX 5700 XT):
+        // Dawn's ImportSharedTextureMemory() throws a FATAL uncaptured
+        // error ("FeatureName::SharedTextureMemoryD3D12Resource is not
+        // enabled") if that feature wasn't requested at device-creation
+        // time -- it cannot be enabled retroactively. gpu.cpp already
+        // requests it IF g_adapter.HasFeature(...) says the adapter
+        // actually supports it (same pattern as the already-existing
+        // g_sharedFenceDxgiSupported check for VR fence sync) -- but on
+        // this adapter/driver it apparently doesn't, so the feature was
+        // never requested and calling ImportSharedTextureMemory() crashed
+        // the whole game the first time ensureSwapchainTexture() ran.
+        // Checking the flag here, BEFORE ever reaching that call, is the
+        // correct fix -- same-adapter alone isn't sufficient, the specific
+        // Dawn feature has to actually be enabled too.
+        if (adaptersMatch && aurora::webgpu::g_sharedTextureMemoryD3D12Supported) {
+            dusk::vr::getD3D12DeviceAndQueue(aurora::webgpu::g_device, gfx.device, gfx.commandQueue);
+            reusedAuroraDevice = true;
+            duskVrLog("[dusk::vr::startup] XR-required adapter matches Aurora's own AND "
+                      "SharedTextureMemoryD3D12Resource is supported -- reusing Aurora's "
+                      "D3D12 device for the XR session (GPU-direct swapchain copy, no CPU "
+                      "readback)\n");
+        } else {
+            gfx = vr_xr::createXrGraphicsDevice(boot);
+            char msg[256];
+            duskVrSnprintf(msg, sizeof(msg),
+                        "[dusk::vr::startup] not using the GPU-direct swapchain path "
+                        "(adaptersMatch=%d, sharedTextureMemorySupported=%d) -- creating a "
+                        "separate XR-side D3D12 device, falling back to the CPU-readback "
+                        "copy path\n",
+                        adaptersMatch, aurora::webgpu::g_sharedTextureMemoryD3D12Supported);
+            duskVrLog(msg);
+        }
+#else
+        gfx = vr_xr::createXrGraphicsDevice(boot);
+#endif
 
         XrSpace localSpace = XR_NULL_HANDLE;
         XrSpace viewSpace = XR_NULL_HANDLE;
@@ -659,6 +730,7 @@ bool startup() {
 #else
         g_ownedSession = std::make_unique<Session>(boot.instance, boot.systemId, session, localSpace, gfx.device, gfx.commandQueue);
 #endif
+        g_ownedSession->setSameDeviceAsAurora(reusedAuroraDevice);
         // Real "is this SteamVR" signal for Session::effectiveGammaExponent()
         // -- see isSteamVr_'s own comment (vr_xr_submit.hpp) for why this can
         // no longer be inferred from which swapchain format ended up chosen.
@@ -991,6 +1063,7 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
         duskVrLog("[dusk::vr::tick] FAILED: xrWaitFrame\n");
         return;
     }
+    g_tFrameStart = std::chrono::steady_clock::now();
     g_session->setFrameState(frameState);
     // Live-adjustable universal VR gamma compensation (see vr_xr_submit.hpp's
     // kSteamVrGammaCompensationExponent comment, 2026-08-16) -- read here
@@ -1414,57 +1487,6 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
             std::max(0.0, s_rodYankStickHoldRemaining - static_cast<double>(pacing.presentation_dt_seconds));
     }
     const bool rodYankForceStickDown = s_rodYankStickHoldRemaining > 0.0;
-
-    // DIAGNOSTIC (temporary -- added 2026-08-05 to investigate "swings when
-    // I move my hand normally, doesn't trigger on a real swing"). Two
-    // things to check with real data instead of guessing again: (1) is the
-    // detector's dt source (differencing predictedDisplayTime, an XrTime
-    // meant for pose PREDICTION, not guaranteed to be a clean wall-clock
-    // delta between calls) glitching to something tiny/unstable and
-    // inflating ordinary jitter into a false "swing" -- logged side by side
-    // against pacing.presentation_dt_seconds (the real measured frame time,
-    // already used for updateSmoothTurn()) so the two can be compared
-    // directly; and (2) what does the instantaneous speed actually look
-    // like during a real intended swing vs. normal movement -- the
-    // triggerSpeed/resetSpeed tuning pass earlier this session was a guess
-    // without this data. Throttled to ~9Hz (every 10 frames, matching
-    // section 12's proven capture cadence) so a ~15-20s capture (do a few
-    // seconds of normal hand movement, then a few real swings) stays
-    // readable; every actual trigger is logged unconditionally regardless
-    // of the throttle since triggers are already rate-limited by the
-    // detector's own cooldown. Remove once the detector's actual behavior
-    // is understood and confirmed fixed -- this project's normal practice.
-    {
-        static XrVector3f s_prevPos{};
-        static double s_prevTimeSec = 0.0;
-        static bool s_hasPrev = false;
-        static int s_frameCounter = 0;
-        const double nowSec = static_cast<double>(time) * 1e-9;
-        if (s_hasPrev) {
-            ++s_frameCounter;
-            const float dx = leftPose.position.x - s_prevPos.x;
-            const float dy = leftPose.position.y - s_prevPos.y;
-            const float dz = leftPose.position.z - s_prevPos.z;
-            const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
-            const double predDt = nowSec - s_prevTimeSec;
-            const double pacingDt = static_cast<double>(pacing.presentation_dt_seconds);
-            const float speedPredDt = predDt > 0.0 ? static_cast<float>(dist / predDt) : -1.f;
-            const float speedPacingDt = pacingDt > 0.0 ? static_cast<float>(dist / pacingDt) : -1.f;
-            if (leftSwingEvent.triggered || (s_frameCounter % 10) == 0) {
-                char msg[256];
-                duskVrSnprintf(msg, sizeof(msg),
-                    "[dusk::vr::swingdiag] pos=(%.4f,%.4f,%.4f) predDt=%.5f pacingDt=%.5f "
-                    "dist=%.4f speedPredDt=%.3f speedPacingDt=%.3f TRIGGERED=%d\n",
-                    leftPose.position.x, leftPose.position.y, leftPose.position.z,
-                    predDt, pacingDt, dist, speedPredDt, speedPacingDt,
-                    leftSwingEvent.triggered ? 1 : 0);
-                duskVrLog(msg);
-            }
-        }
-        s_prevPos = leftPose.position;
-        s_prevTimeSec = nowSec;
-        s_hasPrev = true;
-    }
 
     PADStatus padStatus{};
     padStatus.err = PAD_ERR_NONE;
@@ -1987,6 +2009,21 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
         return;
     }
 
+    // GPU-direct swapchain copy (usesGpuDirectSwapchainCopy() -- see
+    // Session::sameDeviceAsAurora_'s comment): open access to this frame's
+    // swapchain image ONCE here, before either eye's own copy is encoded
+    // below -- both eyes write into the same double-wide image/index this
+    // frame, so BeginAccess must only be opened once, not once per eye.
+    // Full (double-wide) dimensions, matching exactly what startup()'s
+    // createSwapchain(eyeWidth * 2, eyeHeight, ...) call actually allocated.
+    if (g_session->usesGpuDirectSwapchainCopy()) {
+        g_session->beginSwapchainAccessForFrame(
+            swapchainIndex, configViews[0].recommendedImageRectWidth * 2,
+            configViews[0].recommendedImageRectHeight);
+    }
+
+    g_tAfterAcquire = std::chrono::steady_clock::now();
+
     // CONFIRMED this session (m_Do_main.cpp): tick() is called from INSIDE
     // that file's own aurora_begin_frame()/aurora_end_frame() pair (around
     // its line 335), not the other way around -- there's no
@@ -2208,9 +2245,20 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
         // aurora_end_frame() executes its Submit(). This tick()/submitFrame()
         // split, and moving xrReleaseSwapchainImage()/xrEndFrame() into
         // submitFrame() too, exists because of that.
-        g_session->encodeEyeCopy(
-            targets.colorTexture, eye, swapchainIndex, eyeParams.width, eyeParams.height,
-            eye * eyeParams.width, aurora::gfx::color_format());
+        // GPU-DIRECT PATH (usesGpuDirectSwapchainCopy(), see Session::
+        // sameDeviceAsAurora_'s comment): replaces the CPU round trip
+        // (encodeEyeCopy() + submitFrame()'s later readbackEyeCopy()) with
+        // one same-device GPU copy straight into the swapchain image,
+        // already BeginAccess'd once this frame above.
+        if (g_session->usesGpuDirectSwapchainCopy()) {
+            g_session->encodeSwapchainCopy(
+                targets.colorTexture, eye, swapchainIndex, eyeParams.width, eyeParams.height,
+                eye * eyeParams.width, aurora::gfx::color_format());
+        } else {
+            g_session->encodeEyeCopy(
+                targets.colorTexture, eye, swapchainIndex, eyeParams.width, eyeParams.height,
+                eye * eyeParams.width, aurora::gfx::color_format());
+        }
 
         pendingEyes[eye] = PendingEyeReadback{
             true, eye, swapchainIndex, eyeParams.width, eyeParams.height, eye * eyeParams.width};
@@ -2282,6 +2330,7 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     g_pendingSubmit.base = base;
     g_pendingSubmit.viewCount = viewCount;
     g_hasPendingFrameSubmit = true;
+    g_tTickEnd = std::chrono::steady_clock::now();
 }
 
 // NEW this session: the other half of what used to be tick()'s tail end,
@@ -2304,6 +2353,7 @@ void submitFrame() {
         return;
     }
     g_hasPendingFrameSubmit = false;
+    const auto tSubmitStart = std::chrono::steady_clock::now();
 
     // ROOT-CAUSED this session: aurora_end_frame() only ENQUEUES this
     // frame's work onto Aurora's render worker thread (render_worker::
@@ -2361,6 +2411,32 @@ void submitFrame() {
     endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
     endInfo.layerCount = 1;
     endInfo.layers = layers;
+
+    // Throttled coarse phase breakdown of the FULL xrWaitFrame-succeeds-to-
+    // xrEndFrame window -- see g_tFrameStart's comment. Logged right before
+    // xrEndFrame so "total" matches what a Virtual Desktop-style overlay's
+    // "Game" timer measures as closely as possible.
+    {
+        const auto tSubmitEnd = std::chrono::steady_clock::now();
+        static uint64_t frameCallCount = 0;
+        constexpr uint64_t kFrameLogInterval = 90;
+        if ((++frameCallCount % kFrameLogInterval) == 0) {
+            const auto us = [](auto d) {
+                return std::chrono::duration_cast<std::chrono::microseconds>(d).count();
+            };
+            char msg[256];
+            duskVrSnprintf(msg, sizeof(msg),
+                           "[dusk::vr::perf] frame setup=%lldus renderEncode=%lldus "
+                           "gapToSubmit=%lldus submitFrameInternal=%lldus total=%lldus\n",
+                           static_cast<long long>(us(g_tAfterAcquire - g_tFrameStart)),
+                           static_cast<long long>(us(g_tTickEnd - g_tAfterAcquire)),
+                           static_cast<long long>(us(tSubmitStart - g_tTickEnd)),
+                           static_cast<long long>(us(tSubmitEnd - tSubmitStart)),
+                           static_cast<long long>(us(tSubmitEnd - g_tFrameStart)));
+            duskVrLog(msg);
+        }
+    }
+
     if (XR_FAILED(xrEndFrame(g_session->session(), &endInfo))) {
         duskVrLog("[dusk::vr::submitFrame] FAILED: xrEndFrame\n");
     }

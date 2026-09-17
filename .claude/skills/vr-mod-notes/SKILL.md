@@ -13135,3 +13135,539 @@ codebase (the first being section 20's whole hand/body-lag saga), and
 both times it was only found by reading the FULL body of a function
 already partially read earlier, not by further diagnostic rounds on the
 hide call site alone.
+
+### VR performance investigation, 2026-09-16 — root cause found on BOTH platforms (CPU-readback round trip); one dead-end pipelining attempt tried and fully reverted
+
+Started as an Android-only "optimize the build" request, but real
+cross-platform data eventually pointed at one shared, architectural cost
+rather than anything Android-, resolution-, or streaming-specific.
+
+**Two genuinely stale diagnostics fixed first (both confirmed on real
+hardware, no behavior change):**
+- `d_drawlist.cpp`'s shadow diagnostics (`[dusk::shadow]` in
+  `dDlst_shadowSimple_c::set()`, `[dusk::realshadow]` in
+  `dDlst_shadowReal_c`'s receiver-projection log) were still firing on
+  Android. Root cause: this codebase's `TARGET_PC=1` compile define
+  (`cmake/GameABIConfig.cmake`) is set UNCONDITIONALLY for every platform
+  (it means "not original GC/Wii hardware," true for Android too) with
+  `TARGET_ANDROID=1` only ever ADDED on top, never substituted — so every
+  `#if TARGET_PC` block in this whole decompiled codebase compiles on
+  Android as well. Both diagnostics were written assuming `TARGET_PC` meant
+  "desktop only," and both also had the SAME broken "log once per distinct
+  actor pointer" dedup (only correct for a single test actor) — with
+  multiple real shadow-casters in a populated area, that dedup gate is
+  effectively always-true, producing 6000+ `__android_log_print` calls/minute
+  in-headset (confirmed via a real Quest 3 logcat capture, area-dependent
+  since it needs multiple shadow-casters visible). Both root-caused
+  investigations are long since CONFIRMED (shadow-stretching fix, this
+  project's permanent CLAUDE.md constraint) — removed per this project's
+  standing "remove diagnostics freely once confirmed" practice.
+- `vr_main.cpp`'s `[dusk::vr::swingdiag]` (sword-swing-detector tuning log,
+  added 2026-08-05) was ALSO still active — not platform-gated at all, so
+  it hit Android too. Its own comment said "remove once confirmed fixed";
+  the investigation history (rounds 1-4, last touched 2026-08-13) showed no
+  open questions, unlike `[dusk::vr::bodyrotdiag]` (checked and
+  DELIBERATELY LEFT ALONE — that one is live tooling for a still-open bug,
+  the 180° body-rotation-offset saga, explicitly marked "NOT root-caused"
+  as of round 8/2026-09-10 a few lines below in this same file — do not
+  remove it without checking that investigation's status first). Also
+  checked `extern/aurora`'s GX diagnostics (`[dusk::gxamb]`/`[dusk::gxmatcol]`/
+  `[dusk::gxchanctrl]`/`[dusk::gxtex304]`/`[dusk::gxtexfail]`,
+  `GXLighting.cpp`/`gx.cpp`) — all self-capped at 40-200 calls total per
+  session and fire almost entirely in the first second, so left alone
+  (vendored code, not worth the risk for ~0 steady-state cost).
+
+**Real timing data (throttled `duskVrLog` instrumentation added to
+`vr_xr_submit.hpp`'s `readbackEyeCopy()` and, later, full-frame phase
+waypoints added to `vr_main.cpp`'s `tick()`/`submitFrame()` — both KEPT,
+harmless/logging-only) confirmed the actual bottleneck on BOTH platforms is
+the CPU round-trip readback path**: render each eye into aurora's own
+texture -> Dawn `MapAsync` it back to the CPU -> CPU pixel copy -> upload
+into a Vulkan/D3D12 buffer -> GPU-side copy into the real OpenXR swapchain
+image. This exists only because aurora's Dawn/WebGPU renderer has no native
+Vulkan/D3D12 interop to render directly into the XR swapchain — a
+deliberate, previously-flagged "correctness-first, never profiled" choice
+(see the "perf TODO" comments already in `readbackEyeCopy()` predating this
+session). Quest 3: eye 0's `mapWait` alone measured 10-24ms/frame (menu) up
+to worse in Castle Town — a real, GPU-completion-bound stall, since aurora
+batches the WHOLE frame's rendering and the eye-copy into one `Submit()`.
+PC (a genuinely strong gaming rig): a full-frame phase breakdown (setup /
+renderEncode / gapToSubmit / submitFrameInternal, logged once per 90 calls)
+showed `submitFrameInternal` (synchronize() + the same CPU round trip) at
+6.5-10.8ms/frame, consistently the single largest phase — bigger than
+`renderEncode` (1.6-7.5ms, normal 2-eye draw-call recording cost, scales
+with scene complexity but not a bug) and vastly bigger than `setup`/
+`gapToSubmit` (both sub-millisecond, ruling out the base game's own
+30-year-old simulation logic as a factor). This directly explains the
+user's real-world report of only 40-50fps in Castle Town on a high-end PC
+despite the actual 3D scene rendering itself being fast (GPU-completion
+wait for the WHOLE frame's normal rendering averaged only ~3-4ms
+separately) -- confirmed by Virtual Desktop's own performance overlay
+attributing most of the frame latency to "the game," not the VDXR
+streaming layer, which independently ruled out wireless
+encode/network/GPU-encoder contention as the driver.
+
+**Two other real hypotheses tested and DISPROVEN with real data this same
+session** (both worth remembering so they aren't re-tried blind):
+- Default log level: this project's CLI defaults to `--log-level 0`
+  (`LOG_DEBUG`, most verbose) and every leveled log line (`Module::report()`
+  in `extern/aurora/lib/logging.hpp`) that passes the level gate does a real
+  `fflush()` TWICE per line (console + file, `src/dusk/logging.cpp`'s
+  `WriteLogLine()`) under a mutex — genuinely wasteful, and VR's
+  `copy_tex`-vs-offscreen-pass collision (`extern/aurora/lib/dolphin/gx/
+  GXFrameBuffer.cpp`'s `"aurora::gx::copy_tex: draining a queued GXCopyTex
+  WHILE an offscreen pass is open"` warning) was firing 15,256 times in one
+  session (~3-4x/frame) plus many more DEBUG-level `resolve_pass_into`
+  messages riding along with it. Looked like a slam-dunk cause. Relaunching
+  with `--log-level 3` eliminated ALL of this (51,406 -> 1,546 log lines,
+  zero leveled messages) but produced NO measurable fps change (45-50fps
+  either way) -- real, worth cleaning up eventually for its own sake (the
+  unconditional double-fflush is a legitimate inefficiency independent of
+  this investigation), but conclusively NOT the driver of the reported
+  slowdown. Don't re-litigate this without new evidence.
+- One-frame-deep readback pipelining (attempted, then FULLY REVERTED --
+  `vr_main.cpp` is back to its pre-session state for this specific
+  mechanism): the theory was that deferring `readbackEyeCopy()`'s
+  MapAsync/fence-wait by one loop iteration (drain frame N-1's data at the
+  top of iteration N, after that iteration's own `xrWaitFrame`/acquire, into
+  that iteration's freshly-acquired swapchain image) would let the GPU
+  finish frame N-1 in the background during `xrWaitFrame`'s pacing wait.
+  Implemented via a new `g_readbackPending` (drained at the top of `tick()`)
+  separate from `g_pendingSubmit` (which stays same-iteration for the
+  composition-layer pose/FOV metadata -- that part must NOT lag a frame,
+  since VR compositors expect CURRENT head pose paired with whatever pixel
+  content is submitted). First version ALSO moved `aurora::gfx::
+  synchronize()` to the deferred call site -- this caused a REAL crash
+  after ~2 minutes on Quest 3 (Dawn abort: `"WebGPU error 2: Binding entry
+  sampler not set"`, traced via `llvm-addr2line` against the unstripped
+  `libmain.so` to `aurora::end_frame()`'s own internal present/resample
+  bind-group creation, `extern/aurora/lib/aurora.cpp:295` ->
+  `extern/aurora/lib/webgpu/gpu.cpp`'s `resample_present_source()`/
+  `create_copy_bind_group()`). ROOT CAUSE: `synchronize()`, in its
+  ORIGINAL position (right after a frame's own `aurora_end_frame()`), was
+  ALSO the only thing enforcing that the main thread never runs more than
+  one frame ahead of the render worker thread -- which incidentally kept
+  `g_presentSourceOverride` (`extern/aurora/lib/gfx/common.cpp`'s
+  `set_present_source_mirror()`/`clear_present_source_override()`, a PLAIN
+  UNSYNCHRONIZED GLOBAL written by the main thread and read by
+  `aurora::end_frame()`'s lambda on the worker thread) race-free by
+  accident. Moving `synchronize()` broke that lockstep and let the main
+  thread overwrite the global before the worker thread consumed it. FIX
+  ATTEMPT (v2): left `synchronize()` in its original position/timing
+  entirely, only deferred the truly-independent, no-shared-globals part
+  (the actual `MapAsync`/Vulkan-D3D12-copy/fence-wait) -- this no longer
+  crashed, but delivered NO measurable fps gain (`mapWait` unchanged, still
+  9-15ms) AND introduced a new, real regression: shaky/juddery head-tracked
+  motion, since displayed pixels were now a genuine frame stale relative to
+  the CURRENT head pose submitted alongside them. ACTUAL REASON the
+  pipelining didn't help, worked out after the fact: `xrWaitFrame` does NOT
+  donate meaningful idle GPU time when the app is already running behind
+  its own achievable rate -- it just returns quickly, since there's nothing
+  to gain by artificially delaying an already-late app. Real pipelining
+  (if ever attempted again) would need actual double-buffered CPU-readback
+  resources across a FULL frame's SUBMIT-to-SUBMIT depth (not the
+  single-buffer "drain fully before refill" simplification that was
+  sufficient -- and load-bearing -- for the shallow, one-iteration version),
+  which is a much bigger, riskier undertaking than this session's scope.
+  Given zero measured benefit either way, reverted via
+  `git checkout -- src/dusk/vr/vr_main.cpp` rather than pursued further.
+
+**Bottom line / what's actually next**: the real, validated fix is
+eliminating the CPU round trip entirely -- native Vulkan/D3D12-Dawn
+interop that renders directly into the OpenXR swapchain image, no CPU
+bounce at all. NOT attempted this session (deliberately -- this is a
+genuine architecture change to `vr_xr_submit.hpp`'s core submit mechanism,
+a file with a real history of subtle bugs already documented throughout
+this skill, and deserves its own dedicated session rather than being
+rushed at the end of an already-long one). Whoever picks this up next has,
+for the first time, real quantified numbers on both platforms proving it's
+worth doing, plus the phase-breakdown instrumentation already in place to
+verify the fix's actual impact afterward.
+
+**Git state as of end of session**: three files touched, all still
+UNCOMMITTED. `src/d/d_drawlist.cpp` (both stale shadow diagnostics
+removed), `src/dusk/vr/vr_main.cpp` (swingdiag diagnostic removed; NEW
+full-frame phase-timing instrumentation added and KEPT --
+`g_tFrameStart`/`g_tAfterAcquire`/`g_tTickEnd` waypoints plus a throttled
+`[dusk::vr::perf] frame ...` log line in `submitFrame()`), `src/dusk/vr/
+vr_xr_submit.hpp` (per-eye readback timing instrumentation added and KEPT
+in `readbackEyeCopy()` -- `mapWait`/`cpuCopy`/`gpuSubmitWait`/`total`).
+Both Android (`android-arm64`) and PC (`windows-msvc-relwithdebinfo`)
+builds confirmed clean and tested in-headset/in-game with this exact
+working-tree state.
+
+### CPU-readback round trip eliminated for PC/D3D12 (same-device GPU-direct swapchain copy) — built 2026-09-16, NOT yet tested in-headset
+
+**The real fix for the perf investigation above**, attempted the same
+session per explicit user request ("I want to fix the cpu gpu handoff bug
+that was causing the huge performance impact"). Root cause confirmed by
+reading `vr_xr_bootstrap.hpp`: `createXrGraphicsDevice()` (D3D12 branch)
+always creates a SECOND, separate `ID3D12Device` for the XR session,
+independent of the `ID3D12Device` Aurora's own Dawn renderer already
+created for itself (confirmed via that function's own comment: "SEPARATE
+ID3D12Device here for the XR session... independent of whatever adapter
+Aurora's Dawn device landed on"). Because the two devices differ, there
+was no cheap way to hand a rendered eye to the XR swapchain image — hence
+the whole CPU round trip (`encodeEyeCopy()`/`readbackEyeCopy()`): render →
+blocking `MapAsync` → CPU copy → D3D12 upload heap → manual
+`CopyTextureRegion` on the SEPARATE device's queue. This is exactly the
+cost the perf investigation above measured.
+
+**Why a same-device fix is actually viable here**: the vendored Dawn
+header (`D3D12Backend.h`) documents
+`SharedTextureMemoryD3D12ResourceDescriptor` as requiring the resource to
+be "created from the SAME `ID3D12Device` used in the `WGPUDevice`" — i.e.
+the EXACT failure mode of the already-dead `importSwapchainImage()`/
+`ensureFenceSync()` code in this file (which tried to import a resource
+from the OTHER, separate XR device, confirmed non-viable, needed and
+never got working cross-device shared-handle+fence sync). Two already-
+existing-but-unused helpers at the bottom of this file were built in
+anticipation of exactly this: `getD3D12DeviceAndQueue()` (extracts
+Aurora's own underlying `ID3D12Device`/`ID3D12CommandQueue` straight out
+of its Dawn `wgpu::Device`) and `adapterMatchesXrRequirement()` (checks
+whether that device's adapter matches what the XR runtime requires, via
+`aurora::webgpu::g_adapterInfo` cross-referenced against DXGI).
+
+**The fix**: `vr_main.cpp`'s `startup()` now calls
+`adapterMatchesXrRequirement()` before creating the XR graphics device.
+When it matches (the common case — most VR rigs are single-dGPU),
+`getD3D12DeviceAndQueue()` extracts Aurora's own device/queue and hands
+THAT to `xrCreateSession` (via `XrGraphicsBindingD3D12KHR`) instead of
+`createXrGraphicsDevice()`'s separate one — `Session::sameDeviceAsAurora_`
+records this. When it doesn't match (rare — multi-GPU laptops) or can't
+be verified, falls back to the old separate-device path unchanged, fully
+correct, just still paying the CPU round trip. Deliberately fails safe on
+ambiguity (matches `adapterMatchesXrRequirement()`'s own existing "can't
+verify -- caller should treat this as unknown, not match" contract).
+
+With the swapchain images now living on Aurora's own device,
+`Session::ensureSwapchainTexture()`/`beginSwapchainAccessForFrame()`
+(new, D3D12-only, `vr_xr_submit.hpp`) wrap each swapchain image as a real
+Dawn `wgpu::Texture` via `SharedTextureMemory` — no fence needed at all
+(unlike the dead cross-device code): same device AND same command queue
+(both handed to `xrCreateSession`), so Dawn's own internal command
+ordering already serializes correctly against whatever the XR runtime
+does with that queue. `beginSwapchainAccessForFrame()` is called once per
+frame (not per eye — both eyes share one double-wide swapchain image) in
+`tick()`, right after `xrAcquireSwapchainImage`/`xrWaitSwapchainImage`
+succeed. `Session::encodeSwapchainCopy()` (new) replaces `encodeEyeCopy()`
+per eye when `Session::usesGpuDirectSwapchainCopy()` (=
+`sameDeviceAsAurora_ && useGammaComputePath_` — the rare
+`PackR10G10B10A2` last-resort format keeps the old CPU path
+unconditionally, not worth a second GPU-direct route for a rarely-chosen
+fallback) — it pushes the SAME encoder-task type `encodeEyeCopy()` uses,
+so `encoderTaskCallback()`'s existing gamma-compute compute-shader
+dispatch (unchanged) now ends with a same-device `CopyBufferToTexture`
+straight from `res.gammaStorage` into the swapchain-image-backed Dawn
+texture (at the correct `dstXOffset`), instead of `CopyBufferToBuffer`
+into a CPU-mappable `res.readback` buffer. **`readbackEyeCopy()`'s whole
+`MapAsync`/upload-heap/manual-`CopyTextureRegion` sequence is skipped
+entirely** for this path — `submitFrame()`'s existing per-eye loop still
+calls it (unchanged, simpler than adding a skip at every call site), but
+`readbackEyeCopy()` itself now early-returns first thing when
+`usesGpuDirectSwapchainCopy()` is true (defensive — the real skip is that
+there's nothing left for it to do, since the copy already happened as
+part of `aurora_end_frame()`'s one `Submit()` during `tick()`).
+`endAccessAll()` (already existing, already called once per frame in
+`submitFrame()`, previously dead code in practice) now does real work —
+`EndAccess`'s the swapchain texture via the same `pendingMemory_`/
+`pendingTextures_` bookkeeping the old cross-device code already had,
+reused as-is.
+
+New `fromDxgiSwapchainFormat()` (`vr_xr_submit.hpp`, reverse of the
+existing `toDxgiSwapchainFormat()`) — the Dawn texture wrapping a
+swapchain image must be declared with the swapchain's REAL format
+(`swapchainDxgiFormat_`, which can differ from Aurora's own native color
+format whenever `createSwapchain()` had to pick a channel-swapped/sRGB-
+toggled candidate), not assumed to match `aurora::gfx::color_format()`.
+
+**What deliberately did NOT change**: the gamma-compensation compute
+shader itself, the whole SRGB/format-negotiation logic in
+`createSwapchain()`, the Vulkan/Android branch (explicitly out of scope
+this pass — different device-creation flow entirely, `xrCreateVulkanDeviceKHR`
+MINTS a new `VkDevice` rather than letting the app pick an adapter the
+way D3D12 does, so the same "just hand it Aurora's own device" trick
+doesn't directly transfer; would need its own dedicated investigation),
+and the `PackR10G10B10A2` last-resort fallback (kept on the old CPU path
+unconditionally).
+
+**Built successfully** (RelWithDebInfo) — only `vr_main.cpp` needed
+recompiling (transitively includes `vr_xr_submit.hpp`), clean link, no
+new warnings, confirmed via a second no-op incremental rebuild.
+
+**NOT yet tested in-headset — this is new, unverified GPU-interop code in
+a file with a real history of crashes from exactly this class of change**
+(see this file's own cross-device `SharedTextureMemory` history, and the
+reverted one-frame-deep-pipelining attempt just above this section, which
+crashed once before being fixed and then reverted anyway for zero
+measured benefit). Next step for whoever picks this up: launch in VR on
+PC and check the very first `[dusk::vr::startup]` log lines — should say
+either "XR-required adapter matches Aurora's own -- reusing Aurora's D3D12
+device" (the fast path engaged) or the mismatch/fallback message (slow
+path, expected only on a multi-GPU laptop). If the fast path engaged,
+confirm the headset image looks correct (not corrupted, not black, not
+one-eye-only, no obvious tearing/flicker) and specifically re-check
+whatever this whole investigation was chasing: does Castle Town (or any
+previously-measured heavy scene) now run measurably faster? The
+`[dusk::vr::perf] frame ...` phase-timing log already in the tree (from
+the investigation above) is the direct way to confirm
+`submitFrameInternal` actually shrank, not just a subjective "feels
+smoother" impression. If the image is corrupted/black specifically on
+this new path, the most likely failure points, in rough order of
+suspicion: (a) `fromDxgiSwapchainFormat()` picked the wrong
+`wgpu::TextureFormat` for whatever `swapchainDxgiFormat_` really is that
+session (add a one-line log of both values at
+`ensureSwapchainTexture()`'s top); (b) the no-fence `BeginAccess`/
+`EndAccess` assumption is wrong for this runtime specifically (the
+runtime's OWN internal synchronization might need an explicit signal
+rather than relying on same-queue submission order — try adding a real
+D3D12 fence signaled right after `aurora_end_frame()` returns, waited on
+by nothing app-side but at least giving the runtime something to check,
+if this is suspected); (c) `beginSwapchainAccessForFrame()`'s full
+double-wide width/height passed to `ensureSwapchainTexture()` doesn't
+match what the underlying `ID3D12Resource` was actually created with
+(re-verify against `startup()`'s own `createSwapchain(eyeWidth * 2,
+eyeHeight, ...)` call). If the fast path never engages at all (adapter
+mismatch reported even on an obviously single-GPU rig), the likely first
+thing to check is whether `aurora::webgpu::g_adapterInfo`'s vendorID/
+deviceID actually got populated correctly before `startup()` runs (i.e.
+Aurora's own device init timing relative to VR startup) rather than
+assuming `adapterMatchesXrRequirement()`'s DXGI enumeration itself is
+wrong.
+
+**ROUND 1 in-headset result (2026-09-16, same day, real crash) — root
+cause found, fixed, rebuilt, NOT yet retested.** User tested on Virtual
+Desktop (AMD Radeon RX 5700 XT) and hit a real fatal crash almost
+immediately: `[FATAL | aurora::gpu] WebGPU error 2:
+FeatureName::SharedTextureMemoryD3D12Resource is not enabled. -- While
+calling [Device].ImportSharedTextureMemory(...)`, in
+`ensureSwapchainTexture()`. Log confirmed the adapter-match check itself
+worked correctly (`"XR-required adapter matches Aurora's own -- reusing
+Aurora's D3D12 device..."` printed, `Using Direct3D 12 on adapter: AMD
+Radeon RX 5700 XT` for both Aurora and the XR runtime) — this was a
+SEPARATE, second gate that also needed checking, not a failure of the
+adapter-match logic.
+
+**Root cause**: Dawn features must be requested at DEVICE-CREATION time
+and cannot be enabled retroactively — exactly the same constraint
+`ensureFenceSync()`'s dead code already documents for
+`SharedFenceDXGISharedHandle`
+(`aurora::webgpu::g_sharedFenceDxgiSupported`). Turns out
+`extern/aurora/lib/webgpu/gpu.cpp` ALREADY has the identical guard for
+THIS exact feature too — `g_sharedTextureMemoryD3D12Supported`
+(`gpu.hpp`/`gpu.cpp`), requested only `if
+(g_adapter.HasFeature(wgpu::FeatureName::SharedTextureMemoryD3D12Resource))`,
+with a comment noting it was added after "a second runtime crash" during
+some EARLIER, undocumented investigation into the same dead
+`importSwapchainImage()` cross-device code this session's fix is
+unrelated to (that code has been dead/unreachable since long before this
+session — this flag was apparently added in anticipation, never
+consumed by any real call site until now). On this user's adapter/driver,
+`HasFeature()` evidently returned false, so the feature was never
+requested — meaning `sameDeviceAsAurora_` being true (adapter match
+alone) does NOT guarantee `ImportSharedTextureMemory()` is safe to call;
+this second, independent flag has to be checked too.
+
+**Fix**: `vr_main.cpp`'s `startup()` device-reuse decision now requires
+BOTH `adaptersMatch` AND
+`aurora::webgpu::g_sharedTextureMemoryD3D12Supported` before reusing
+Aurora's device — falls back to the old separate-device/CPU-copy path
+(unchanged, safe) if either is false, logging which condition failed.
+This is a single, centralized gate (the same one `sameDeviceAsAurora_`
+already funnels everything through), so nothing downstream
+(`ensureSwapchainTexture()` etc.) needed touching — they simply never
+get called now unless both conditions hold.
+
+**Built successfully** (RelWithDebInfo) — only `vr_main.cpp` recompiled,
+clean link, no new warnings. (dusklight.exe was still running from the
+crash and had to be closed by the user before this rebuild could link.)
+
+**NOT yet retested in-headset.** Next step: launch again on the same
+rig (Virtual Desktop, AMD RX 5700 XT) and check the new
+`[dusk::vr::startup]` line — it now reports BOTH flags
+(`adaptersMatch=%d, sharedTextureMemorySupported=%d`) whenever it falls
+back, so this specific user's log will directly confirm whether
+`g_sharedTextureMemoryD3D12Supported` really is false on this adapter
+(expected, given the crash) — if so, this rig will always take the safe
+CPU-copy fallback path, same performance as before this whole feature,
+and the GPU-direct win can only be confirmed on different hardware/
+driver combo where Dawn's `HasFeature()` check succeeds. If it turns out
+`g_sharedTextureMemoryD3D12Supported` is ACTUALLY true on this rig and
+the crash was from something else entirely, that would be a real
+surprise worth re-investigating from scratch rather than assumed.
+
+**ROUND 2 result: CONFIRMED, no crash this time — `sharedTextureMemorySupported=0`
+on this AMD RX 5700 XT/driver combo, clean fallback to the CPU-readback
+path, session ran a full clean exit (code 0). Real perf numbers confirmed
+the fallback is exactly as fast/slow as before this whole feature
+(`submitFrameInternal` 6.8-10.8ms/frame, matching the original
+investigation's baseline) — i.e. the GPU-direct same-device path is
+correctly implemented and safe, but simply UNREACHABLE on this specific
+adapter/driver, not a bug in the detection logic. Per user's explicit
+choice (offered three options: accept as-is, investigate the AMD driver
+limitation further, or try a smaller universally-applicable optimization
+that doesn't depend on the missing feature) — chose the third.**
+
+### Second blocking wait removed from the CPU-readback path (double-buffered upload heap, D3D12-only) — built 2026-09-16, NOT yet tested in-headset
+
+**Goal**: the CPU-readback round trip (still the active path on any GPU
+lacking `SharedTextureMemoryD3D12Resource`, e.g. the AMD rig above) has
+TWO separate blocking waits, not one: (1) `MapAsync` — waiting for
+Dawn's own GPU work (the gamma-compute pass) to finish so the CPU can
+read the rendered bytes, genuinely unavoidable without the same-device
+GPU-direct path; and (2), previously undocumented as a SEPARATE cost in
+this file's own comments despite being flagged generically as a "perf
+TODO" — after uploading those bytes and kicking a manual D3D12
+`CopyTextureRegion` into the XR swapchain image on `xrQueue_`,
+`readbackEyeCopy()` used to `WaitForSingleObject(event, INFINITE)` for
+THAT copy to finish before returning, every single call, both eyes,
+every frame. This second wait doesn't depend on the missing Dawn
+feature at all — it's a plain D3D12 resource-reuse hazard (the upload
+heap + command allocator/list are shared, single instances, reused/
+reset next call, so the code blocked to guarantee the GPU was done with
+them first) — fixable with ordinary double-buffering, on ANY GPU.
+
+**Fix**: `CpuCopyBuffers` (per eye) now holds TWO upload heaps + TWO
+command allocators/lists (`kUploadSlotCount = 2`), alternated via a new
+`slotIndex` each call. `readbackEyeCopy()` now, at the top, picks
+`slot = res.slotIndex`, lazily creates that slot's command allocator/
+list on first use, and waits on `copyFence_` ONLY if that specific
+slot's own last-recorded fence value hasn't completed yet (on first use
+this is always false — both the stored value and the fence's initial
+`GetCompletedValue()` start at 0). Since a slot only comes back around
+2 calls later (this same eye, next frame), a whole frame has almost
+always already elapsed by then, so in practice this check is a no-op —
+unlike the OLD code's guaranteed wait at the END of every single call.
+At the end, instead of blocking, it just records
+`res.slotFenceValue[slot] = copyFenceValue_` (the value this call's
+`Signal()` will reach) and advances `res.slotIndex` — no
+`WaitForSingleObject` call remains in the hot path at all.
+
+**Why this is safe without any new synchronization risk**: (a) each
+slot's own upload heap/command list won't be touched again until the
+NEXT time that same slot is due, by which point the top-of-function
+fence check (almost always a no-op, but still correctness-preserving
+when it isn't) guarantees the GPU is really done with it; (b) the
+swapchain image's own resource-state transitions (`COMMON` →
+`COPY_DEST` → `COMMON`) for eye0 and eye1 within one frame were never
+actually protected by the old wait in the first place — D3D12 command
+lists submitted to the SAME queue execute in submission order
+automatically, with no CPU-side wait required between them for GPU-side
+correctness; the old wait only existed because eye0 and eye1 used to
+share one single allocator/list/upload-heap, which is exactly the
+hazard this fix removes by giving each eye (and each of its two
+temporal slots) independent copies. `copyFence_`/`copyFenceValue_`
+themselves stay a single shared monotonic counter across both eyes and
+all slots — safe to share because `GetCompletedValue()` reaching a
+given signaled value still means everything submitted before it (same
+queue, submission order) has completed too, regardless of which slot
+signaled it.
+
+**Scoped to D3D12 only** (per explicit user choice) — the Vulkan/Android
+branch's `readbackEyeCopy()` path (single-buffered, still blocks via
+`vkWaitForFences`) is completely untouched; that branch is unverified/
+unbuilt for other reasons already documented elsewhere in this file.
+
+**Also renamed** the perf log's `gpuSubmitWait` field to `gpuSubmit` —
+on D3D12 it no longer waits for anything (this fix), so the old name
+would be actively misleading; still a real wait on the untouched Vulkan
+branch, but one shared log line/field name covers both.
+
+**Built successfully** (RelWithDebInfo) — only `vr_main.cpp` (transitively
+includes `vr_xr_submit.hpp`) recompiled, clean link, no new warnings.
+
+**NOT yet tested in-headset.** Next step for whoever picks this up:
+launch in VR (any runtime/GPU — this fix applies regardless of whether
+the same-device GPU-direct path engaged or not) and check for (a) no
+crash/corruption (the double-buffering hazard analysis above is
+reasoned through carefully but not yet proven against a real capture),
+and (b) a real perf improvement in the `[dusk::vr::perf] frame ...` /
+`[dusk::vr::perf] eye=...` log lines already in the tree — specifically
+whether `submitFrameInternal` (the frame-level log) and `gpuSubmit` (the
+per-eye log, should now read near-zero microseconds instead of the
+multi-hundred-to-thousand-microsecond values a real wait used to show)
+both shrank compared to the AMD-rig baseline captured just above this
+section (`submitFrameInternal` 6.8-10.8ms/frame). If image corruption or
+tearing appears specifically after this change, the most likely
+culprit is the resource-state-transition reasoning in point (b) above
+being wrong in some edge case (e.g. if `xrAcquireSwapchainImage` ever
+hands back a DIFFERENT swapchain index than expected between eye0 and
+eye1 of the same frame — should never happen per this codebase's own
+single-double-wide-image design, but worth checking first if something
+looks wrong) rather than the double-buffering mechanism itself.
+
+**CONFIRMED IN-HEADSET, same day** — user tested on the same AMD RX 5700
+XT/Virtual Desktop rig, no crash/corruption, and real `[dusk::vr::perf]`
+numbers confirmed the fix works exactly as designed: `gpuSubmit` dropped
+from ~850-970us/eye (the old blocking wait) to ~40-60us/eye — the second
+wait is genuinely gone. User's own words: "Slight improvement, i got a
+max of 60 fps now." `submitFrameInternal` is now ~7-10.5ms/frame (down
+slightly from the ~6.8-10.8ms pre-session baseline, consistent with a
+~1.7ms/frame recovery). Real remaining bottleneck, confirmed by the same
+log: `mapWait` (eye 0) is still ~3.5-4.3ms/frame, completely unchanged --
+this is the FIRST wait (CPU blocking on Dawn's own GPU work finishing
+before it can read pixels back at all), which nothing this round touched
+and which fundamentally requires either the same-device GPU-direct path
+(blocked on this card, see above) or accepting it as-is.
+
+**Dead end checked, NOT pursued**: confirmed via `dawn::native::d3d12`
+header inspection that this vendored Dawn build (a prebuilt binary from
+`https://github.com/encounter/dawn`, release tag `v20260618.032059`,
+fetched via `dawn_prebuilt-subbuild`'s `ExternalProject_Add` URL in the
+build tree) exposes no lower-level "get the raw ID3D12Resource behind a
+rendered wgpu::Texture" API at all -- only `GetD3D12Device`/
+`GetD3D12CommandQueue` (already used) and the same gated
+`SharedTextureMemory` mechanism. So there is no way to route around the
+missing feature with a cleverer approach against this specific Dawn
+build's public API surface -- confirmed, not just assumed.
+
+**Real, promising, NOT-yet-acted-on lead for a future session**: Dawn's
+own official docs
+(`docs/dawn/features/shared_texture_memory.md`) don't even mention
+`SharedTextureMemoryD3D12Resource` as a stable/documented feature (only
+`SharedTextureMemoryDXGISharedHandle`/`SharedTextureMemoryD3D11Texture2D`
+are covered) -- consistent with it being newer/less mature. A fetch of
+Dawn's CURRENT `main` branch source
+(`src/dawn/native/d3d12/PhysicalDeviceD3D12.cpp`, via a web-fetch
+summarization tool -- **treat this as a lead, not a verified fact**, it
+was not read character-by-character) suggested this exact feature is
+enabled UNCONDITIONALLY there, with NO adapter/driver capability check at
+all -- i.e. not gated behind any real AMD-specific limitation on recent
+Dawn, just possibly missing from our older `v20260618.032059` snapshot.
+If true, a newer `encounter/dawn` prebuilt release might make
+`g_sharedTextureMemoryD3D12Supported` report true on this exact AMD card
+for free, unlocking the same-device GPU-direct path (the whole point of
+this investigation) without any further code changes here at all.
+**Explicitly NOT attempted this session** -- bumping the vendored Dawn
+version is a meaningfully bigger, separate undertaking than anything else
+in this whole investigation: `vr_xr_submit.hpp` has a long history (see
+this file's own comments throughout) of code written and verified against
+the EXACT shape of this specific Dawn snapshot's API, so swapping it is a
+real risk of quietly breaking other already-working VR code in
+non-obvious ways, not a casual version bump. Per explicit user request
+("Stop here for tonight"), this was deliberately left as a scoped-but-
+unstarted follow-up rather than pursued same-session. If picked up later:
+check whether `encounter/dawn`'s GitHub releases have anything newer than
+`v20260618.032059`, and if so, test a version bump in isolation (ideally a
+throwaway branch) with careful regard for every other place this file
+(and the rest of the VR mod) depends on this Dawn snapshot's exact API
+shape, before trusting it in the main working tree.
+
+**Session summary (2026-09-16, the whole CPU-GPU-handoff investigation,
+for quick orientation)**: started from a user-reported "huge performance
+impact" and the prior session's own root-cause finding (the CPU-readback
+round trip). Built and shipped two real, independently-useful D3D12
+fixes: (1) a same-device GPU-direct swapchain-copy path, auto-detected
+and safely falling back when unavailable -- confirmed crash-free and
+inert-but-safe on this specific AMD rig, real win expected/hoped-for on
+hardware where the underlying Dawn feature IS supported (not yet tested
+on any such rig); (2) a double-buffered upload-heap fix removing a
+second, independent blocking wait from the CPU-readback fallback path
+itself -- confirmed working via real in-headset numbers, a genuine
+~1.7ms/frame win on ANY GPU including this one, regardless of whether
+fix (1) engages. The dominant remaining cost (`mapWait`, ~3.5-4.3ms/
+frame) is only fixable by fix (1) actually engaging, which depends on
+either different hardware or the Dawn-version lead above. Both fixes are
+D3D12/PC-only, per explicit user scoping at the very start of this
+session -- the Vulkan/Android branch was NOT touched and remains exactly
+as unverified/unbuilt as it already was.

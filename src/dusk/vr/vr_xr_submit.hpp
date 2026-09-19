@@ -726,6 +726,40 @@ public:
         xrEnumerateSwapchainImages(
             swapchain_, imageCount, &imageCount,
             reinterpret_cast<XrSwapchainImageBaseHeader*>(swapchainImages_.data()));
+#if !DUSK_VR_XR_GRAPHICS_VULKAN
+        // FOUND 2026-09-17 (first real GPU-direct-path test, Virtual
+        // Desktop/AMD RX 5700 XT): xrCreateSwapchain was asked for a TYPED
+        // format (chosenFormat, e.g. DXGI_FORMAT_B8G8R8A8_UNORM_SRGB), but
+        // the runtime is free to allocate the underlying ID3D12Resource
+        // with the TYPELESS counterpart instead (so it can expose both an
+        // SRGB and non-SRGB view of the same resource) -- confirmed via a
+        // real crash: ensureSwapchainTexture()'s ImportSharedTextureMemory
+        // reads the resource's OWN GetDesc().Format directly, found
+        // DXGI_FORMAT_B8G8R8A8_TYPELESS (90/0x5a), and Dawn's D3D12
+        // SharedTextureMemory backend doesn't accept a typeless resource at
+        // all -- fatal ("Unsupported DXGI format 5a"). Detect this HERE,
+        // before ever calling ImportSharedTextureMemory, and disable the
+        // GPU-direct path for the rest of the session if the real resource
+        // format doesn't match what we requested -- usesGpuDirectSwapchainCopy()
+        // then correctly falls back to the already-proven CPU-readback path
+        // instead of crashing. Checking swapchainImages_[0] alone is
+        // sufficient -- every image in one swapchain shares the same format
+        // by construction.
+        if (!swapchainImages_.empty()) {
+            D3D12_RESOURCE_DESC realDesc = swapchainImages_[0].texture->GetDesc();
+            if (static_cast<int64_t>(realDesc.Format) != chosenFormat) {
+                char msg[256];
+                duskVrSnprintf(msg, sizeof(msg),
+                            "[dusk::vr] createSwapchain: runtime's real swapchain resource "
+                            "format (%lld) doesn't match the requested format (%lld) -- "
+                            "likely allocated typeless; disabling GPU-direct swapchain copy, "
+                            "falling back to CPU readback\n",
+                            static_cast<long long>(realDesc.Format), static_cast<long long>(chosenFormat));
+                duskVrLog(msg);
+                swapchainResourceFormatUsable_ = false;
+            }
+        }
+#endif
         return true;
     }
 
@@ -1560,7 +1594,22 @@ private:
             // CopyBufferToBuffer-into-res.readback + readbackEyeCopy()'s
             // whole MapAsync/upload-heap/CopyTextureRegion dance for this
             // path entirely.
-            if (self->sameDeviceAsAurora_) {
+            //
+            // FOUND 2026-09-17 (crash right after fixing the typeless-
+            // swapchain-resource crash above): this branch checked the raw
+            // sameDeviceAsAurora_ flag directly instead of the combined
+            // usesGpuDirectSwapchainCopy() every other call site (including
+            // the two in vr_main.cpp that decide whether this task type
+            // even runs at all) already uses. sameDeviceAsAurora_ can stay
+            // true even when the GPU-direct path is disabled for the
+            // session (device reuse itself succeeded -- that's independent
+            // of the swapchain resource format being unusable, see
+            // swapchainResourceFormatUsable_'s comment), so this branch
+            // still tried to index swapchainTextures_ -- a vector that's
+            // ONLY ever populated by ensureSwapchainTexture(), itself only
+            // ever reached when usesGpuDirectSwapchainCopy() was true.
+            // Access violation on a default-constructed wgpu::Texture.
+            if (self->usesGpuDirectSwapchainCopy()) {
                 wgpu::TexelCopyBufferInfo srcBuf{};
                 srcBuf.buffer = res.gammaStorage;
                 srcBuf.layout.offset = 0;
@@ -1729,6 +1778,16 @@ private:
     // startup() for the D3D12-only detection).
     bool sameDeviceAsAurora_ = false;
 
+    // See createSwapchain()'s comment (the "runtime's real swapchain
+    // resource format" check). Starts true; set false, one-way, for the
+    // rest of the session if the runtime's actual swapchain resource turns
+    // out to be typeless (confirmed on Virtual Desktop/AMD RX 5700 XT --
+    // Dawn's D3D12 SharedTextureMemory backend can't import a typeless
+    // resource at all). ANDed into usesGpuDirectSwapchainCopy() below so
+    // this is the ONLY place that needs to know about the distinction --
+    // every other call site just checks usesGpuDirectSwapchainCopy().
+    bool swapchainResourceFormatUsable_ = true;
+
 public:
     void setSameDeviceAsAurora(bool v) { sameDeviceAsAurora_ = v; }
     bool sameDeviceAsAurora() const { return sameDeviceAsAurora_; }
@@ -1740,8 +1799,12 @@ public:
     // never runs the gamma compute pass (see useGammaComputePath_), and
     // this first pass doesn't build a second GPU-direct route for it --
     // low-value (rarely chosen) and higher-risk to get right blind, so it
-    // keeps using the proven CPU path instead.
-    bool usesGpuDirectSwapchainCopy() const { return sameDeviceAsAurora_ && useGammaComputePath_; }
+    // keeps using the proven CPU path instead. Also false once
+    // swapchainResourceFormatUsable_ has been detected false -- see its
+    // own comment.
+    bool usesGpuDirectSwapchainCopy() const {
+        return sameDeviceAsAurora_ && useGammaComputePath_ && swapchainResourceFormatUsable_;
+    }
 
 private:
 

@@ -99,14 +99,14 @@ void JASDsp::invalChannelAll() {
     DCInvalidateRange(CH_BUF, sizeof(TChannel) * DSP_CHANNELS);
 }
 
-DUSK_GAME_DATA u8 const ATTRIBUTE_ALIGN(32) JASDsp::DSPADPCM_FILTER[64] = {
+ATTRIBUTE_ALIGN(32) DUSK_GAME_DATA u8 const JASDsp::DSPADPCM_FILTER[64] = {
     0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x04, 0x00, 0x04, 0x00,
     0x10, 0x00, 0xF8, 0x00, 0x0E, 0x00, 0xFA, 0x00, 0x0C, 0x00, 0xFC, 0x00, 0x12, 0x00, 0xF6, 0x00,
     0x10, 0x68, 0xF7, 0x38, 0x12, 0xC0, 0xF7, 0x04, 0x14, 0x00, 0xF4, 0x00, 0x08, 0x00, 0xF8, 0x00,
     0x04, 0x00, 0xFC, 0x00, 0xFC, 0x00, 0x04, 0x00, 0xFC, 0x00, 0x00, 0x00, 0xF8, 0x00, 0x00, 0x00,
 };
 
-DUSK_GAME_DATA u32 const ATTRIBUTE_ALIGN(32) JASDsp::DSPRES_FILTER[320] = {
+ATTRIBUTE_ALIGN(32) DUSK_GAME_DATA u32 const JASDsp::DSPRES_FILTER[320] = {
     0x0C3966AD,
     0x0D46FFDF,
     0x0B396696,
@@ -523,9 +523,12 @@ void JASDsp::TChannel::init() {
 void JASDsp::TChannel::playStart() {
     JUT_ASSERT(508, dspMutex);
     field_0x10c = 0;
+#if !TARGET_PC
     field_0x060 = 0;
+#endif
     mResetFlag = 1;
     field_0x066 = 0;
+#if !TARGET_PC
     int i;
     for (i = 0; i < 4; i++) {
         field_0x078[i] = 0;
@@ -534,6 +537,7 @@ void JASDsp::TChannel::playStart() {
     for (i = 0; i < 20; i++) {
         field_0x080[i] = 0;
     }
+#endif
     mIsActive = 1;
 }
 
@@ -601,9 +605,11 @@ void JASDsp::TChannel::setWaveInfo(JASWaveInfo const& waveInfo, u32 aramAddress,
                 break;
             }
         }
+#if !TARGET_PC
         for (i = 0; i < 16; i++) {
             field_0x0b0[i] = 0;
         }
+#endif
     }
 }
 

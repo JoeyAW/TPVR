@@ -27,6 +27,9 @@ More on why it uses AI generated code below.
 (I'm going to replace this with a graphic soon)
 </div>
 
+> [!IMPORTANT]
+> Dusklight's official website is https://twilitrealm.dev/, any other website is not affiliated and may be promoting AI-generated misinformation.
+
 # Setup
 
 > [!IMPORTANT]
@@ -39,7 +42,10 @@ More on why it uses AI generated code below.
 
 You must dump your own copy of the game. Please see [this article](https://wiki.dolphin-emu.org/index.php?title=Ripping_Games) for instructions. After dumping, you can use a program like [Dolphin](https://dolphin-emu.org/) or [nodtool](https://github.com/encounter/nod/releases) to convert the `.iso` to `.rvz` to save space.
 
-Currently, only the GameCube releases are supported.
+Dusklight currently supports all commercial discs except for Wii's Korean release.
+
+> [!NOTE]
+> Dusklight is based on the [Twilight Princess decompilation](https://github.com/zeldaret/tp), which is currently only matching for GameCube. As a result, even when playing Dusklight with a Wii disc, you will be presented with the GameCube version's HUD and certain other specificities.
 
 ### 2. Install TPVR
 

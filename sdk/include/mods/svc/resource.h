@@ -2,14 +2,19 @@
 
 #include <mods/api.h>
 
+#ifdef __cplusplus
+#include <mods/service.hpp>
+#endif
+
 /*
  * Read-only access to the res/ tree of the calling mod's own bundle. Reload serves the new
- * bundle's contents. For writable storage, use HostService::mod_dir.
+ * bundle's contents. Use HostService::data_dir for persistent storage or HostService::mod_dir
+ * for temporary storage.
  */
 
-#define RESOURCE_SERVICE_ID "dev.twilitrealm.dusklight.resource"
+#define RESOURCE_SERVICE_ID DUSKLIGHT_SERVICE_ID_PREFIX "resource"
 #define RESOURCE_SERVICE_MAJOR 1u
-#define RESOURCE_SERVICE_MINOR 0u
+#define RESOURCE_SERVICE_MINOR 1u
 
 /*
  * A loaded resource, allocated by the service. Return every successful load with free;
@@ -39,15 +44,10 @@ typedef struct ResourceService {
      * already-freed buffer.
      */
     void (*free)(ModContext* ctx, ResourceBuffer* buffer);
+
+    bool (*file_exists)(ModContext* ctx, char const* relative_path);
+    bool (*directory_exists)(ModContext* ctx, char const* relative_path);
 } ResourceService;
 
-#ifdef __cplusplus
-#include "mods/service.hpp"
-
-template <>
-struct mods::ServiceTraits<ResourceService> {
-    static constexpr const char* id = RESOURCE_SERVICE_ID;
-    static constexpr uint16_t major_version = RESOURCE_SERVICE_MAJOR;
-    static constexpr uint16_t minor_version = RESOURCE_SERVICE_MINOR;
-};
-#endif
+MOD_DECLARE_SERVICE(ResourceService, svc_resource, RESOURCE_SERVICE_ID, RESOURCE_SERVICE_MAJOR,
+    RESOURCE_SERVICE_MINOR);

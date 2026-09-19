@@ -21,6 +21,7 @@
 #include "dusk/version.hpp"
 
 #if TARGET_PC
+#include "dusk/interp/user_interface.h"
 #include "dusk/menu_pointer.h"
 #endif
 
@@ -146,6 +147,7 @@ void dMenu_Skill_c::_move() {
 
 void dMenu_Skill_c::_draw() {
     if (mpArchive != NULL) {
+        IF_DUSK(presentAnims());
         J2DGrafContext* context = dComIfGp_getCurrentGrafPort();
         u8 alpha = mpBlackTex->mAlpha;
         mpBlackTex->setAlpha(0xff);
@@ -362,7 +364,7 @@ void dMenu_Skill_c::read_open_init() {
 void dMenu_Skill_c::read_open_move() {
     s16 openSkillDescFrame =
         g_drawHIO.mSkillListScreen.mOpenFrame[dMeter_drawSkillHIO_c::SKILL_DESC];
-    mProcFrame++;
+    IF_NOT_DUSK(mProcFrame++);
     if (mProcFrame >= openSkillDescFrame) {
         mProcess = PROC_OPEN_MOVE;
         mpTextParent->setAlphaRate(1.0f);
@@ -402,7 +404,7 @@ void dMenu_Skill_c::read_close_init() {
 void dMenu_Skill_c::read_close_move() {
     s16 closeSkillDescFrame =
         g_drawHIO.mSkillListScreen.mCloseFrame[dMeter_drawSkillHIO_c::SKILL_DESC];
-    mProcFrame--;
+    IF_NOT_DUSK(mProcFrame--);
     if (mProcFrame <= 0) {
         mProcess = PROC_CLOSE_MOVE;
         mpTextParent->setAlphaRate(0.0f);
@@ -413,6 +415,26 @@ void dMenu_Skill_c::read_close_move() {
         mpBlackTex->setAlpha(g_drawHIO.mSkillListScreen.mWindowBGalpha * alphaRate);
     }
 }
+
+#if TARGET_PC
+void dMenu_Skill_c::presentAnims() {
+    const auto& hio = g_drawHIO.mSkillListScreen;
+    f32 duration;
+    if (mProcess == PROC_WAIT_MOVE) {
+        duration = hio.mOpenFrame[dMeter_drawSkillHIO_c::SKILL_DESC];
+        dusk::vdt::advance_toward_frame(mProcFrame, duration, 1.0f);
+    } else if (mProcess == PROC_MOVE_MOVE) {
+        duration = hio.mCloseFrame[dMeter_drawSkillHIO_c::SKILL_DESC];
+        dusk::vdt::advance_toward_frame(mProcFrame, 0.0f, 1.0f);
+    } else {
+        return;
+    }
+    const f32 alpha = duration <= 0.0f ? (mProcess == PROC_WAIT_MOVE ? 1.0f : 0.0f) :
+                                       dusk::vdt::clamped_fraction(mProcFrame, duration);
+    mpTextParent->setAlphaRate(alpha);
+    mpBlackTex->setAlpha(hio.mWindowBGalpha * alpha);
+}
+#endif
 
 void dMenu_Skill_c::screenSetMenu() {
     static const u64 tag_sub0[7] = {

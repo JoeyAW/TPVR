@@ -12,6 +12,36 @@
 #include "d/d_meter_HIO.h"
 #include "float.h"
 
+#if TARGET_PC
+#include "dusk/interp/samples.h"
+
+namespace {
+struct MapPlayer {
+    dusk::interp::Samples<cXyz> position;
+    dusk::interp::Samples<csXyz> angle;
+    fpc_ProcID id = fpcM_ERROR_PROCESS_ID_e;
+    int room = -1;
+};
+
+MapPlayer& map_player() {
+    static MapPlayer samples;
+    auto* player = daPy_getPlayerActorClass();
+    const int room = dComIfGp_roomControl_getStayNo();
+    const fpc_ProcID id = player != nullptr ? fopAcM_GetID(player) : fpcM_ERROR_PROCESS_ID_e;
+    if (samples.id != id || samples.room != room) {
+        samples = {};
+        samples.id = id;
+        samples.room = room;
+    }
+    if (player != nullptr) {
+        samples.position.capture(&player->current.pos, 1);
+        samples.angle.capture(&player->shape_angle, 1);
+    }
+    return samples;
+}
+}  // namespace
+#endif
+
 bool dMapInfo_n::chkGetCompass() {
     return dComIfGs_isDungeonItemCompass() ? true : false;
 }
@@ -60,7 +90,7 @@ Vec dMapInfo_n::getMapPlayerPos() {
     BE(Vec) pos;
     fopAc_ac_c* player = daPy_getPlayerActorClass();
     if (player != NULL) {
-        pos = player->current.pos;
+        pos = DUSK_IF_ELSE(map_player().position.read(0, player->current.pos, 2000.0f), player->current.pos);
     } else {
         pos.x = 0.0f;
         pos.y = 0.0f;
@@ -82,7 +112,7 @@ s16 dMapInfo_n::getMapPlayerAngleY() {
 
     daPy_py_c* player = daPy_getPlayerActorClass();
     if (player != NULL) {
-        angle = player->shape_angle.y;
+        angle = DUSK_IF_ELSE(map_player().angle.read(0, player->shape_angle).y, player->shape_angle.y);
     }
 
     dStage_FileList2_dt_c* fileList2_p = dStage_roomControl_c::getFileList2(stayNo);

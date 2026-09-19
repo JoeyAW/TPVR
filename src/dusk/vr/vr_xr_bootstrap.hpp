@@ -57,6 +57,15 @@
 // both need the JavaVM/Activity the SDL Android shell already owns --
 // same SDL_GetAndroidJNIEnv()/SDL_GetAndroidActivity() pattern already
 // used in dusk/android_frame_rate.cpp and dusk/http/android.cpp.
+// Needed for the AHardwareBuffer GPU-direct swapchain-copy path's Android-
+// specific Vulkan extension names/structs (VK_ANDROID_external_memory_
+// android_hardware_buffer, declared in <vulkan/vulkan_android.h>, only
+// pulled in by vulkan.h/vulkan_core.h when this platform macro is defined
+// -- must come before vulkan.h is first included, same ordering
+// requirement as XR_USE_PLATFORM_ANDROID below).
+#ifndef VK_USE_PLATFORM_ANDROID_KHR
+#define VK_USE_PLATFORM_ANDROID_KHR
+#endif
 #include <vulkan/vulkan.h>
 #include <jni.h>
 #include <SDL3/SDL_system.h>
@@ -307,6 +316,23 @@ struct XrGraphicsDevice {
     // construction call site (`gfx.device, gfx.commandQueue`) is shared,
     // unbranched code.
     VkQueue commandQueue = VK_NULL_HANDLE;
+    // True when VK_ANDROID_external_memory_android_hardware_buffer (plus
+    // its real dependencies) was actually enabled on `device` below -- the
+    // XR-session-side precondition for dusk::vr::Session's AHardwareBuffer
+    // GPU-direct swapchain-copy path (vr_xr_submit.hpp). The OTHER
+    // precondition, aurora::webgpu::g_sharedTextureMemoryAHardwareBufferSupported,
+    // is Dawn's own adapter-side support for the SAME extension family --
+    // vr_main.cpp's startup() requires BOTH before enabling the path, same
+    // "both sides must independently support it" pattern as the D3D12
+    // GPU-direct path's adaptersMatch+g_sharedTextureMemoryD3D12Supported
+    // check.
+    bool supportsAndroidHardwareBuffer = false;
+    // True when VK_KHR_external_semaphore_fd was actually enabled on
+    // `device` -- the XR-session-side precondition for the async
+    // semaphore-gated handoff in dusk::vr::Session's AHardwareBuffer path
+    // (vr_xr_submit.hpp's finishAhbGpuCopy()). Same "detect, don't assume"
+    // pattern as supportsAndroidHardwareBuffer above.
+    bool supportsExternalSemaphoreFd = false;
 };
 
 // Creates a VkInstance + VkDevice via XR_KHR_vulkan_enable2's
@@ -380,9 +406,81 @@ inline XrGraphicsDevice createXrGraphicsDevice(const Bootstrap& boot) {
     queueCreateInfo.queueCount = 1;
     queueCreateInfo.pQueuePriorities = &queuePriority;
 
+    // AHardwareBuffer GPU-direct swapchain-copy path (dusk::vr::Session,
+    // vr_xr_submit.hpp): enumerate the physical device's real supported
+    // extension list and only enable VK_ANDROID_external_memory_
+    // android_hardware_buffer (+ its real dependencies) if actually
+    // present -- same "detect, don't assume" discipline as this project's
+    // D3D12 GPU-direct path (aurora::webgpu::g_sharedTextureMemoryD3D12Supported).
+    // gfx.supportsAndroidHardwareBuffer records whether this actually
+    // succeeded; vr_main.cpp's startup() ALSO requires Dawn's own adapter
+    // to report aurora::webgpu::g_sharedTextureMemoryAHardwareBufferSupported
+    // before enabling the path -- both sides independently need it, same
+    // shape as the D3D12 path's adaptersMatch+g_sharedTextureMemoryD3D12Supported
+    // pair.
+    uint32_t availableExtCount = 0;
+    vkEnumerateDeviceExtensionProperties(gfx.physicalDevice, nullptr, &availableExtCount, nullptr);
+    std::vector<VkExtensionProperties> availableExts(availableExtCount);
+    vkEnumerateDeviceExtensionProperties(gfx.physicalDevice, nullptr, &availableExtCount,
+                                          availableExts.data());
+    auto hasDeviceExtension = [&availableExts](const char* name) {
+        for (const auto& ext : availableExts) {
+            if (std::strcmp(ext.extensionName, name) == 0) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    std::vector<const char*> enabledDeviceExtensions;
+    // VK_KHR_sampler_ycbcr_conversion, VK_KHR_external_memory, and
+    // VK_KHR_dedicated_allocation are real spec-listed dependencies of the
+    // AHardwareBuffer extension on Vulkan 1.0 -- almost certainly already
+    // promoted to core on Quest 3's actual API version
+    // (boot.vulkanRequirements.minApiVersionSupported, requested as
+    // appInfo.apiVersion above), so hasDeviceExtension() is expected to
+    // return false for them (a core-promoted feature isn't re-listed as
+    // its own extension) -- only added to enabledDeviceExtensions when the
+    // driver genuinely still exposes them as separate extension strings,
+    // never assumed unconditionally.
+    const char* const kAhbDependencies[] = {
+        VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME,
+        VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
+        VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME,
+        VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME,
+    };
+    for (const char* name : kAhbDependencies) {
+        if (hasDeviceExtension(name)) {
+            enabledDeviceExtensions.push_back(name);
+        }
+    }
+    if (hasDeviceExtension(VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME)) {
+        enabledDeviceExtensions.push_back(
+            VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
+        gfx.supportsAndroidHardwareBuffer = true;
+    }
+
+    // Async semaphore-gated handoff (2026-09-18, replaces the AHB path's
+    // original CPU-blocking OnSubmittedWorkDone() poll -- see
+    // dusk::vr::Session::finishAhbGpuCopy()'s own comment): needs
+    // VK_KHR_external_semaphore_fd (+ its VK_KHR_external_semaphore base,
+    // almost certainly core-promoted on Quest 3's API version, same
+    // "don't assume" reasoning as kAhbDependencies above) so the XR-side
+    // device can import a VkSemaphore from the opaque FD Dawn exports via
+    // wgpu::SharedFenceVkSemaphoreOpaqueFDExportInfo.
+    if (hasDeviceExtension(VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME)) {
+        enabledDeviceExtensions.push_back(VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME);
+    }
+    if (hasDeviceExtension(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME)) {
+        enabledDeviceExtensions.push_back(VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+        gfx.supportsExternalSemaphoreFd = true;
+    }
+
     VkDeviceCreateInfo vkDeviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     vkDeviceInfo.queueCreateInfoCount = 1;
     vkDeviceInfo.pQueueCreateInfos = &queueCreateInfo;
+    vkDeviceInfo.enabledExtensionCount = static_cast<uint32_t>(enabledDeviceExtensions.size());
+    vkDeviceInfo.ppEnabledExtensionNames = enabledDeviceExtensions.data();
 
     XrVulkanDeviceCreateInfoKHR xrDeviceCreateInfo{XR_TYPE_VULKAN_DEVICE_CREATE_INFO_KHR};
     xrDeviceCreateInfo.systemId = boot.systemId;

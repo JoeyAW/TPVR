@@ -20,7 +20,9 @@
 #include "m_Do/m_Do_ext.h"
 #include <cstring>
 
+#if TARGET_PC
 #include "helpers/string.hpp"
+#endif
 
 #if DEBUG
 class daNpc_ykW_HIO_c : public mDoHIO_entry_c {
@@ -2213,8 +2215,9 @@ int daNpc_ykW_c::cutEndSnowboardRace(int param_0) {
             switch (eventId) {
             case 1:
                 if (mItemPartnerId == fpcM_ERROR_PROCESS_ID_e) {
-                    mItemPartnerId = fopAcM_createItemForPresentDemo(&current.pos, itemId, 0,
-                                                            -1, -1, 0, 0);
+                    DUSK_ITEM_CHECK("snowboard_race_reward", itemId, this);
+                    mItemPartnerId = fopAcM_createItemForPresentDemo(&current.pos, itemId, 0, -1,
+                        -1, 0, 0 DUSK_GIVE_TAG("snowboard_race_reward"));
                 }
 
                 if (fopAcM_IsExecuting(mItemPartnerId)) {
@@ -2911,8 +2914,9 @@ int daNpc_ykW_c::talk(void* param_0) {
                     switch (eventId) {
                     case 1:
                         if (mItemPartnerId == fpcM_ERROR_PROCESS_ID_e) {
-                            mItemPartnerId =
-                                fopAcM_createItemForPresentDemo(&current.pos, itemNo, 0, -1, -1, 0, 0);
+                            DUSK_ITEM_CHECK("dungeon_map:D_MN11", itemNo, this);
+                            mItemPartnerId = fopAcM_createItemForPresentDemo(&current.pos, itemNo,
+                                0, -1, -1, 0, 0 DUSK_GIVE_TAG("dungeon_map:D_MN11"));
                         }
 
                         if (fopAcM_IsExecuting(mItemPartnerId)) {

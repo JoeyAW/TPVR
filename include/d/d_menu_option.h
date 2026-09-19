@@ -96,6 +96,8 @@ public:
     bool dpdMenuMove();
 #if TARGET_PC
     bool pointerConfirmSelect();
+    void presentLayoutAnims();
+    void presentAnims();
 #endif
     void paneResize(u64);
     void initialize();
@@ -117,7 +119,6 @@ public:
         return ((u8)mUseFlag & (u8)i_flag) != 0 ? true : false;
     }
 
-private:
     /* 0x004 */ J2DScreen* mpBackScreen;
     /* 0x008 */ J2DScreen* mpScreen;
     /* 0x00C */ J2DScreen* mpClipScreen;
@@ -191,11 +192,11 @@ private:
     /* 0x3B4 */ f32 field_0x3b4;
     /* 0x3B8 */ JUtility::TColor field_0x3b8;
     /* 0x3BC */ JUtility::TColor field_0x3bc;
-    /* 0x3C0 */ int field_0x3c0;
-    /* 0x3C4 */ int field_0x3c4;
-    /* 0x3C8 */ int field_0x3c8[4];
+    /* 0x3C0 */ DUSK_IF_ELSE(f32, int) field_0x3c0;
+    /* 0x3C4 */ DUSK_IF_ELSE(f32, int) field_0x3c4;
+    /* 0x3C8 */ DUSK_IF_ELSE(f32, int) field_0x3c8[4];
     /* 0x3D8 */ s16 mFrame;
-    /* 0x3DA */ s16 field_0x3da;
+    /* 0x3DA */ DUSK_IF_ELSE(f32, s16) field_0x3da;
     /* 0x3DC */ u16 field_0x3dc;
     /* 0x3DE */ u16 field_0x3de;
     /* 0x3E0 */ u8 field_0x3e0;

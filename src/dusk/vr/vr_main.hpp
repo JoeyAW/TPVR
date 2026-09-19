@@ -8,7 +8,7 @@
 // own comments below for why the split exists.
 
 #include <dolphin/types.h>     // s16 -- getHeadMoveAngleS()
-#include "dusk/game_clock.h"  // dusk::game_clock::MainLoopPacer
+#include "dusk/game_clock.h"  // dusk::game_clock::FrameTiming
 #include "helpers/gx_helper.h"  // TGXTexObj
 
 class J3DModel;
@@ -437,15 +437,15 @@ bool shouldTrackHookshotToHand(daAlink_c* link);
 // isRenderingToHeadset() above) must be followed by a submitFrame() call
 // later the same frame, after the caller's own aurora_end_frame().
 //
-// FIXED this session: takes the caller's already-computed MainLoopPacer
-// instead of calling dusk::game_clock::advance_main_loop() a second time.
-// That function mutates shared clock state on every call (unconditionally
-// stamps s_previous_sample = now, among other things) -- calling it again
-// here corrupted the frame-pacing bookkeeping for every VR frame, since the
+// FIXED this session: takes the caller's already-computed FrameTiming
+// instead of calling dusk::game_clock::advance() a second time. That
+// function mutates shared clock state on every call (unconditionally stamps
+// s_previous_sample = now, among other things) -- calling it again here
+// corrupted the frame-pacing bookkeeping for every VR frame, since the
 // second call always saw a near-zero elapsed time versus the first call
 // m_Do_main.cpp already made a few instructions earlier. Pass the same
-// pacing through instead of re-deriving (and re-mutating) it.
-void tick(const dusk::game_clock::MainLoopPacer& pacing);
+// timing through instead of re-deriving (and re-mutating) it.
+void tick(const dusk::game_clock::FrameTiming& pacing);
 
 // Call once per frame, right after the caller's own aurora_end_frame() --
 // NOT inside the aurora_begin_frame()/aurora_end_frame() pair tick() runs

@@ -2,7 +2,10 @@
 #define D_MSG_D_MSG_FLOW_H
 
 #include <types.h>
+
+#if TARGET_PC
 #include "helpers/endian.h"
+#endif
 
 enum {
     NODETYPE_MESSAGE_e = 1,
@@ -22,7 +25,7 @@ struct msg_class;
 // all mesg_flow_node structs members might be wrong
 struct mesg_flow_node {
     /* 0x00 */ u8 type;
-    /* 0x01 */ u8 field_0x1;
+    /* 0x01 */ u8 subtype;
     /* 0x02 */ BE(u16) msg_index;
     /* 0x04 */ BE(u16) next_node_idx;
     /* 0x06 */ BE(u16) unk_0x6;
@@ -30,7 +33,7 @@ struct mesg_flow_node {
 
 struct mesg_flow_node_branch {
     /* 0x00 */ u8 type;
-    /* 0x01 */ u8 field_0x1;
+    /* 0x01 */ u8 result_count;
     /* 0x02 */ BE(u16) query_idx;
     /* 0x04 */ BE(u16) param;
     /* 0x06 */ BE(u16) next_node_idx;
@@ -188,7 +191,6 @@ public:
     static DUSK_GAME_DATA queryFunc mQueryList[53];
     static DUSK_GAME_DATA eventFunc mEventList[43];
 
-private:
     /* 0x04 */ u8* mFlow_p;
     /* 0x08 */ u8* mLabelInfo_p;
     /* 0x0C */ union mesg_flow {

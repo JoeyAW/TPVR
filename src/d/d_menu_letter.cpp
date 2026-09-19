@@ -17,8 +17,9 @@
 #include "d/d_msg_scrn_arrow.h"
 #include "d/d_lib.h"
 
-#ifdef TARGET_PC
+#if TARGET_PC
 #include "dusk/achievements.h"
+#include "dusk/interp/user_interface.h"
 #include "dusk/menu_pointer.h"
 #include "dusk/ui/touch_controls.hpp"
 #include "dusk/version.hpp"
@@ -29,9 +30,7 @@ static void enable_turn_page_controls(bool enabled) {
     dusk::ui::set_control_override(dusk::ui::Control::L, controlOverride);
     dusk::ui::set_control_override(dusk::ui::Control::R, controlOverride);
 }
-#endif
 
-#if TARGET_PC
 #define D_MENU_LETTER_LINE_MAX (dusk::version::isRegionJpn() ? 9 : 12)
 #elif VERSION == VERSION_GCN_JPN
 #define D_MENU_LETTER_LINE_MAX 9
@@ -226,6 +225,7 @@ void dMenu_Letter_c::_draw() {
     if (mpArchive == NULL) {
         return;
     }
+    IF_DUSK(presentAnims());
     J2DGrafContext* grafContext = dComIfGp_getCurrentGrafPort();
     u8 prevAlpha = mpBlackTex->getAlpha();
     mpBlackTex->setAlpha(0xff);
@@ -531,7 +531,7 @@ void dMenu_Letter_c::slide_right_init() {
 }
 
 void dMenu_Letter_c::slide_right_move() {
-    cLib_addCalc2(&field_0x358, 0.0f, 0.5f, 50.0f);
+    IF_NOT_DUSK(cLib_addCalc2(&field_0x358, 0.0f, 0.5f, 50.0f));
     if (fabsf(field_0x358) < 0.1f) {
         field_0x358 = 0.0f;
         mProcess = 0;
@@ -552,7 +552,7 @@ void dMenu_Letter_c::slide_left_init() {
 }
 
 void dMenu_Letter_c::slide_left_move() {
-    cLib_addCalc2(&field_0x358, 0.0f, 0.5f, 50.0f);
+    IF_NOT_DUSK(cLib_addCalc2(&field_0x358, 0.0f, 0.5f, 50.0f));
     if (fabsf(field_0x358) < 0.1f) {
         field_0x358 = 0.0f;
         mProcess = 0;
@@ -607,7 +607,7 @@ void dMenu_Letter_c::read_open_init() {
 void dMenu_Letter_c::read_open_move() {
     s16 openLetterFrame =
         g_drawHIO.mLetterSelectScreen.mOpenFrame[dMeter_drawLetterHIO_c::LETTER_FRAME];
-    field_0x36a++;
+    IF_NOT_DUSK(field_0x36a++);
     if (field_0x36a >= openLetterFrame) {
         mProcess = 4;
         for (int i = 0; i < 2; i++) {
@@ -695,7 +695,7 @@ void dMenu_Letter_c::read_next_fadeout_init() {
 void dMenu_Letter_c::read_next_fadeout_move() {
     s16 closeWindowFrame =
         g_drawHIO.mLetterSelectScreen.mCloseFrame[dMeter_drawLetterHIO_c::WINDOW_FRAME];
-    field_0x36a--;
+    IF_NOT_DUSK(field_0x36a--);
     if (field_0x36a <= 0) {
         mProcess = 6;
         for (int i = 0; i < 2; i++) {
@@ -744,7 +744,7 @@ void dMenu_Letter_c::read_next_fadein_init() {
 void dMenu_Letter_c::read_next_fadein_move() {
     s16 openLetterFrame =
         g_drawHIO.mLetterSelectScreen.mOpenFrame[dMeter_drawLetterHIO_c::LETTER_FRAME];
-    field_0x36a++;
+    IF_NOT_DUSK(field_0x36a++);
     if (field_0x36a >= openLetterFrame) {
         mProcess = 4;
         for (int i = 0; i < 2; i++) {
@@ -773,7 +773,7 @@ void dMenu_Letter_c::read_close_init() {
 void dMenu_Letter_c::read_close_move() {
     s16 closeLetterFrame =
         g_drawHIO.mLetterSelectScreen.mCloseFrame[dMeter_drawLetterHIO_c::LETTER_FRAME];
-    field_0x36a--;
+    IF_NOT_DUSK(field_0x36a--);
     if (field_0x36a <= 0) {
         mProcess = 0;
         for (int i = 0; i < 2; i++) {
@@ -791,6 +791,41 @@ void dMenu_Letter_c::read_close_move() {
         mpBlackTex->setAlpha(g_drawHIO.mLetterSelectScreen.mWindowBGAlpha * div);
     }
 }
+
+#if TARGET_PC
+void dMenu_Letter_c::presentAnims() {
+    if (mProcess == 1 || mProcess == 2) {
+        dusk::vdt::present_addCalc2(&field_0x358, 0.0f, 0.5f, 50.0f, 0.1f);
+        return;
+    }
+
+    const auto& hio = g_drawHIO.mLetterSelectScreen;
+    const bool opening = mProcess == 3 || mProcess == 6;
+    const bool page = mProcess == 5 || mProcess == 6;
+    if (!opening && mProcess != 5 && mProcess != 7) {
+        return;
+    }
+    const f32 duration = opening ? hio.mOpenFrame[dMeter_drawLetterHIO_c::LETTER_FRAME] :
+        hio.mCloseFrame[page ? dMeter_drawLetterHIO_c::WINDOW_FRAME : dMeter_drawLetterHIO_c::LETTER_FRAME];
+    dusk::vdt::advance_toward_frame(field_0x36a, opening ? duration : 0.0f, 1.0f);
+    const f32 alpha = duration <= 0.0f ? (opening ? 1.0f : 0.0f) :
+                                       dusk::vdt::clamped_fraction(field_0x36a, duration);
+    for (int i = 0; i < 2; i++) {
+        if (page) {
+            field_0x2ec[i]->setAlphaRate(alpha);
+            if (field_0x2f4[i] != NULL) {
+                field_0x2f4[i]->setAlphaRate(alpha);
+            }
+        } else {
+            mpTextParent[i]->scale(hio.mLetterWindowScale * alpha, hio.mLetterWindowScale * alpha);
+            mpTextParent[i]->setAlphaRate(alpha);
+        }
+    }
+    if (!page) {
+        mpBlackTex->setAlpha(hio.mWindowBGAlpha * alpha);
+    }
+}
+#endif
 
 void dMenu_Letter_c::screenSetMenu() {
     static const u64 tag_sub0[6] = {

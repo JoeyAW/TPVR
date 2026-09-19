@@ -5,26 +5,30 @@
 
 #include "d/dolzel.h" // IWYU pragma: keep
 
-#include <cstdio>
-#include <cstring>
+#include "d/d_menu_item_explain.h"
 #include "JSystem/J2DGraph/J2DTextBox.h"
 #include "JSystem/JKernel/JKRExpHeap.h"
 #include "JSystem/JUtility/JUTTexture.h"
+#include <cstdio>
+#include <cstring>
 #include "d/actor/d_a_player.h"
 #include "d/d_com_inf_game.h"
 #include "d/d_item.h"
 #include "d/d_kantera_icon_meter.h"
 #include "d/d_lib.h"
-#include "d/d_menu_item_explain.h"
+#include "d/d_select_cursor.h"
 #include "d/d_meter2_info.h"
 #include "d/d_meter_HIO.h"
-#include "d/d_msg_scrn_3select.h"
-#include "d/d_msg_scrn_arrow.h"
 #include "d/d_msg_string.h"
-#include "d/d_select_cursor.h"
-#include "dusk/version.hpp"
 #include "m_Do/m_Do_controller_pad.h"
 #include "m_Do/m_Do_graphic.h"
+#include "d/d_msg_scrn_3select.h"
+#include "d/d_msg_scrn_arrow.h"
+
+#if TARGET_PC
+#include "dusk/game_clock.h"
+#include "dusk/version.hpp"
+#endif
 
 typedef void (dMenu_ItemExplain_c::*initFunc)();
 static initFunc init_process[] = {
@@ -352,6 +356,7 @@ void dMenu_ItemExplain_c::draw(J2DOrthoGraph* i_graph) {
             // were likely either chosen by hand or had multiple arithmetic
             // operations applied which cannot easily be reverse engineered
             mpSelect_c->translate(486.0f, 209.0f);
+            IF_DUSK(mpSelect_c->presentAnims());
             mpSelect_c->draw(0.0f, 0.0f);
         }
         if (mpArrow != NULL) {
@@ -440,7 +445,7 @@ void dMenu_ItemExplain_c::open_init() {
 }
 
 void dMenu_ItemExplain_c::open_proc() {
-    mAlphaRatio += 2.0f;
+    mAlphaRatio += 2.0f IF_DUSK(* dusk::game_clock::original_frames());
     if (mAlphaRatio >= 201.0f) {
         mAlphaRatio = 201.0f;
         mStatus = 2;

@@ -14,19 +14,24 @@
 #include "m_Do/m_Do_mtx.h"
 
 #if TARGET_PC
-#include <cstdio>
-#include <typeindex>
-#include "JSystem/JKernel/JKRHeap.h"
-#include "absl/container/flat_hash_map.h"
-#include "client/TracyScoped.hpp"
-#include "dusk/frame_interpolation.h"
-#include "helpers/gx_helper.h"
+#include "dusk/game_clock.h"
+#include "dusk/interp/frame_interpolation.h"
 #include "dusk/logging.h"
 #if defined(_WIN32)
 #include <windows.h>
 #endif
 #include "dusk/vr/vr_debug_log.hpp"  // dusk::vr::duskVrLog/duskVrSnprintf -- portable OutputDebugStringA/_snprintf_s stand-ins
 extern "C" bool g_duskVRRenderingToHeadset;
+#include "helpers/gx_helper.h"
+
+#include "d/d_menu_collect.h"
+
+#include "JSystem/JKernel/JKRHeap.h"
+
+#include <absl/container/flat_hash_map.h>
+#include <tracy/Tracy.hpp>
+
+#include <typeindex>
 
 static const void* getInterpKey(const void* base, int idx) {
     return reinterpret_cast<const void*>(reinterpret_cast<uintptr_t>(base) ^ idx);
@@ -534,14 +539,14 @@ void dDlst_2DT2_c::draw() {
     dComIfGp_getCurrentGrafPort()->setup2D();
 }
 
-static u8 l_frontZMat[] ATTRIBUTE_ALIGN(32) = {
+ATTRIBUTE_ALIGN(32) static u8 l_frontZMat[] = {
     0x61, 0x40, 0x00, 0x00, 0x07, 0x10, 0x00, 0x00, 0x10, 0x3F, 0x00, 0x00, 0x00, 0x00, 0x10,
     0x00, 0x00, 0x10, 0x09, 0x00, 0x00, 0x00, 0x01, 0x61, 0x00, 0x00, 0x40, 0x10, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
-static u8 l_frontNoZSubMat[] ATTRIBUTE_ALIGN(32) = {
+ATTRIBUTE_ALIGN(32) static u8 l_frontNoZSubMat[] = {
     0x61, 0x40, 0x00, 0x00, 0x06, 0x61, 0x41, 0x00, 0x09, 0x35, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -552,14 +557,14 @@ static Vec l_shadowVolPos[] = {
     {1.0f, -1.0f, 0.0f},  {1.0f, -1.0f, -300.0f},  {1.0f, 1.0f, 0.0f},  {1.0f, 1.0f, -300.0f},
 };
 
-static u8 l_shadowVolDL[] ATTRIBUTE_ALIGN(32) = {
+ATTRIBUTE_ALIGN(32) static u8 l_shadowVolDL[] = {
     0x80, 0x00, 0x18, 0x06, 0x02, 0x03, 0x07, 0x00, 0x04, 0x05, 0x01, 0x06, 0x04, 0x00, 0x02,
     0x07, 0x05, 0x04, 0x06, 0x03, 0x01, 0x05, 0x07, 0x02, 0x00, 0x01, 0x03, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
-static u8 l_shadowProjMat[] ATTRIBUTE_ALIGN(32) = {
+ATTRIBUTE_ALIGN(32) static u8 l_shadowProjMat[] = {
     0x61, 0x28, 0x38, 0x03, 0xC0, 0x61, 0xC0, 0x08, 0xFF, 0xFF, 0x61, 0xC1, 0x08, 0xE6, 0x70,
     0x61, 0x43, 0x00, 0x00, 0x01, 0x61, 0x40, 0x00, 0x00, 0x07, 0x61, 0x41, 0x00, 0x04, 0xAD,
     0x61, 0xF3, 0x64, 0x00, 0x00, 0x10, 0x00, 0x00, 0x10, 0x3F, 0x00, 0x00, 0x00, 0x01, 0x10,
@@ -568,7 +573,7 @@ static u8 l_shadowProjMat[] ATTRIBUTE_ALIGN(32) = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
-static u8 l_shadowVolMat[] ATTRIBUTE_ALIGN(32) = {
+ATTRIBUTE_ALIGN(32) static u8 l_shadowVolMat[] = {
     0x61, 0x28, 0x38, 0x00, 0x00, 0x61, 0xC0, 0x08, 0xFF, 0xFC, 0x61, 0xC1, 0x08, 0xFF, 0x90,
     0x61, 0x43, 0x00, 0x00, 0x41, 0x61, 0x40, 0x00, 0x00, 0x0D, 0x61, 0x41, 0x00, 0x01, 0x35,
     0x61, 0xF3, 0x7F, 0x00, 0x00, 0x10, 0x00, 0x00, 0x10, 0x3F, 0x00, 0x00, 0x00, 0x00, 0x10,
@@ -577,7 +582,7 @@ static u8 l_shadowVolMat[] ATTRIBUTE_ALIGN(32) = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
-static u8 l_clearMat[] ATTRIBUTE_ALIGN(32) = {
+ATTRIBUTE_ALIGN(32) static u8 l_clearMat[] = {
     0x61, 0x28, 0x38, 0x00, 0x00, 0x61, 0xC0, 0x08, 0xFF, 0xFF, 0x61, 0xC1, 0x08, 0xFF, 0xA0,
     0x61, 0x40, 0x00, 0x00, 0x06, 0x61, 0x41, 0x00, 0x00, 0x14, 0x61, 0xF3, 0x7F, 0x00, 0x00,
     0x10, 0x00, 0x00, 0x10, 0x3F, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x10, 0x09, 0x00,
@@ -586,7 +591,7 @@ static u8 l_clearMat[] ATTRIBUTE_ALIGN(32) = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
-static u8 l_frontMat[] ATTRIBUTE_ALIGN(32) = {
+ATTRIBUTE_ALIGN(32) static u8 l_frontMat[] = {
     0x61, 0x28, 0x38, 0x00, 0x00, 0x61, 0xC0, 0x08, 0xFF, 0xFF, 0x61, 0xC1, 0x08, 0xFF, 0x90,
     0x61, 0x43, 0x00, 0x00, 0x41, 0x61, 0x40, 0x00, 0x00, 0x07, 0x61, 0x41, 0x00, 0x01, 0x15,
     0x10, 0x00, 0x00, 0x10, 0x3F, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x10, 0x09, 0x00,
@@ -595,7 +600,7 @@ static u8 l_frontMat[] ATTRIBUTE_ALIGN(32) = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
-static u8 l_backSubMat[] ATTRIBUTE_ALIGN(32) = {
+ATTRIBUTE_ALIGN(32) static u8 l_backSubMat[] = {
     0x61, 0x41, 0x00, 0x09, 0x35, 0x10, 0x00, 0x00, 0x10, 0x3F, 0x00, 0x00, 0x00, 0x00, 0x10,
     0x00, 0x00, 0x10, 0x09, 0x00, 0x00, 0x00, 0x01, 0x61, 0x00, 0x00, 0x80, 0x10, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -609,7 +614,7 @@ static Vec l_simpleShadowPos[] = {
     {1.0f, 1.0f, 1.0f},    {-1.0f, 1.0f, 1.0f},
 };
 
-static u8 l_shadowVolumeDL[] ATTRIBUTE_ALIGN(32) = {
+ATTRIBUTE_ALIGN(32) static u8 l_shadowVolumeDL[] = {
     0x98, 0x00, 0x05, 0x03, 0x09, 0x01, 0x07, 0x05, 0x98, 0x00, 0x05, 0x04, 0x06, 0x00, 0x08,
     0x02, 0x98, 0x00, 0x04, 0x04, 0x05, 0x06, 0x07, 0x98, 0x00, 0x04, 0x02, 0x03, 0x04, 0x05,
     0x98, 0x00, 0x04, 0x08, 0x09, 0x02, 0x03, 0x98, 0x00, 0x04, 0x06, 0x07, 0x08, 0x09, 0x98,
@@ -618,7 +623,7 @@ static u8 l_shadowVolumeDL[] ATTRIBUTE_ALIGN(32) = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
-static u8 l_shadowSealTexDL[] ATTRIBUTE_ALIGN(32) = {
+ATTRIBUTE_ALIGN(32) static u8 l_shadowSealTexDL[] = {
     0x61, 0x28, 0x38, 0x03, 0xC0, 0x61, 0x40, 0x00, 0x00, 0x06, 0x61, 0x41, 0x00, 0x06, 0x15,
     0x10, 0x00, 0x00, 0x10, 0x3F, 0x00, 0x00, 0x00, 0x01, 0x10, 0x00, 0x00, 0x10, 0x09, 0x00,
     0x00, 0x00, 0x00, 0x61, 0x00, 0x00, 0x40, 0x01, 0x80, 0x00, 0x04, 0x0A, 0x00, 0x00, 0x0B,
@@ -627,7 +632,7 @@ static u8 l_shadowSealTexDL[] ATTRIBUTE_ALIGN(32) = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
-static u8 l_shadowSealTex2DL[] ATTRIBUTE_ALIGN(32) = {
+ATTRIBUTE_ALIGN(32) static u8 l_shadowSealTex2DL[] = {
     0x61, 0x28, 0x38, 0x03, 0xC0, 0x61, 0x40, 0x00, 0x00, 0x06, 0x61, 0x41, 0x00, 0x06, 0x15,
     0x10, 0x00, 0x00, 0x10, 0x3F, 0x00, 0x00, 0x00, 0x01, 0x10, 0x00, 0x00, 0x10, 0x09, 0x00,
     0x00, 0x00, 0x00, 0x61, 0x00, 0x00, 0x40, 0x01, 0x80, 0x00, 0x04, 0x0A, 0x00, 0x00, 0x0B,
@@ -636,7 +641,7 @@ static u8 l_shadowSealTex2DL[] ATTRIBUTE_ALIGN(32) = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
-static u8 l_shadowSealDL[] ATTRIBUTE_ALIGN(32) = {
+ATTRIBUTE_ALIGN(32) static u8 l_shadowSealDL[] = {
     0x10, 0x00, 0x00, 0x10, 0x0E, 0x00, 0x00, 0x05, 0x00, 0x10, 0x00, 0x00, 0x10, 0x10, 0x00,
     0x00, 0x05, 0x00, 0x61, 0x28, 0x38, 0x00, 0x00, 0x61, 0xC0, 0x08, 0xFF, 0xFF, 0x61, 0xC1,
     0x08, 0xFF, 0xB0, 0x61, 0x40, 0x00, 0x00, 0x06, 0x61, 0x41, 0x00, 0x06, 0xED, 0x10, 0x00,
@@ -1083,7 +1088,7 @@ void dDlst_shadowReal_c::reset() {
 void dDlst_shadowReal_c::imageDraw(Mtx param_0) {
 #ifdef TARGET_PC
     Mtx render_proj_mtx;
-    if (dusk::frame_interp::lookup_replacement(getInterpKey(mpModels[0], 2), render_proj_mtx)) {
+    if (dusk::interp::lookup_replacement(getInterpKey(mpModels[0], 2), render_proj_mtx)) {
         GXSetProjection(render_proj_mtx, GX_ORTHOGRAPHIC);
     } else
 #endif
@@ -1104,7 +1109,7 @@ void dDlst_shadowReal_c::imageDraw(Mtx param_0) {
                 shape_pkt = (*models)->getShapePacket(j);
 #ifdef TARGET_PC
                 Mtx view_mtx;
-                if (dusk::frame_interp::lookup_replacement(getInterpKey(mpModels[0], 1), view_mtx)) {
+                if (dusk::interp::lookup_replacement(getInterpKey(mpModels[0], 1), view_mtx)) {
                     shape_pkt->setBaseMtxPtr(&view_mtx);
                 } else
 #endif
@@ -1160,9 +1165,9 @@ void dDlst_shadowReal_c::draw() {
     // phase that runs unconditionally regardless of VR state.
     Mtx view_mtx, recv_proj_mtx;
     const auto have_view_mtx = !g_duskVRRenderingToHeadset &&
-        dusk::frame_interp::lookup_replacement(getInterpKey(mpModels[0], 1), view_mtx);
+        dusk::interp::lookup_replacement(getInterpKey(mpModels[0], 1), view_mtx);
     const auto have_recv_proj_mtx = !g_duskVRRenderingToHeadset &&
-        dusk::frame_interp::lookup_replacement(getInterpKey(mpModels[0], 3), recv_proj_mtx);
+        dusk::interp::lookup_replacement(getInterpKey(mpModels[0], 3), recv_proj_mtx);
     if (have_view_mtx && have_recv_proj_mtx) {
         cMtx_concat(recv_proj_mtx, view_mtx, recv_proj_mtx);
         GXLoadTexMtxImm(recv_proj_mtx, GX_TEXMTX0, GX_MTX3x4);
@@ -1330,9 +1335,9 @@ u8 dDlst_shadowReal_c::setShadowRealMtx(cXyz* param_0, cXyz* param_1, f32 param_
     
 #ifdef TARGET_PC
     const auto keybase = mpModels[0];
-    dusk::frame_interp::record_final_mtx(mViewMtx, getInterpKey(keybase, 1));
-    dusk::frame_interp::record_final_mtx(mRenderProjMtx, getInterpKey(keybase, 2));
-    dusk::frame_interp::record_final_mtx(mReceiverProjMtx, getInterpKey(keybase, 3));
+    dusk::interp::record_final_mtx(mViewMtx, getInterpKey(keybase, 1));
+    dusk::interp::record_final_mtx(mRenderProjMtx, getInterpKey(keybase, 2));
+    dusk::interp::record_final_mtx(mReceiverProjMtx, getInterpKey(keybase, 3));
 #endif
     // ROOT-CAUSED this session (VR shadow-stretching, confirmed via
     // diagnostic logging): this concatenation multiplies mReceiverProjMtx's
@@ -1430,6 +1435,16 @@ bool dDlst_shadowReal_c::add(J3DModel* i_model) {
     return true;
 }
 
+#if TARGET_PC
+static MtxP get_simple_shadow_mtx(Mtx worldMtx, const void* key, Mtx storage) {
+    if (!dusk::interp::lookup_replacement(key, storage)) {
+        cMtx_copy(worldMtx, storage);
+    }
+    cMtx_concat(j3dSys.getViewMtx(), storage, storage);
+    return storage;
+}
+#endif
+
 void dDlst_shadowSimple_c::draw() {
 #if TARGET_PC
     // User request this session: hidden in VR alongside the complex shadow
@@ -1446,46 +1461,33 @@ void dDlst_shadowSimple_c::draw() {
     GXSetTevColor(GX_TEVREG0, l_color);
     GXClearVtxDesc();
     GXSetVtxDesc(GX_VA_POS, GX_INDEX8);
-#ifdef TARGET_PC
-    // ROOT-CAUSED this session (VR shadow-stretching investigation): this
-    // path re-concatenates the INTERPOLATED (world-space-only) matrix with
-    // j3dSys.getViewMtx() AT DRAW() TIME -- correct only if the view matrix
-    // here still matches whichever eye set() used when it originally baked
-    // mVolumeMtx (view * local) at SET() TIME. Flatscreen has one stable
-    // view matrix per frame, so this always lines up there; VR's two
-    // rapidly-alternating per-eye view matrices make a mismatch likely,
-    // producing exactly this kind of severe stretching (wrong-eye view
-    // multiplied against this shadow's small local geometry). Skip the
-    // interpolated path for VR and always use the already-correct
-    // mVolumeMtx baked at set()-time instead -- loses frame-smoothing for
-    // shadow position specifically in VR, not a meaningful loss.
-    Mtx volume_mtx;
-    if (!g_duskVRRenderingToHeadset &&
-        dusk::frame_interp::lookup_replacement(mVolumeMtxKey, volume_mtx)) {
-        cMtx_concat(j3dSys.getViewMtx(), volume_mtx, volume_mtx);
-        GXLoadPosMtxImm(volume_mtx, GX_PNMTX0);
-    } else
+#if TARGET_PC
+    // NOTE: dDlst_shadowSimple_c::draw() already returns early for VR at the
+    // top of this function (g_duskVRRenderingToHeadset check above) -- the
+    // stretching root-caused in an earlier session (re-concatenating an
+    // interpolated world-space matrix with whichever view matrix is live at
+    // draw() time, which breaks under VR's two rapidly-alternating per-eye
+    // view matrices) can no longer reach this code at all in VR, so
+    // get_simple_shadow_mtx()'s unconditional concat below is safe:
+    // flatscreen-only by construction, not because this helper itself knows
+    // about VR.
+    Mtx volumeMtx;
+    GXLoadPosMtxImm(get_simple_shadow_mtx(mVolumeMtx, mVolumeMtxKey, volumeMtx), GX_PNMTX0);
+#else
+    GXLoadPosMtxImm(mVolumeMtx, GX_PNMTX0);
 #endif
-    {
-        GXLoadPosMtxImm(mVolumeMtx, GX_PNMTX0);
-    }
     GXSetCurrentMtx(GX_PNMTX0);
     GXCallDisplayList(l_frontMat, 0x40);
     GXCallDisplayList(l_shadowVolumeDL, 0x40);
     GXCallDisplayList(l_backSubMat, 0x20);
     GXCallDisplayList(l_shadowVolumeDL, 0x40);
-#ifdef TARGET_PC
-    // Same fix as mVolumeMtx above.
-    Mtx shadow_mtx;
-    if (!g_duskVRRenderingToHeadset &&
-        dusk::frame_interp::lookup_replacement(mMtxKey, shadow_mtx)) {
-        cMtx_concat(j3dSys.getViewMtx(), shadow_mtx, shadow_mtx);
-        GXLoadPosMtxImm(shadow_mtx, GX_PNMTX1);
-    } else
+#if TARGET_PC
+    // Same reasoning as mVolumeMtx above.
+    Mtx shadowMtx;
+    GXLoadPosMtxImm(get_simple_shadow_mtx(mMtx, mMtxKey, shadowMtx), GX_PNMTX1);
+#else
+    GXLoadPosMtxImm(mMtx, GX_PNMTX1);
 #endif
-    {
-        GXLoadPosMtxImm(mMtx, GX_PNMTX1);
-    }
     GXSetCurrentMtx(GX_PNMTX1);
 
     if (mpTexObj != NULL) {
@@ -1540,9 +1542,11 @@ void dDlst_shadowSimple_c::set(cXyz* param_0, f32 param_1, f32 param_2, cXyz* pa
     mDoMtx_stack_c::scaleM(param_2, f30 + f30 + 16.0f, param_2 * param_5);
 #if TARGET_PC
     mVolumeMtxKey = getInterpKey(param_0, 0x1);
-    dusk::frame_interp::record_final_mtx(mDoMtx_stack_c::get(), mVolumeMtxKey);
-#endif
+    dusk::interp::record_final_mtx(mDoMtx_stack_c::get(), mVolumeMtxKey);
+    cMtx_copy(mDoMtx_stack_c::get(), mVolumeMtx);
+#else
     cMtx_concat(j3dSys.getViewMtx(), mDoMtx_stack_c::get(), mVolumeMtx);
+#endif
     f32 f31 = JMAFastSqrt(1.0f - param_3->x * param_3->x);
     f32 f29;
     f32 f28;
@@ -1567,9 +1571,12 @@ void dDlst_shadowSimple_c::set(cXyz* param_0, f32 param_1, f32 param_2, cXyz* pa
     mDoMtx_stack_c::get()[2][3] = param_0->z;
     mDoMtx_stack_c::YrotM(param_4);
     mDoMtx_stack_c::scaleM(param_2, 1.0f, param_2 * param_5);
-#ifdef TARGET_PC
+#if TARGET_PC
     mMtxKey = getInterpKey(param_0, 0x2);
-    dusk::frame_interp::record_final_mtx(mDoMtx_stack_c::get(), mMtxKey);
+    dusk::interp::record_final_mtx(mDoMtx_stack_c::get(), mMtxKey);
+    cMtx_copy(mDoMtx_stack_c::get(), mMtx);
+#else
+    cMtx_concat(j3dSys.getViewMtx(), mDoMtx_stack_c::get(), mMtx);
 #endif
     mpTexObj = param_6;
 }
@@ -1626,7 +1633,7 @@ void dDlst_shadowControl_c::reset() {
 }
 
 void dDlst_shadowControl_c::imageDraw(Mtx param_0) {
-    static u8 l_matDL[] ATTRIBUTE_ALIGN(32) = {
+    ATTRIBUTE_ALIGN(32) static u8 l_matDL[] = {
         0x10, 0x00, 0x00, 0x10, 0x0E, 0x00, 0x00, 0x04, 0x00, 0x10, 0x00, 0x00, 0x10, 0x10,
         0x00, 0x00, 0x04, 0x00, 0x61, 0x28, 0x38, 0x00, 0x00, 0x61, 0xC0, 0x08, 0xFF, 0xF2,
         0x61, 0xC1, 0x08, 0xFF, 0x90, 0x61, 0x43, 0x00, 0x00, 0x41, 0x61, 0xF3, 0x7F, 0x00,
@@ -1731,7 +1738,7 @@ void dDlst_shadowControl_c::draw(Mtx param_0) {
     GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
 #ifdef TARGET_PC
     Mtx draw_mtx;
-    if (dusk::frame_interp::lookup_replacement(param_0, draw_mtx)) {
+    if (dusk::interp::lookup_replacement(param_0, draw_mtx)) {
         GXLoadPosMtxImm(draw_mtx, GX_PNMTX0);
     } else {
 #endif
@@ -2014,6 +2021,7 @@ dDlst_list_c::~dDlst_list_c() {
 }
 
 void dDlst_list_c::reset() {
+    IF_DUSK(dMenu_Collect3D_c::setViewPortOffsetY(-100.0f));
     J3DDrawBuffer** buffer = mDrawBuffers;
     for (int i = 0; i < 21; i++) {
         J3DDrawBuffer* tmp = *buffer;
@@ -2080,7 +2088,7 @@ void dDlst_list_c::drawXluListItem3d() {
 }
 
 int dDlst_list_c::set(dDlst_base_c**& p_start, dDlst_base_c**& p_end, dDlst_base_c* p_newDlst) {
-    if (p_start >= p_end) {
+    if (p_start >= p_end IF_DUSK(|| !dusk::game_clock::is_sim_frame())) {
         return 0;
     }
     *p_start = p_newDlst;
@@ -2149,7 +2157,7 @@ void dDlst_list_c::wipeIn(f32 i_wipeSpeed) {
 
 void dDlst_list_c::calcWipe() {
     if (mWipe) {
-        mWipeRate += mWipeSpeed;
+        mWipeRate += mWipeSpeed IF_DUSK(* dusk::game_clock::original_frames());
         if (mWipeRate < 0.0f) {
             mWipeRate = 0.0f;
         } else if (mWipeRate > 1.0f) {
@@ -2163,10 +2171,10 @@ void dDlst_list_c::calcWipe() {
 }
 
 #if TARGET_PC
-void dDlst_list_c::refresh3DlineMats(const cXyz& eye) {
+void dDlst_list_c::refresh3DlineMats() {
     for (int i = 0; i < 3; i++) {
         for (mDoExt_3DlineMat_c* mat = m3DLineMatSortPacket[i].getFirstMat(); mat != NULL; mat = mat->field_0x4) {
-            mat->refreshGeometryForPresentationEye(eye);
+            mat->refreshGeometryForPresentation();
         }
     }
 }

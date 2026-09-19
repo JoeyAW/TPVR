@@ -8,10 +8,11 @@
 #include "d/d_msg_out_font.h"
 #include "d/d_msg_scrn_tree.h"
 #include "d/d_pane_class.h"
-#include "dusk/version.hpp"
 
 #if TARGET_PC
+#include "dusk/interp/user_interface.h"
 #include "dusk/settings.h"
+#include "dusk/version.hpp"
 #endif
 
 dMsgScrnTree_c::dMsgScrnTree_c(JUTFont* param_0, JKRExpHeap* param_1) {
@@ -216,7 +217,17 @@ dMsgScrnTree_c::~dMsgScrnTree_c() {
     dComIfGp_getMsgArchive(2)->removeResourceAll();
 }
 
+#if TARGET_PC
+void dMsgScrnTree_c::presentAnims() {
+    dMsgScrnBase_c::presentAnims();
+    dusk::vdt::present_looping(field_0xdc, field_0xd0, 1.0f);
+    dusk::vdt::present_looping(field_0xe0, field_0xd4, 1.0f);
+    mpScreen->animation();
+}
+#endif
+
 void dMsgScrnTree_c::exec() {
+#if !TARGET_PC
     field_0xdc += 1.0f;
     if (field_0xdc >= field_0xd0->getFrameMax()) {
         field_0xdc -= field_0xd0->getFrameMax();
@@ -229,6 +240,7 @@ void dMsgScrnTree_c::exec() {
     }
     field_0xd4->setFrame(field_0xe0);
     mpScreen->animation();
+#endif
 
     if (isTalkNow()) {
         fukiAlpha(1.0f);
@@ -246,6 +258,7 @@ void dMsgScrnTree_c::exec() {
 
 void dMsgScrnTree_c::draw() {
 #if TARGET_PC
+    presentAnims();
     if (dusk::getSettings().game.recordingMode) {
         return;
     }

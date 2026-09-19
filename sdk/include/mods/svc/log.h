@@ -2,12 +2,16 @@
 
 #include <mods/api.h>
 
+#ifdef __cplusplus
+#include <mods/service.hpp>
+#endif
+
 /*
  * Logging into the game's console and log files. Messages are attributed to the calling mod
  * (prefixed with its ID).
  */
 
-#define LOG_SERVICE_ID "dev.twilitrealm.dusklight.log"
+#define LOG_SERVICE_ID DUSKLIGHT_SERVICE_ID_PREFIX "log"
 #define LOG_SERVICE_MAJOR 1u
 #define LOG_SERVICE_MINOR 0u
 
@@ -36,13 +40,4 @@ typedef struct LogService {
     void (*error)(ModContext* ctx, const char* message);
 } LogService;
 
-#ifdef __cplusplus
-#include "mods/service.hpp"
-
-template <>
-struct mods::ServiceTraits<LogService> {
-    static constexpr const char* id = LOG_SERVICE_ID;
-    static constexpr uint16_t major_version = LOG_SERVICE_MAJOR;
-    static constexpr uint16_t minor_version = LOG_SERVICE_MINOR;
-};
-#endif
+MOD_DECLARE_SERVICE(LogService, svc_log, LOG_SERVICE_ID, LOG_SERVICE_MAJOR, LOG_SERVICE_MINOR);

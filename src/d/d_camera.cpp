@@ -29,14 +29,19 @@
 #endif
 
 #if TARGET_PC
-#include "dusk/frame_interpolation.h"
-#include "dusk/logging.h"
 #include "dusk/action_bindings.h"
+#include "dusk/camera_operators.hpp"
+#include "dusk/commands.hpp"
+#include "dusk/game_clock.h"
+#include "dusk/interp/camera.h"
+#include "dusk/interp/frame_interpolation.h"
+#include "dusk/logging.h"
 #include "dusk/mouse.h"
 #include "dusk/settings.h"
 #include "dusk/touch_camera.h"
 #include "dusk/vr/vr_main.hpp"
-#include "imgui.h"
+
+#include <imgui.h>
 #endif
 
 namespace {
@@ -1054,7 +1059,12 @@ void dCamera_c::debugDrawInit() {
 bool dCamera_c::Run() {
 #if TARGET_PC
     ResetView();
-    if (executeDebugFlyCam()) {
+    if (dusk::isCameraDetached()) {
+        mFrameCounter++;
+        mTicks++;
+        return true;
+    }
+    if (executeDebugFlyCam() || dusk::mods::camera_run_operators(this)) {
         mFrameCounter++;
         mTicks++;
         return true;
@@ -1527,6 +1537,12 @@ void dCamera_c::CalcTrimSize() {
     } else {
         OS_REPORT("%06d: camera: trim: keep\n", mFrameCounter);
     }
+
+#if TARGET_PC
+    if (dusk::isLetterboxingDisabled(dComIfGp_event_runCheck())) {
+        mTrimHeight = 0.0f;
+    }
+#endif
 
     if (mCurState == 1) {
         mCurState = 0;
@@ -7595,7 +7611,7 @@ bool dCamera_c::executeDebugFlyCam() {
             if (ImGui::IsKeyDown(ImGuiKey_Q)) rollInput -= 1.0f;
             if (ImGui::IsKeyDown(ImGuiKey_E)) rollInput += 1.0f;
         }
-        bool mouseValid = !io.WantCaptureMouse && io.MousePos.x >= 0.0f && io.MousePos.y >= 0.0f;
+        bool mouseValid = !io.WantCaptureMouse && io.MousePos.x >= 0.0f && io.MousePos.y >= 0.0f && ImGui::IsMouseDown(ImGuiMouseButton_Right);
         if (mouseValid && sFlyCamLastMousePos.x >= 0.0f) {
             cStickX -= (io.MousePos.x - sFlyCamLastMousePos.x) * 2.0f;
             cStickY -= (io.MousePos.y - sFlyCamLastMousePos.y) * 2.0f;
@@ -10496,13 +10512,13 @@ bool dCamera_c::eventCamera(s32 param_0) {
 #endif
 
 #if TARGET_PC
-        if (dusk::frame_interp::is_enabled()) {
+        if (dusk::interp::is_enabled()) {
             switch (var_r29) {
                 case 3:
                 case 4:
                 case 5:
                 case 12:
-                    dusk::frame_interp::request_presentation_sync();
+                    dusk::interp::request_presentation_sync();
                     break;
                 default:
                     DuskLog.debug(
@@ -10584,9 +10600,11 @@ bool dCamera_c::eventCamera(s32 param_0) {
         if (getEvIntData(&sp24, "LoadPos") != 0) {
             if ((sp24 == 0) || (sp24 == 1)) {
                 popInfo(&mSavedViewStack[sp24]);
+                IF_DUSK(dusk::interp::request_presentation_sync());
             }
             if (sp24 == 2) {
                 popInfo(&mSavedView);
+                IF_DUSK(dusk::interp::request_presentation_sync());
             }
         }
     }
@@ -10781,6 +10799,7 @@ s16 dCamera_c::runEventRecoveryTrans() {
 void dCamera_c::EventRecoverNotime() {
     mRecovery.field_0x4 = 1;
     Reset(mRecovery.field_0x8.mCenter, mRecovery.field_0x8.mEye, mRecovery.field_0x8.mFovy, mRecovery.field_0x8.mBank);
+    IF_DUSK(dusk::interp::request_presentation_sync());
 }
 
 int dCamera_c::Set(cXyz i_center, cXyz i_eye) {
@@ -11147,6 +11166,9 @@ camera_class* dCam_getCamera() {
 
 dCamera_c* dCam_getBody() {
     camera_process_class* camera = (camera_process_class*)dCam_getCamera();
+#if TARGET_PC
+    if (camera == nullptr) { return nullptr; }
+#endif
     return &camera->mCamera;
 }
 
@@ -11373,7 +11395,7 @@ void widezoom_correction(camera_process_class* i_this, float trim_height) {
             trim_width = FB_WIDTH_BASE / 2.0f * (1.0f - target_ar_real / current_ar);
         }
 
-        if (dusk::frame_interp::is_sim_frame()) {
+        if (dusk::game_clock::is_sim_frame()) {
             constexpr auto base_ar =
                 static_cast<f32>(FB_WIDTH_BASE) / static_cast<f32>(FB_HEIGHT_BASE);
             const auto ar_corr = base_ar / std::min(current_ar, target_ar_real);
@@ -11411,8 +11433,8 @@ static int camera_execute(camera_process_class* i_this) {
 #ifdef TARGET_PC
     widezoom_correction(i_this, i_this->mCamera.TrimHeight());
 
-    if (dusk::frame_interp::is_enabled()) {
-        dusk::frame_interp::add_interpolation_callback([](bool _, void* pUserWork) {
+    if (dusk::interp::is_enabled()) {
+        dusk::interp::add_interpolation_callback([](void* pUserWork) {
             const auto i_this = static_cast<camera_process_class*>(pUserWork);
             const auto camera = &i_this->mCamera;
 
@@ -11421,7 +11443,7 @@ static int camera_execute(camera_process_class* i_this) {
             if (camera->mCurState != 2 && trim_size >= 0 && trim_size <= 3) {
                 // derive trim height at previous tick using current camera state
                 const auto target = get_target_trim_height(i_this);
-                const auto step = dusk::frame_interp::get_interpolation_step();
+                const auto step = dusk::interp::get_interpolation_step();
                 const auto cur = camera->TrimHeight();
                 const auto prev = (4.0f * cur - target) / 3.0f;
                 const auto trim_height = prev + (cur - prev) * step;
@@ -11432,10 +11454,10 @@ static int camera_execute(camera_process_class* i_this) {
     }
 
     // record new camera for our sim frame
-    dusk::frame_interp::record_camera(i_this, get_camera_id(i_this));
+    dusk::interp::record_camera(i_this, get_camera_id(i_this));
     // interpolate the view now so that this sim frame's view matrix matches what
     // we'll be rendering with later
-    dusk::frame_interp::interp_view(&i_this->view);
+    dusk::interp::interp_view(&i_this->view);
 #endif
 
     view_setup(i_this);

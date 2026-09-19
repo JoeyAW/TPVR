@@ -25,11 +25,13 @@
 #include <cstring>
 
 #include "JSystem/JAudio2/JASDriverIF.h"
-#include "dusk/version.hpp"
 
 #if TARGET_PC
+#include "dusk/game_clock.h"
+#include "dusk/interp/user_interface.h"
 #include "dusk/menu_pointer.h"
 #include "dusk/ui/touch_controls.hpp"
+#include "dusk/version.hpp"
 #endif
 
 typedef void (dMenu_Option_c::*initFunc)();
@@ -73,6 +75,26 @@ static calibrationFunc calibration_process[] = {
 static dusk::menu_pointer::TargetId option_yes_no_target(u8 index) noexcept {
     return static_cast<dusk::menu_pointer::TargetId>(0x100 + index);
 }
+
+static u8 option_to_proc(u8 select) noexcept {
+    if (!dusk::version::isRegionJpn() && select >= 1) {
+        return static_cast<u8>(select + 1);
+    }
+    return select;
+}
+
+static u8 option_to_select(u8 proc) noexcept {
+    if (!dusk::version::isRegionJpn() && proc >= 2) {
+        return static_cast<u8>(proc - 1);
+    }
+    return proc;
+}
+
+#define OPTION_SELECT(proc_e) (option_to_select(proc_e))
+#define OPTION_PROC(select) (option_to_proc(select))
+#else
+#define OPTION_SELECT(proc_e) (proc_e)
+#define OPTION_PROC(select) (select)
 #endif
 
 dMenu_Option_c::dMenu_Option_c(JKRArchive* i_archive, STControl* i_stick) {
@@ -159,7 +181,9 @@ void dMenu_Option_c::_create() {
     
     mpTVButtonText = JKR_NEW CPaneMgr(mpTVScreen, MULTI_CHAR('a_text_n'), 0, NULL);
     JUT_ASSERT(298, mpTVButtonText != NULL);
+    IF_DUSK_BLOCK(dusk::version::getGameVersion() >= dusk::version::GameVersion::WiiJpn)
     mpTVScreen->search(MULTI_CHAR('g_abtn_n'))->hide();
+    IF_DUSK_BLOCK_END
 
     mpScreenIcon = JKR_NEW J2DScreen();
     JUT_ASSERT(325, mpScreenIcon != NULL);
@@ -257,11 +281,11 @@ void dMenu_Option_c::_create() {
     field_0x3e1 = 10;
     field_0x3e2 = 0xff;
     field_0x3e3 = 0xc0;
-    field_0x3ef = PROC_ATTEN_e;
+    field_0x3ef = OPTION_SELECT(PROC_ATTEN_e);
     field_0x3f0 = 0xff;
     field_0x3f1 = 0xff;
     field_0x3f2 = 0;
-    field_0x3f5 = PROC_ATTEN_e;
+    field_0x3f5 = OPTION_SELECT(PROC_ATTEN_e);
     field_0x3f3 = 5;
     field_0x3f4 = 5;
     field_0x334 = 0.0f;
@@ -485,9 +509,9 @@ void dMenu_Option_c::_move() {
     }
 
     if (mDoGph_gInf_c::getFader()->getStatus() == 1) {
-        if (mDoCPd_c::getTrigA(PAD_1) != 0 && field_0x3ef != PROC_CHANGE_MOVE_e && field_0x3f3 == 5) {
-            if (field_0x3f4 == 5 && field_0x3ef != PROC_CONFIRM_OPEN_MOVE_e && field_0x3ef != PROC_CONFIRM_MOVE_MOVE_e && field_0x3ef != PROC_CONFIRM_SELECT_MOVE_e &&
-                field_0x3ef != PROC_CONFIRM_CLOSE_MOVE_e)
+        if (mDoCPd_c::getTrigA(PAD_1) != 0 && field_0x3ef != OPTION_SELECT(PROC_CHANGE_MOVE_e) && field_0x3f3 == 5) {
+            if (field_0x3f4 == 5 && field_0x3ef != OPTION_SELECT(PROC_CONFIRM_OPEN_MOVE_e) && field_0x3ef != OPTION_SELECT(PROC_CONFIRM_MOVE_MOVE_e) && field_0x3ef != OPTION_SELECT(PROC_CONFIRM_SELECT_MOVE_e) &&
+                field_0x3ef != OPTION_SELECT(PROC_CONFIRM_CLOSE_MOVE_e))
             {
                 if (mDoCPd_c::getTrigStart(PAD_1) == 0 && mDoCPd_c::getTrigB(PAD_1) == 0) {
                     if (mDoCPd_c::getTrigUp(PAD_1) == 0 && mDoCPd_c::getTrigDown(PAD_1) == 0 &&
@@ -495,17 +519,17 @@ void dMenu_Option_c::_move() {
                     {
                         field_0x3f7 = 1;
                         field_0x3f5 = field_0x3ef;
-                        field_0x3ef = PROC_CONFIRM_OPEN_MOVE_e;
+                        field_0x3ef = OPTION_SELECT(PROC_CONFIRM_OPEN_MOVE_e);
                         dMeter2Info_set2DVibration();
-                        (this->*init[field_0x3ef])();
+                        (this->*init[OPTION_PROC(field_0x3ef)])();
                         goto skip;
                     }
                 }
             }
         }
 
-        if (mDoCPd_c::getTrigB(PAD_1) != 0 && field_0x3ef != PROC_CHANGE_MOVE_e && field_0x3f3 == 5 &&
-            field_0x3ef != PROC_CONFIRM_OPEN_MOVE_e && field_0x3ef != PROC_CONFIRM_MOVE_MOVE_e && field_0x3ef != PROC_CONFIRM_SELECT_MOVE_e && field_0x3ef != PROC_CONFIRM_CLOSE_MOVE_e)
+        if (mDoCPd_c::getTrigB(PAD_1) != 0 && field_0x3ef != OPTION_SELECT(PROC_CHANGE_MOVE_e) && field_0x3f3 == 5 &&
+            field_0x3ef != OPTION_SELECT(PROC_CONFIRM_OPEN_MOVE_e) && field_0x3ef != OPTION_SELECT(PROC_CONFIRM_MOVE_MOVE_e) && field_0x3ef != OPTION_SELECT(PROC_CONFIRM_SELECT_MOVE_e) && field_0x3ef != OPTION_SELECT(PROC_CONFIRM_CLOSE_MOVE_e))
         {
             if (field_0x3f4 == 5 && mDoCPd_c::getTrigStart(PAD_1) == 0 &&
                 mDoCPd_c::getTrigA(PAD_1) == 0 && mDoCPd_c::getTrigUp(PAD_1) == 0 &&
@@ -514,16 +538,16 @@ void dMenu_Option_c::_move() {
             {
                 field_0x3f7 = 0;
                 field_0x3f5 = field_0x3ef;
-                field_0x3ef = PROC_CONFIRM_OPEN_MOVE_e;
+                field_0x3ef = OPTION_SELECT(PROC_CONFIRM_OPEN_MOVE_e);
                 dMeter2Info_set2DVibration();
-                (this->*init[field_0x3ef])();
+                (this->*init[OPTION_PROC(field_0x3ef)])();
             }
         }
 
 #if TARGET_PC
-        if (field_0x3f4 == 5 && field_0x3ef != PROC_CHANGE_MOVE_e && field_0x3f3 == 5 &&
-            field_0x3ef != PROC_CONFIRM_OPEN_MOVE_e && field_0x3ef != PROC_CONFIRM_MOVE_MOVE_e && field_0x3ef != PROC_CONFIRM_SELECT_MOVE_e &&
-            field_0x3ef != PROC_CONFIRM_CLOSE_MOVE_e && pointerConfirmSelect())
+        if (field_0x3f4 == 5 && field_0x3ef != OPTION_SELECT(PROC_CHANGE_MOVE_e) && field_0x3f3 == 5 &&
+            field_0x3ef != OPTION_SELECT(PROC_CONFIRM_OPEN_MOVE_e) && field_0x3ef != OPTION_SELECT(PROC_CONFIRM_MOVE_MOVE_e) && field_0x3ef != OPTION_SELECT(PROC_CONFIRM_SELECT_MOVE_e) &&
+            field_0x3ef != OPTION_SELECT(PROC_CONFIRM_CLOSE_MOVE_e) && pointerConfirmSelect())
         {
             goto skip;
         }
@@ -531,7 +555,7 @@ void dMenu_Option_c::_move() {
     }
 skip:
     u8 oldValue = field_0x3ef;
-    if (field_0x3f3 == 5 && oldValue != PROC_CONFIRM_OPEN_MOVE_e && oldValue != PROC_CONFIRM_MOVE_MOVE_e && oldValue != PROC_CONFIRM_SELECT_MOVE_e && oldValue != PROC_CONFIRM_CLOSE_MOVE_e) {
+    if (field_0x3f3 == 5 && oldValue != OPTION_SELECT(PROC_CONFIRM_OPEN_MOVE_e) && oldValue != OPTION_SELECT(PROC_CONFIRM_MOVE_MOVE_e) && oldValue != OPTION_SELECT(PROC_CONFIRM_SELECT_MOVE_e) && oldValue != OPTION_SELECT(PROC_CONFIRM_CLOSE_MOVE_e)) {
         dpdMenuMove();
     }
 
@@ -545,10 +569,10 @@ skip:
         field_0x3f0 = 0xff;
     }
 
-    (this->*process[field_0x3ef])();
-    mpSelectScreen->animation();
+    (this->*process[OPTION_PROC(field_0x3ef)])();
+    IF_NOT_DUSK(mpSelectScreen->animation());
     if (oldValue != field_0x3ef) {
-        (this->*init[field_0x3ef])();
+        (this->*init[OPTION_PROC(field_0x3ef)])();
     }
     
     setHIO(false);
@@ -556,6 +580,11 @@ skip:
 
 void dMenu_Option_c::_draw() {
     if (mpArchive != NULL) {
+#if TARGET_PC
+        if (dusk::game_clock::is_presentation_frame()) {
+            presentAnims();
+        }
+#endif
         J2DGrafContext* ctx = dComIfGp_getCurrentGrafPort();
         #if (PLATFORM_WII || PLATFORM_SHIELD)
         if (mpCalibration != NULL && field_0x3f4 != 5 && field_0x3f4 != 0 && field_0x3f4 != 4) {
@@ -610,8 +639,8 @@ void dMenu_Option_c::drawHaihai() {
     field_0x3f6 = 0;
     field_0x3f6 |= 1;
     field_0x3f6 |= 4;
-    if (selectType < PROC_CONFIRM_OPEN_MOVE_e && field_0x3f6 != 0 && field_0x3f3 == 5 && field_0x3ef != PROC_CONFIRM_OPEN_MOVE_e &&
-        field_0x3ef != PROC_CONFIRM_MOVE_MOVE_e && field_0x3ef != PROC_CONFIRM_SELECT_MOVE_e && field_0x3ef != PROC_CONFIRM_CLOSE_MOVE_e)
+    if (selectType < OPTION_SELECT(PROC_CONFIRM_OPEN_MOVE_e) && field_0x3f6 != 0 && field_0x3f3 == 5 && field_0x3ef != OPTION_SELECT(PROC_CONFIRM_OPEN_MOVE_e) &&
+        field_0x3ef != OPTION_SELECT(PROC_CONFIRM_MOVE_MOVE_e) && field_0x3ef != OPTION_SELECT(PROC_CONFIRM_SELECT_MOVE_e) && field_0x3ef != OPTION_SELECT(PROC_CONFIRM_CLOSE_MOVE_e))
     {
         mpMeterHaihai->_execute(0);
         Vec haihaiPosL =
@@ -645,6 +674,10 @@ bool dMenu_Option_c::checkRightTrigger() {
 }
 
 void dMenu_Option_c::setAnimation() {
+#if TARGET_PC
+    dusk::vdt::present_looping(field_0x3c0, field_0x2c, 2.0f);
+    dusk::vdt::present_looping(field_0x3c4, field_0x30, 2.0f);
+#else
     s16 frameMax;
 
     field_0x3c0 += 2;
@@ -660,6 +693,7 @@ void dMenu_Option_c::setAnimation() {
         field_0x3c4 = field_0x3c4 - frameMax;
     }
     field_0x30->setFrame(field_0x3c4);
+#endif
 }
 
 bool dMenu_Option_c::_open() {
@@ -752,13 +786,7 @@ void dMenu_Option_c::atten_move() {
     if (field_0x3f3 != 5) {
         (this->*tv_process[field_0x3f3])();
     } else if (downTrigger) {
-#if TARGET_PC
-        field_0x3ef = dusk::version::isRegionJpn() ? PROC_RUBY_e : PROC_VIB_e;
-#elif VERSION == VERSION_GCN_JPN
-        field_0x3ef = PROC_RUBY_e;
-#else
-        field_0x3ef = PROC_VIB_e;
-#endif
+        field_0x3ef = 1;
         Z2GetAudioMgr()->seStart(Z2SE_SY_CURSOR_OPTION, NULL, 0, 0, 1.0f, 1.0f, -1.0f, -1.0f, 0);
     } else if (leftTrigger) {
         if (field_0x3e4 == 0) {
@@ -768,8 +796,8 @@ void dMenu_Option_c::atten_move() {
             field_0x3e4 = 0;
             field_0x3da = -5;
         }
-        field_0x3ef = PROC_CHANGE_MOVE_e;
-        field_0x3f5 = PROC_ATTEN_e;
+        field_0x3ef = OPTION_SELECT(PROC_CHANGE_MOVE_e);
+        field_0x3f5 = OPTION_SELECT(PROC_ATTEN_e);
         Z2GetAudioMgr()->seStart(Z2SE_SY_OPTION_SWITCH, NULL, 0, 0, 1.0f, 1.0f, -1.0f, -1.0f, 0);
     } else if (rightTrigger) {
         if (field_0x3e4 == 0) {
@@ -779,8 +807,8 @@ void dMenu_Option_c::atten_move() {
             field_0x3e4 = 0;
             field_0x3da = 5;
         }
-        field_0x3ef = PROC_CHANGE_MOVE_e;
-        field_0x3f5 = PROC_ATTEN_e;
+        field_0x3ef = OPTION_SELECT(PROC_CHANGE_MOVE_e);
+        field_0x3f5 = OPTION_SELECT(PROC_ATTEN_e);
         Z2GetAudioMgr()->seStart(Z2SE_SY_OPTION_SWITCH, NULL, 0, 0, 1.0f, 1.0f, -1.0f, -1.0f, 0);
     } else {
         changeTVCheck();
@@ -818,10 +846,10 @@ void dMenu_Option_c::ruby_move() {
     if (field_0x3f3 != 5) {
         (this->*tv_process[field_0x3f3])();
     } else if (upTrigger) {
-        field_0x3ef = PROC_ATTEN_e;
+        field_0x3ef = OPTION_SELECT(PROC_ATTEN_e);
         Z2GetAudioMgr()->seStart(Z2SE_SY_CURSOR_OPTION, NULL, 0, 0, 1.0f, 1.0f, -1.0f, -1.0f, 0);
     } else if (downTrigger) {
-        field_0x3ef = PROC_VIB_e;
+        field_0x3ef = OPTION_SELECT(PROC_VIB_e);
         Z2GetAudioMgr()->seStart(Z2SE_SY_CURSOR_OPTION, NULL, 0, 0, 1.0f, 1.0f, -1.0f, -1.0f, 0);
     } else if (leftTrigger) {
         if (field_0x3e5_JPN == 0) {
@@ -831,8 +859,8 @@ void dMenu_Option_c::ruby_move() {
             field_0x3e5_JPN = 0;
             field_0x3da = -5;
         }
-        field_0x3ef = PROC_CHANGE_MOVE_e;
-        field_0x3f5 = PROC_RUBY_e;
+        field_0x3ef = OPTION_SELECT(PROC_CHANGE_MOVE_e);
+        field_0x3f5 = OPTION_SELECT(PROC_RUBY_e);
         Z2GetAudioMgr()->seStart(Z2SE_SY_OPTION_SWITCH, NULL, 0, 0, 1.0f, 1.0f, -1.0f, -1.0f, 0);
     } else if (rightTrigger) {
         if (field_0x3e5_JPN == 0) {
@@ -842,8 +870,8 @@ void dMenu_Option_c::ruby_move() {
             field_0x3e5_JPN = 0;
             field_0x3da = 5;
         }
-        field_0x3ef = PROC_CHANGE_MOVE_e;
-        field_0x3f5 = PROC_RUBY_e;
+        field_0x3ef = OPTION_SELECT(PROC_CHANGE_MOVE_e);
+        field_0x3f5 = OPTION_SELECT(PROC_RUBY_e);
         Z2GetAudioMgr()->seStart(Z2SE_SY_OPTION_SWITCH, NULL, 0, 0, 1.0f, 1.0f, -1.0f, -1.0f, 0);
     } else {
         changeTVCheck();
@@ -853,14 +881,14 @@ void dMenu_Option_c::ruby_move() {
 
 void dMenu_Option_c::vib_init() {
     mpDrawCursor->setAlphaRate(1.0f);
-    setCursorPos(PROC_VIB_e);
+    setCursorPos(OPTION_SELECT(PROC_VIB_e));
     setAButtonString(0x40C);
     setBButtonString(0x3F9);
 }
 
 void dMenu_Option_c::vib_move() {
     bool upTrigger = mpStick->checkUpTrigger();
-    bool downTrigger = mpStick->checkDownTrigger();
+    IF_NOT_DUSK(bool downTrigger =) mpStick->checkDownTrigger();
     bool leftTrigger = checkLeftTrigger();
     bool rightTrigger = checkRightTrigger();
 
@@ -868,17 +896,21 @@ void dMenu_Option_c::vib_move() {
         (this->*tv_process[field_0x3f3])();
     } else if (upTrigger) {
 #if TARGET_PC
-        field_0x3ef = dusk::version::isRegionJpn() ? PROC_RUBY_e : PROC_ATTEN_e;
+        field_0x3ef = OPTION_SELECT(dusk::version::isRegionJpn() ? PROC_RUBY_e : PROC_ATTEN_e);
 #elif VERSION == VERSION_GCN_JPN
         field_0x3ef = PROC_RUBY_e;
 #else
         field_0x3ef = PROC_ATTEN_e;
 #endif
         Z2GetAudioMgr()->seStart(Z2SE_SY_CURSOR_OPTION, NULL, 0, 0, 1.0f, 1.0f, -1.0f, -1.0f, 0);
-    } else if (downTrigger) {
-        field_0x3ef = PROC_SOUND_e;
+    }
+#ifndef TARGET_PC
+    else if (downTrigger) {
+        field_0x3ef = OPTION_SELECT(PROC_SOUND_e);
         Z2GetAudioMgr()->seStart(Z2SE_SY_CURSOR_OPTION, NULL, 0, 0, 1.0f, 1.0f, -1.0f, -1.0f, 0);
-    } else if (leftTrigger) {
+    } 
+#endif
+    else if (leftTrigger) {
         if (isRumbleSupported()) {
             if (field_0x3ea == 0) {
                 field_0x3ea = 1;
@@ -888,8 +920,8 @@ void dMenu_Option_c::vib_move() {
                 field_0x3ea = 0;
                 field_0x3da = -5;
             }
-            field_0x3ef = PROC_CHANGE_MOVE_e;
-            field_0x3f5 = PROC_VIB_e;
+            field_0x3ef = OPTION_SELECT(PROC_CHANGE_MOVE_e);
+            field_0x3f5 = OPTION_SELECT(PROC_VIB_e);
             Z2GetAudioMgr()->seStart(Z2SE_SY_OPTION_SWITCH, NULL, 0, 0, 1.0f, 1.0f, -1.0f, -1.0f,
                                      0);
         }
@@ -903,8 +935,8 @@ void dMenu_Option_c::vib_move() {
                 field_0x3ea = 0;
                 field_0x3da = 5;
             }
-            field_0x3ef = PROC_CHANGE_MOVE_e;
-            field_0x3f5 = PROC_VIB_e;
+            field_0x3ef = OPTION_SELECT(PROC_CHANGE_MOVE_e);
+            field_0x3f5 = OPTION_SELECT(PROC_VIB_e);
             Z2GetAudioMgr()->seStart(Z2SE_SY_OPTION_SWITCH, NULL, 0, 0, 1.0f, 1.0f, -1.0f, -1.0f,
                                      0);
         }
@@ -915,7 +947,7 @@ void dMenu_Option_c::vib_move() {
 
 void dMenu_Option_c::sound_init() {
     mpDrawCursor->setAlphaRate(1.0f);
-    setCursorPos(PROC_SOUND_e);
+    setCursorPos(OPTION_SELECT(PROC_SOUND_e));
     setAButtonString(0x40C);
     setBButtonString(0x3F9);
 }
@@ -929,7 +961,7 @@ void dMenu_Option_c::sound_move() {
     if (field_0x3f3 != 5) {
         (this->*tv_process[field_0x3f3])();
     } else if (upTrigger) {
-        field_0x3ef = PROC_VIB_e;
+        field_0x3ef = OPTION_SELECT(PROC_VIB_e);
         Z2GetAudioMgr()->seStart(Z2SE_SY_CURSOR_OPTION, NULL, 0, 0, 1.0f, 1.0f, -1.0f, -1.0f, 0);
     } else if (leftTrigger) {
         if (field_0x3e9 == 2) {
@@ -954,8 +986,8 @@ void dMenu_Option_c::sound_move() {
         }
         mDoAud_setOutputMode(dMo_soundMode[field_0x3e9]);
         setSoundMode(dMo_soundMode[field_0x3e9]);
-        field_0x3ef = PROC_CHANGE_MOVE_e;
-        field_0x3f5 = PROC_SOUND_e;
+        field_0x3ef = OPTION_SELECT(PROC_CHANGE_MOVE_e);
+        field_0x3f5 = OPTION_SELECT(PROC_SOUND_e);
         Z2GetAudioMgr()->seStart(Z2SE_SY_OPTION_SWITCH, NULL, 0, 0, 1.0f, 1.0f, -1.0f, -1.0f, 0);
     } else if (rightTrigger) {
         if (field_0x3e9 == 0) {
@@ -980,8 +1012,8 @@ void dMenu_Option_c::sound_move() {
         }
         mDoAud_setOutputMode(dMo_soundMode[field_0x3e9]);
         setSoundMode(dMo_soundMode[field_0x3e9]);
-        field_0x3ef = PROC_CHANGE_MOVE_e;
-        field_0x3f5 = PROC_SOUND_e;
+        field_0x3ef = OPTION_SELECT(PROC_CHANGE_MOVE_e);
+        field_0x3f5 = OPTION_SELECT(PROC_SOUND_e);
         Z2GetAudioMgr()->seStart(Z2SE_SY_OPTION_SWITCH, NULL, 0, 0, 1.0f, 1.0f, -1.0f, -1.0f, 0);
     } else {
         changeTVCheck();
@@ -994,6 +1026,7 @@ void dMenu_Option_c::change_init() {
 }
 
 void dMenu_Option_c::change_move() {
+#if !TARGET_PC
     f32 x = 0.0f;
 
     if (field_0x3da > 0) {
@@ -1002,15 +1035,16 @@ void dMenu_Option_c::change_move() {
         field_0x3da++;
     }
     u8 index;
-    switch (field_0x3f5) {
+#endif
+    switch (OPTION_PROC(field_0x3f5)) {
     case PROC_ATTEN_e:
-        index = PROC_ATTEN_e;
+        IF_NOT_DUSK(index = field_0x3f5);
         if (field_0x3da == 0) {
             setAttenString();
         }
         break;
     case PROC_RUBY_e:
-        index = PROC_RUBY_e;
+        IF_NOT_DUSK(index = field_0x3f5);
         if (field_0x3da == 0) {
             IF_DUSK_BLOCK(dusk::version::isRegionJpn())
             setRubyString();
@@ -1018,18 +1052,19 @@ void dMenu_Option_c::change_move() {
         }
         break;
     case PROC_VIB_e:
-        index = DUSK_IF_ELSE(dusk::version::isRegionJpn() ? 2 : 1, PROC_VIB_e);
+        IF_NOT_DUSK(index = field_0x3f5);
         if (field_0x3da == 0) {
             setVibString();
         }
         break;
     case PROC_SOUND_e:
-        index = DUSK_IF_ELSE(dusk::version::isRegionJpn() ? 3 : 2, PROC_SOUND_e);
+        IF_NOT_DUSK(index = field_0x3f5);
         if (field_0x3da == 0) {
             setSoundString();
         }
         break;
     }
+#if !TARGET_PC
     if (field_0x3da > 0) {
         f32 initPosX = (5 - field_0x3da) / 5.0f;
         if (mpMenuText[index][3] != NULL) {
@@ -1049,6 +1084,7 @@ void dMenu_Option_c::change_move() {
             mpMenuText[index][i]->paneTrans(x + field_0x3b4, 0.0f);
         }
     }
+#endif
     if (field_0x3da == 0) {
         for (int i = 0; i < 6; i++) {
             for (int j = 2; j < 6; j++) {
@@ -1082,18 +1118,20 @@ void dMenu_Option_c::confirm_open_move() {
     u32 status = mpWarning->getStatus();
     bool yesNoMenuMove = yesnoMenuMoveAnm();
 
+#if !TARGET_PC
     if (field_0x374 != 1.0f) {
         cLib_addCalc2(&field_0x374, 1.0f, 0.4f, 0.5f);
         if (fabsf(field_0x374 - 1.0f) < 0.1f) {
             field_0x374 = 1.0f;
         }
     }
+#endif
     if (status == 1 && yesNoMenuMove == 1 && field_0x374 == 1.0f) {
         yesnoCursorShow();
-        field_0x3ef = PROC_CONFIRM_MOVE_MOVE_e;
+        field_0x3ef = OPTION_SELECT(PROC_CONFIRM_MOVE_MOVE_e);
     }
     mpWarning->_move();
-    setAnimation();
+    IF_NOT_DUSK(setAnimation());
 }
 
 void dMenu_Option_c::confirm_move_init() {
@@ -1120,24 +1158,21 @@ void dMenu_Option_c::confirm_move_move() {
             field_0x3f9 = i;
             if (clicked) {
                 yesNoSelectStart();
-                field_0x3ef = PROC_CONFIRM_CLOSE_MOVE_e;
+                field_0x3ef = OPTION_SELECT(PROC_CONFIRM_CLOSE_MOVE_e);
                 dMeter2Info_set2DVibrationM();
                 mpWarning->_move();
-                setAnimation();
                 return;
             }
             yesnoSelectAnmSet();
-            field_0x3ef = PROC_CONFIRM_SELECT_MOVE_e;
+            field_0x3ef = OPTION_SELECT(PROC_CONFIRM_SELECT_MOVE_e);
             mpWarning->_move();
-            setAnimation();
             return;
         }
         if (clicked) {
             yesNoSelectStart();
-            field_0x3ef = PROC_CONFIRM_CLOSE_MOVE_e;
+            field_0x3ef = OPTION_SELECT(PROC_CONFIRM_CLOSE_MOVE_e);
             dMeter2Info_set2DVibrationM();
             mpWarning->_move();
-            setAnimation();
             return;
         }
     }
@@ -1145,12 +1180,12 @@ void dMenu_Option_c::confirm_move_move() {
 
     if (mDoCPd_c::getTrigA(PAD_1) != 0) {
         yesNoSelectStart();
-        field_0x3ef = PROC_CONFIRM_CLOSE_MOVE_e;
+        field_0x3ef = OPTION_SELECT(PROC_CONFIRM_CLOSE_MOVE_e);
         dMeter2Info_set2DVibrationM();
     } else if (mDoCPd_c::getTrigB(PAD_1) != 0) {
         field_0x3f9 = 0;
         yesnoCancelAnmSet();
-        field_0x3ef = PROC_CONFIRM_CLOSE_MOVE_e;
+        field_0x3ef = OPTION_SELECT(PROC_CONFIRM_CLOSE_MOVE_e);
         dMeter2Info_set2DVibrationM();
     } else if (rightTrigger != 0) {
         if (field_0x3f9 != 0) {
@@ -1159,7 +1194,7 @@ void dMenu_Option_c::confirm_move_move() {
             field_0x3fa = field_0x3f9;
             field_0x3f9 = 0;
             yesnoSelectAnmSet();
-            field_0x3ef = PROC_CONFIRM_SELECT_MOVE_e;
+            field_0x3ef = OPTION_SELECT(PROC_CONFIRM_SELECT_MOVE_e);
         }
     } else if (leftTrigger != 0) {
         if (field_0x3f9 != 1) {
@@ -1168,11 +1203,11 @@ void dMenu_Option_c::confirm_move_move() {
             field_0x3fa = field_0x3f9;
             field_0x3f9 = 1;
             yesnoSelectAnmSet();
-            field_0x3ef = PROC_CONFIRM_SELECT_MOVE_e;
+            field_0x3ef = OPTION_SELECT(PROC_CONFIRM_SELECT_MOVE_e);
         }
     }
     mpWarning->_move();
-    setAnimation();
+    IF_NOT_DUSK(setAnimation());
 }
 
 void dMenu_Option_c::confirm_select_init() {
@@ -1202,17 +1237,16 @@ void dMenu_Option_c::confirm_select_move() {
                 dusk::menu_pointer::Context::Options, option_yes_no_target(field_0x3f9)))
         {
             yesNoSelectStart();
-            field_0x3ef = PROC_CONFIRM_CLOSE_MOVE_e;
+            field_0x3ef = OPTION_SELECT(PROC_CONFIRM_CLOSE_MOVE_e);
             dMeter2Info_set2DVibrationM();
             mpWarning->_move();
-            setAnimation();
             return;
         }
 #endif
-        field_0x3ef = PROC_CONFIRM_MOVE_MOVE_e;
+        field_0x3ef = OPTION_SELECT(PROC_CONFIRM_MOVE_MOVE_e);
     }
     mpWarning->_move();
-    setAnimation();
+    IF_NOT_DUSK(setAnimation());
 }
 
 void dMenu_Option_c::confirm_close_init() {
@@ -1227,12 +1261,14 @@ void dMenu_Option_c::confirm_close_init() {
 void dMenu_Option_c::confirm_close_move() {
     u32 status = mpWarning->getStatus();
     yesnoMenuMoveAnm();
+#if !TARGET_PC
     if (field_0x374 != 0.0f) {
         cLib_addCalc2(&field_0x374, 0.0f, 0.4f, 0.5);
         if (fabsf(field_0x374) < 0.1f) {
             field_0x374 = 0.0f;
         }
     }
+#endif
     if (status == 1 && status == 1 && field_0x374 == 0.0f) {
         if (field_0x3f7 == 1) {
             if (field_0x3f9 == 1) {
@@ -1270,7 +1306,7 @@ void dMenu_Option_c::confirm_close_move() {
         }
     }
     mpWarning->_move();
-    setAnimation();
+    IF_NOT_DUSK(setAnimation());
 }
 
 void dMenu_Option_c::tv_open1_move() {
@@ -1353,14 +1389,7 @@ void dMenu_Option_c::calibration_close2_move() {
 
 void dMenu_Option_c::menuVisible() {
     for (int i = 0; i < 6; i++) {
-#if TARGET_PC
-        if ((dusk::version::isRegionJpn() && i < 4) || i < 3)
-#elif VERSION == VERSION_GCN_JPN
-        if (i < 4)
-#else
-        if (i < 3)
-#endif
-        {
+        if (i < OPTION_SELECT(DUSK_IF_ELSE(PROC_SOUND_e, PROC_CHANGE_MOVE_e))) {
             menuShow(i);
         } else {
             menuHide(i);
@@ -1710,9 +1739,11 @@ void dMenu_Option_c::screenSet() {
     mpString->getString(0x55C, field_0x270[2], NULL, NULL, NULL, 0);
     for (int i = 0; i < 5; i++) {
 #if TARGET_PC
-        if (dusk::version::isRegionJpn()) {
+        if (dusk::version::isJpnOrLessThanWiiJpn()) {
             field_0x25c[i] = (J2DTextBox*)mpTVScreen->search(tv_btnA[i]);
-            mpTVScreen->search(ftv_btnA[i])->hide();
+            if (dusk::version::getGameVersion() >= dusk::version::GameVersion::WiiJpn) {
+                mpTVScreen->search(ftv_btnA[i])->hide();
+            }
         } else {
             field_0x25c[i] = (J2DTextBox*)mpTVScreen->search(ftv_btnA[i]);
             mpTVScreen->search(tv_btnA[i])->hide();
@@ -2210,19 +2241,6 @@ void dMenu_Option_c::setSoundString() {
 }
 
 void dMenu_Option_c::setCursorPos(u8 i_index) {
-#if TARGET_PC
-    if (!dusk::version::isRegionJpn()) {
-        switch (i_index) {
-        case PROC_VIB_e:
-            i_index = 1;
-            break;
-        case PROC_SOUND_e:
-            i_index = 2;
-            break;
-        }
-    }
-#endif
-
 #if TARGET_PC || VERSION != VERSION_GCN_JPN
     IF_DUSK_BLOCK(!dusk::version::isRegionJpn())
     if (i_index == 4) {
@@ -2279,33 +2297,13 @@ void dMenu_Option_c::setSelectColor(u8 param_0, bool param_1) {
 }
 
 u8 dMenu_Option_c::getSelectType() {
-#if TARGET_PC
-    u8 proc = 0;
-    if (field_0x3ef < PROC_CHANGE_MOVE_e) {
-        proc = field_0x3ef;
-    } else if (field_0x3f5 < PROC_CHANGE_MOVE_e) {
-        proc = field_0x3f5;
-    }
-
-    if (!dusk::version::isRegionJpn()) {
-        switch (proc) {
-        case PROC_VIB_e:
-            return 1;
-        case PROC_SOUND_e:
-            return 2;
-        }
-    }
-
-    return proc;
-#else
-    if (field_0x3ef < PROC_CHANGE_MOVE_e) {
+    if (field_0x3ef < OPTION_SELECT(PROC_CHANGE_MOVE_e)) {
         return field_0x3ef;
     }
-    if (field_0x3f5 < PROC_CHANGE_MOVE_e) {
+    if (field_0x3f5 < OPTION_SELECT(PROC_CHANGE_MOVE_e)) {
         return field_0x3f5;
     }
     return 0;
-#endif
 }
 
 void dMenu_Option_c::changeBarColor(bool i_changeColor) {
@@ -2499,7 +2497,7 @@ bool dMenu_Option_c::isRumbleSupported() {
 #if TARGET_PC
 bool dMenu_Option_c::pointerConfirmSelect() {
     dusk::menu_pointer::begin_context(dusk::menu_pointer::Context::Options);
-    for (u8 i = 0; i < (dusk::version::isRegionJpn() ? 4 : 3); ++i) {
+    for (u8 i = 0; i < (dusk::version::isRegionJpn() ? 3 : 2); ++i) {
         if (dusk::menu_pointer::hit_pane(mpMenuPane[i], 8.0f)) {
             dusk::menu_pointer::set_hover_target(i);
             return false;
@@ -2513,9 +2511,9 @@ bool dMenu_Option_c::pointerConfirmSelect() {
 
     field_0x3f7 = 1;
     field_0x3f5 = field_0x3ef;
-    field_0x3ef = PROC_CONFIRM_OPEN_MOVE_e;
+    field_0x3ef = OPTION_SELECT(PROC_CONFIRM_OPEN_MOVE_e);
     dMeter2Info_set2DVibration();
-    (this->*init[field_0x3ef])();
+    (this->*init[OPTION_PROC(field_0x3ef)])();
     return true;
 }
 #endif
@@ -2523,7 +2521,7 @@ bool dMenu_Option_c::pointerConfirmSelect() {
 bool dMenu_Option_c::dpdMenuMove() {
 #if TARGET_PC
     dusk::menu_pointer::begin_context(dusk::menu_pointer::Context::Options);
-    for (u8 i = 0; i < (dusk::version::isRegionJpn() ? 4 : 3); ++i) {
+    for (u8 i = 0; i < (dusk::version::isRegionJpn() ? 3 : 2); ++i) {
         if (!dusk::menu_pointer::hit_pane(mpMenuPane[i], 8.0f)) {
             continue;
         }
@@ -2560,8 +2558,8 @@ bool dMenu_Option_c::dpdMenuMove() {
         }
 
         if (getSelectType() != i) {
-            field_0x3ef = selectProc;
-            setCursorPos(field_0x3ef);
+            field_0x3ef = OPTION_SELECT(selectProc);
+            setCursorPos(i);
             Z2GetAudioMgr()->seStart(Z2SE_SY_CURSOR_OPTION, NULL, 0, 0, 1.0f, 1.0f, -1.0f,
                                      -1.0f, 0);
         }
@@ -2573,8 +2571,8 @@ bool dMenu_Option_c::dpdMenuMove() {
         case PROC_ATTEN_e:
             field_0x3e4 ^= 1;
             field_0x3da = 5;
-            field_0x3ef = PROC_CHANGE_MOVE_e;
-            field_0x3f5 = PROC_ATTEN_e;
+            field_0x3ef = OPTION_SELECT(PROC_CHANGE_MOVE_e);
+            field_0x3f5 = OPTION_SELECT(PROC_ATTEN_e);
             Z2GetAudioMgr()->seStart(Z2SE_SY_OPTION_SWITCH, NULL, 0, 0, 1.0f, 1.0f, -1.0f,
                                      -1.0f, 0);
             return true;
@@ -2586,8 +2584,8 @@ bool dMenu_Option_c::dpdMenuMove() {
                 field_0x3e5_JPN = 0;
                 field_0x3da = 5;
             }
-            field_0x3ef = PROC_CHANGE_MOVE_e;
-            field_0x3f5 = PROC_RUBY_e;
+            field_0x3ef = OPTION_SELECT(PROC_CHANGE_MOVE_e);
+            field_0x3f5 = OPTION_SELECT(PROC_RUBY_e);
             Z2GetAudioMgr()->seStart(Z2SE_SY_OPTION_SWITCH, NULL, 0, 0, 1.0f, 1.0f, -1.0f, -1.0f, 0);
             return true;
         case PROC_VIB_e:
@@ -2597,25 +2595,11 @@ bool dMenu_Option_c::dpdMenuMove() {
                     mDoCPd_c::startMotorWave(0, &field_0x3e0, JUTGamePad::CRumble::VAL_0, 0x3c);
                 }
                 field_0x3da = 5;
-                field_0x3ef = PROC_CHANGE_MOVE_e;
-                field_0x3f5 = PROC_VIB_e;
+                field_0x3ef = OPTION_SELECT(PROC_CHANGE_MOVE_e);
+                field_0x3f5 = OPTION_SELECT(PROC_VIB_e);
                 Z2GetAudioMgr()->seStart(Z2SE_SY_OPTION_SWITCH, NULL, 0, 0, 1.0f, 1.0f, -1.0f,
                                          -1.0f, 0);
             }
-            return true;
-        case PROC_SOUND_e:
-            if (field_0x3e9 == 0) {
-                field_0x3e9 = 2;
-            } else {
-                field_0x3e9--;
-            }
-            field_0x3da = 5;
-            mDoAud_setOutputMode(dMo_soundMode[field_0x3e9]);
-            setSoundMode(dMo_soundMode[field_0x3e9]);
-            field_0x3ef = PROC_CHANGE_MOVE_e;
-            field_0x3f5 = PROC_SOUND_e;
-            Z2GetAudioMgr()->seStart(Z2SE_SY_OPTION_SWITCH, NULL, 0, 0, 1.0f, 1.0f, -1.0f,
-                                     -1.0f, 0);
             return true;
         }
     }
@@ -2692,6 +2676,7 @@ void dMenu_Option_c::yesnoMenuMoveAnmInitSet(int param_0, int param_1) {
 bool dMenu_Option_c::yesnoMenuMoveAnm() {
     bool ret;
     if (field_0x3c8[2] != field_0x3c8[3]) {
+#if !TARGET_PC
         if (field_0x3c8[2] < field_0x3c8[3]) {
             field_0x3c8[2] += 2;
             if (field_0x3c8[2] > field_0x3c8[3]) {
@@ -2706,6 +2691,7 @@ bool dMenu_Option_c::yesnoMenuMoveAnm() {
         field_0x20->setFrame(field_0x3c8[2]);
         mpYesNoSelBase_c[0]->getPanePtr()->animationTransform();
         mpYesNoSelBase_c[1]->getPanePtr()->animationTransform();
+#endif
         ret = 0;
     }
     if (field_0x3c8[2] == field_0x3c8[3]) {
@@ -2730,6 +2716,101 @@ static s32 OptYnSelStartFrameTbl[2] = {1251, 1236};
 
 static s32 OptYnSelEndFrameTbl[2] = {1236, 1251};
 
+#if TARGET_PC
+void dMenu_Option_c::presentAnims() {
+    if (field_0x3da != 0.0f) {
+        dusk::vdt::advance_toward_frame(field_0x3da, 0.0f, 1.0f);
+        const u8 index = field_0x3f5;
+        if (field_0x3da == 0.0f) {
+            switch (OPTION_PROC(field_0x3f5)) {
+            case PROC_ATTEN_e:
+                setAttenString();
+                break;
+            case PROC_RUBY_e:
+                IF_DUSK_BLOCK(dusk::version::isRegionJpn())
+                setRubyString();
+                IF_DUSK_BLOCK_END
+                break;
+            case PROC_VIB_e:
+                setVibString();
+                break;
+            case PROC_SOUND_e:
+                setSoundString();
+                break;
+            }
+            for (int i = 0; i < 6; i++) {
+                for (int j = 2; j < 6; j++) {
+                    if (mpMenuText[i][j] != NULL) {
+                        mpMenuText[i][j]->hide();
+                    }
+                }
+            }
+            for (int i = 0; i < 2; i++) {
+                if (mpMenuText[index][i] != NULL) {
+                    mpMenuText[index][i]->show();
+                    mpMenuText[index][i]->paneTrans(field_0x3b4, 0.0f);
+                }
+            }
+        } else {
+            f32 x = 0.0f;
+            if (field_0x3da > 0) {
+                f32 initPosX = (5 - field_0x3da) / 5.0f;
+                if (mpMenuText[index][3] != NULL) {
+                    x = mpMenuText[index][3]->getInitPosX() - mpMenuText[index][0]->getInitPosX();
+                }
+                x *= initPosX;
+            } else if (field_0x3da < 0) {
+                f32 initPosX = (field_0x3da + 5) / 5.0f;
+                if (mpMenuText[index][5] != NULL) {
+                    x = mpMenuText[index][5]->getInitPosX() - mpMenuText[index][0]->getInitPosX();
+                }
+                x *= initPosX;
+            }
+            for (int i = 0; i < 6; i++) {
+                if (mpMenuText[index][i] != NULL) {
+                    mpMenuText[index][i]->show();
+                    mpMenuText[index][i]->paneTrans(x + field_0x3b4, 0.0f);
+                }
+            }
+        }
+    }
+    setAnimation();
+    if (OPTION_PROC(field_0x3ef) == PROC_CONFIRM_OPEN_MOVE_e) {
+        dusk::vdt::present_addCalc2(&field_0x374, 1.0f, 0.4f, 0.5f, 0.1f);
+    } else if (OPTION_PROC(field_0x3ef) == PROC_CONFIRM_CLOSE_MOVE_e) {
+        dusk::vdt::present_addCalc2(&field_0x374, 0.0f, 0.4f, 0.5f, 0.1f);
+    }
+    if (mpSelectScreen != NULL) {
+        mpSelectScreen->animation();
+    }
+    presentLayoutAnims();
+    for (int i = 0; i < 2; ++i) {
+        mpYesNoTxt_c[i]->presentAnime();
+        mpYesNoCurWaku_c[i]->presentAnime();
+        mpYesNoCurWakuG0_c[i]->presentAnime();
+        mpYesNoCurWakuG1_c[i]->presentAnime();
+    }
+}
+
+void dMenu_Option_c::presentLayoutAnims() {
+    if (mpWarning != NULL) {
+        mpWarning->presentAnims();
+    }
+
+    if (field_0x3c8[2] != field_0x3c8[3]) {
+        dusk::vdt::present_shared(field_0x3c8[2], field_0x3c8[3], field_0x20,
+                                  {mpYesNoSelBase_c[0] != NULL ? mpYesNoSelBase_c[0]->getPanePtr() : NULL,
+                                   mpYesNoSelBase_c[1] != NULL ? mpYesNoSelBase_c[1]->getPanePtr() : NULL});
+    }
+
+    for (int i = 0; i < 2; i++) {
+        J2DPane* pane = mpYesNoSelBase_c[i] != NULL ? mpYesNoSelBase_c[i]->getPanePtr() : NULL;
+        dusk::vdt::present_selected(field_0x3c8[i], pane, field_0x24, (f32)OptYnSelStartFrameTbl[i],
+                                    field_0x28, (f32)OptYnSelEndFrameTbl[i]);
+    }
+}
+#endif
+
 u8 dMenu_Option_c::yesnoSelectMoveAnm() {
     u8 ret = 0;
     bool bVar1;
@@ -2737,6 +2818,7 @@ u8 dMenu_Option_c::yesnoSelectMoveAnm() {
 
     if (field_0x3fa != 0xff) {
         if (field_0x3c8[field_0x3fa] != OptYnSelStartFrameTbl[field_0x3fa]) {
+#if !TARGET_PC
             if (field_0x3c8[field_0x3fa] < OptYnSelStartFrameTbl[field_0x3fa]) {
                 field_0x3c8[field_0x3fa] += 2;
                 if (field_0x3c8[field_0x3fa] > OptYnSelStartFrameTbl[field_0x3fa]) {
@@ -2750,6 +2832,7 @@ u8 dMenu_Option_c::yesnoSelectMoveAnm() {
             }
             field_0x24->setFrame(field_0x3c8[field_0x3fa]);
             mpYesNoSelBase_c[field_0x3fa]->getPanePtr()->animationTransform();
+#endif
         }
         if (field_0x3c8[field_0x3fa] == OptYnSelStartFrameTbl[field_0x3fa]) {
             bVar1 = true;
@@ -2761,6 +2844,7 @@ u8 dMenu_Option_c::yesnoSelectMoveAnm() {
     }
     if (field_0x3f9 != 0xff) {
         if (field_0x3c8[field_0x3f9] != OptYnSelEndFrameTbl[field_0x3f9]) {
+#if !TARGET_PC
             if (field_0x3c8[field_0x3f9] < OptYnSelEndFrameTbl[field_0x3f9]) {
                 field_0x3c8[field_0x3f9] += 2;
                 if (field_0x3c8[field_0x3f9] > OptYnSelEndFrameTbl[field_0x3f9]) {
@@ -2774,6 +2858,7 @@ u8 dMenu_Option_c::yesnoSelectMoveAnm() {
             }
             field_0x28->setFrame(field_0x3c8[field_0x3f9]);
             mpYesNoSelBase_c[field_0x3f9]->getPanePtr()->animationTransform();
+#endif
         }
         if (field_0x3c8[field_0x3f9] == OptYnSelEndFrameTbl[field_0x3f9]) {
             bVar2 = true;

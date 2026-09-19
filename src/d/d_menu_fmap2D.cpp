@@ -17,15 +17,15 @@
 #include "d/d_msg_scrn_explain.h"
 #include "m_Do/m_Do_graphic.h"
 #include "d/actor/d_a_midna.h"
-#if TARGET_PC
-#include "dusk/frame_interpolation.h"
-#include "dusk/ui/touch_controls.hpp"
-#endif
 #include <cstring>
 
+#if TARGET_PC
+#include "dusk/game_clock.h"
+#include "dusk/interp/frame_interpolation.h"
+#include "dusk/interp/user_interface.h"
+#include "dusk/ui/touch_controls.hpp"
 #include "dusk/version.hpp"
 
-#if TARGET_PC
 void dMenu_Fmap2DBack_c::fMapBackWide() {
     mpBaseScreen->scale(mDoGph_gInf_c::hudAspectScaleUp, 1.0f);
     mpBaseScreen->translate(mDoGph_gInf_c::getSafeMinXF(), 0.0f);
@@ -360,13 +360,8 @@ void dMenu_Fmap2DBack_c::draw() {
         scrollAreaDraw();
     }
 
-#ifdef TARGET_PC
-    if (dusk::frame_interp::get_ui_tick_pending())
-#endif
-    {
-        blinkMove(30);
-        moveLightDropAnime();
-    }
+    blinkMove(30);
+    moveLightDropAnime();
     setCenterPosX(field_0x11dc, 1);
     drawIcon(mTransX, mTransZ, mAlphaRate, field_0xfa8 * mSpotTextureFadeAlpha);
 
@@ -401,15 +396,10 @@ void dMenu_Fmap2DBack_c::draw() {
                         (mArrowPos3DZ + control_ypos + fVar3) - fVar5, &mArrowPos2DX,
                         &mArrowPos2DY);
 
-#ifdef TARGET_PC
-        if (dusk::frame_interp::get_ui_tick_pending())
-#endif
-        {
-            field_0x11e0 -= g_fmapHIO.mCursorSpeed;
+        field_0x11e0 -= g_fmapHIO.mCursorSpeed IF_DUSK(* dusk::game_clock::original_frames());
 
-            if (field_0x11e0 < 0.0f) {
-                field_0x11e0 += 360.0f;
-            }
+        if (field_0x11e0 < 0.0f) {
+            field_0x11e0 += 360.0f;
         }
 
         mpPointParent->getPanePtr()->rotate(mpPointParent->getSizeX() / 2.0f,
@@ -450,7 +440,7 @@ void dMenu_Fmap2DBack_c::draw() {
     if (field_0x122d) {
         mpMeterHaihai->drawHaihai(field_0x122d);
 #if TARGET_PC
-        if (!dusk::frame_interp::is_enabled()) {
+        if (!dusk::interp::is_enabled()) {
             field_0x122d = 0;
         }
 #else
@@ -1025,8 +1015,8 @@ void dMenu_Fmap2DBack_c::allmap_move2(STControl* param_0) {
             }
 
             f32 speed = (sp24 / 100.0f) * zoomRate;
-            f32 delta_y = speed * cM_ssin(angle);
-            f32 delta_x = speed * cM_scos(angle);
+            f32 delta_y = speed * cM_ssin(angle) IF_DUSK(* dusk::game_clock::original_frames());
+            f32 delta_x = speed * cM_scos(angle) IF_DUSK(* dusk::game_clock::original_frames());
 
 #ifdef TARGET_PC
             if (dusk::getSettings().game.enableMirrorMode) {
@@ -1871,19 +1861,19 @@ void dMenu_Fmap2DBack_c::calcBlink() {
                                       g_fmapHIO.mMapBlink[i].mUnselectedRegion.mBlinkSpeed);
 
 #if TARGET_PC
-    if (dusk::frame_interp::get_ui_tick_pending())
-#endif
-    {
-        field_0x1218++;
-        if (field_0x1218 >= selected_blink_speed) {
-            field_0x1218 = 0;
-        }
-
-        field_0x121a++;
-        if (field_0x121a >= unselected_blink_speed) {
-            field_0x121a = 0;
-        }
+    dusk::vdt::advance_looping_frame(field_0x1218, 1.0f, selected_blink_speed);
+    dusk::vdt::advance_looping_frame(field_0x121a, 1.0f, unselected_blink_speed);
+#else
+    field_0x1218++;
+    if (field_0x1218 >= selected_blink_speed) {
+        field_0x1218 = 0;
     }
+
+    field_0x121a++;
+    if (field_0x121a >= unselected_blink_speed) {
+        field_0x121a = 0;
+    }
+#endif
 
     f32 t_selected = 0.0f;
     f32 t_unselected = 0.0f;
@@ -1909,6 +1899,9 @@ void dMenu_Fmap2DBack_c::calcBlink() {
 }
 
 void dMenu_Fmap2DBack_c::calcBackAlpha(bool param_0) {
+#if TARGET_PC
+    dusk::vdt::present_addCalc2(&mBackAlpha, param_0 ? 1.0f : 0.0f, 0.4f, 0.5f, 0.1f);
+#else
     if (param_0) {
         if (mBackAlpha != 1.0f) {
             cLib_addCalc2(&mBackAlpha, 1.0f, 0.4f, 0.5f);
@@ -1924,14 +1917,19 @@ void dMenu_Fmap2DBack_c::calcBackAlpha(bool param_0) {
             }
         }
     }
+#endif
 }
 
 void dMenu_Fmap2DBack_c::btkAnimeLoop(f32 i_step) {
     if (mpBaseAnm) {
+#if TARGET_PC
+        dusk::vdt::advance_looping_frame(mAnmFrame, i_step, mpBaseAnm->getFrameMax());
+#else
         mAnmFrame += i_step;
         if (mAnmFrame >= mpBaseAnm->getFrameMax()) {
             mAnmFrame -= mpBaseAnm->getFrameMax();
         }
+#endif
         mpBaseAnm->setFrame(mAnmFrame);
     } else {
         mAnmFrame = 0.0f;
@@ -1975,8 +1973,8 @@ void dMenu_Fmap2DBack_c::regionMapMove(STControl* i_stick) {
                 base_speed = g_fmapHIO.mScrollSpeedRegionFast;
             }
             f32 speed = base_speed / 100.0f * local_78;
-            f32 speed_y = speed * cM_ssin(angle);
-            f32 speed_x = speed * cM_scos(angle);
+            f32 speed_y = speed * cM_ssin(angle) IF_DUSK(* dusk::game_clock::original_frames());
+            f32 speed_x = speed * cM_scos(angle) IF_DUSK(* dusk::game_clock::original_frames());
             control_xpos += IF_DUSK(dusk::getSettings().game.enableMirrorMode ? -speed_y :) speed_y;
             control_ypos += speed_x;
         }
@@ -2045,8 +2043,8 @@ void dMenu_Fmap2DBack_c::stageMapMove(STControl* i_stick, u8 param_1, bool param
             base_speed = g_fmapHIO.mScrollSpeedRegionZoomFast;
         }
         f32 speed = base_speed / 100.0f * local_78;
-        f32 speed_x = speed * cM_ssin(angle);
-        f32 speed_z = speed * cM_scos(angle);
+        f32 speed_x = speed * cM_ssin(angle) IF_DUSK(* dusk::game_clock::original_frames());
+        f32 speed_z = speed * cM_scos(angle) IF_DUSK(* dusk::game_clock::original_frames());
         mStageTransX += IF_DUSK(dusk::getSettings().game.enableMirrorMode ? -speed_x :) speed_x;
         mStageTransZ += speed_z;
     } else if (!param_2) {
@@ -2112,6 +2110,11 @@ void dMenu_Fmap2DBack_c::stageMapMove(STControl* i_stick, u8 param_1, bool param
 }
 
 void dMenu_Fmap2DBack_c::setAllAlphaRate(f32 i_rate, bool i_init) {
+#if TARGET_PC
+    if (!i_init && i_rate == 1.0f && mAlphaRate == 1.0f) {
+        return;
+    }
+#endif
     mAlphaRate = i_rate;
     if (i_init) {
         mpBaseRoot->setBackupAlpha();
@@ -2306,6 +2309,7 @@ dMenu_Fmap2DTop_c::dMenu_Fmap2DTop_c(JKRExpHeap* i_heap, STControl* i_stick) {
     mpHeap = i_heap;
     mTransX = 0.0f;
     mTransY = 0.0f;
+    IF_DUSK(mAlphaRate = 0.0f;)
     mpPortalBin = NULL;
     mpScrnExplain = NULL;
 
@@ -2420,10 +2424,12 @@ dMenu_Fmap2DTop_c::dMenu_Fmap2DTop_c(JKRExpHeap* i_heap, STControl* i_stick) {
     static const u64 farea_name[3] = {MULTI_CHAR('f_name_1'), MULTI_CHAR('f_name3'), MULTI_CHAR('f_name2')};
     for (int i = 0; i < 3; i++) {
 #if TARGET_PC
-        if (dusk::version::isRegionJpn()) {
+        if (dusk::version::isJpnOrLessThanWiiJpn()) {
             static_cast<J2DTextBox*>(mpTitleScreen->search(area_name[i]))->setFont(mDoExt_getRubyFont());
             static_cast<J2DTextBox*>(mpTitleScreen->search(area_name[i]))->setString(0x40, "");
-            mpTitleScreen->search(farea_name[i])->hide();
+            if (dusk::version::getGameVersion() >= dusk::version::GameVersion::WiiJpn) {
+                mpTitleScreen->search(farea_name[i])->hide();
+            }
         } else {
             static_cast<J2DTextBox*>(mpTitleScreen->search(farea_name[i]))->setFont(mDoExt_getRubyFont());
             static_cast<J2DTextBox*>(mpTitleScreen->search(farea_name[i]))->setString(0x40, "");
@@ -2458,10 +2464,12 @@ dMenu_Fmap2DTop_c::dMenu_Fmap2DTop_c(JKRExpHeap* i_heap, STControl* i_stick) {
 #endif
     for (int i = 0; i < 7; i++) {
 #if TARGET_PC
-        if (dusk::version::isRegionJpn()) {
+        if (dusk::version::isJpnOrLessThanWiiJpn()) {
             static_cast<J2DTextBox*>(mpTitleScreen->search(sfont_name[i]))->setFont(mDoExt_getRubyFont());
             static_cast<J2DTextBox*>(mpTitleScreen->search(sfont_name[i]))->setString(0x40, "");
-            mpTitleScreen->search(ffont_name[i])->hide();
+            if (dusk::version::getGameVersion() >= dusk::version::GameVersion::WiiJpn) {
+                mpTitleScreen->search(ffont_name[i])->hide();
+            }
         } else {
             static_cast<J2DTextBox*>(mpTitleScreen->search(ffont_name[i]))->setFont(mDoExt_getRubyFont());
             static_cast<J2DTextBox*>(mpTitleScreen->search(ffont_name[i]))->setString(0x40, "");
@@ -2485,10 +2493,12 @@ dMenu_Fmap2DTop_c::dMenu_Fmap2DTop_c(JKRExpHeap* i_heap, STControl* i_stick) {
     static const u64 font_zt[5] = {MULTI_CHAR('font_zt1'), MULTI_CHAR('font_zt2'), MULTI_CHAR('font_zt3'), MULTI_CHAR('font_zt4'), MULTI_CHAR('font_zt5')};
     for (int i = 0; i < 5; i++) {
 #if TARGET_PC
-        if (dusk::version::isRegionJpn()) {
+        if (dusk::version::isJpnOrLessThanWiiJpn()) {
             static_cast<J2DTextBox*>(mpTitleScreen->search(cont_zt[i]))->setFont(mDoExt_getMesgFont());
             static_cast<J2DTextBox*>(mpTitleScreen->search(cont_zt[i]))->setString(0x20, "");
-            mpTitleScreen->search(font_zt[i])->hide();
+            if (dusk::version::getGameVersion() >= dusk::version::GameVersion::WiiJpn) {
+                mpTitleScreen->search(font_zt[i])->hide();
+            }
         } else {
             static_cast<J2DTextBox*>(mpTitleScreen->search(font_zt[i]))->setFont(mDoExt_getMesgFont());
             static_cast<J2DTextBox*>(mpTitleScreen->search(font_zt[i]))->setString(0x20, "");
@@ -2516,10 +2526,12 @@ dMenu_Fmap2DTop_c::dMenu_Fmap2DTop_c(JKRExpHeap* i_heap, STControl* i_stick) {
 #endif
     for (int i = 0; i < 5; i++) {
 #if TARGET_PC
-        if (dusk::version::isRegionJpn()) {
+        if (dusk::version::isJpnOrLessThanWiiJpn()) {
             static_cast<J2DTextBox*>(mpTitleScreen->search(cont_bt[i]))->setFont(mDoExt_getMesgFont());
             static_cast<J2DTextBox*>(mpTitleScreen->search(cont_bt[i]))->setString(0x20, "");
-            mpTitleScreen->search(font_bt[i])->hide();
+            if (dusk::version::getGameVersion() >= dusk::version::GameVersion::WiiJpn) {
+                mpTitleScreen->search(font_bt[i])->hide();
+            }
         } else {
             static_cast<J2DTextBox*>(mpTitleScreen->search(font_bt[i]))->setFont(mDoExt_getMesgFont());
             static_cast<J2DTextBox*>(mpTitleScreen->search(font_bt[i]))->setString(0x20, "");
@@ -2543,10 +2555,12 @@ dMenu_Fmap2DTop_c::dMenu_Fmap2DTop_c(JKRExpHeap* i_heap, STControl* i_stick) {
     static const u64 font_at[5] = {MULTI_CHAR('font_at1'), MULTI_CHAR('font_at2'), MULTI_CHAR('font_at3'), MULTI_CHAR('font_at4'), MULTI_CHAR('font_at5')};
     for (int i = 0; i < 5; i++) {
 #if TARGET_PC
-        if (dusk::version::isRegionJpn()) {
+        if (dusk::version::isJpnOrLessThanWiiJpn()) {
             static_cast<J2DTextBox*>(mpTitleScreen->search(cont_at[i]))->setFont(mDoExt_getMesgFont());
             static_cast<J2DTextBox*>(mpTitleScreen->search(cont_at[i]))->setString(0x20, "");
-            mpTitleScreen->search(font_at[i])->hide();
+            if (dusk::version::getGameVersion() >= dusk::version::GameVersion::WiiJpn) {
+                mpTitleScreen->search(font_at[i])->hide();
+            }
         } else {
             static_cast<J2DTextBox*>(mpTitleScreen->search(font_at[i]))->setFont(mDoExt_getMesgFont());
             static_cast<J2DTextBox*>(mpTitleScreen->search(font_at[i]))->setString(0x20, "");
@@ -2571,10 +2585,12 @@ dMenu_Fmap2DTop_c::dMenu_Fmap2DTop_c(JKRExpHeap* i_heap, STControl* i_stick) {
     static const u64 fuji_c[5] = {MULTI_CHAR('fuji_c00'), MULTI_CHAR('fuji_c01'), MULTI_CHAR('fuji_c02'), MULTI_CHAR('fuji_c03'), MULTI_CHAR('fuji_c04')};
     for (int i = 0; i < 5; i++) {
 #if TARGET_PC
-        if (dusk::version::isRegionJpn()) {
+        if (dusk::version::isJpnOrLessThanWiiJpn()) {
             static_cast<J2DTextBox*>(mpTitleScreen->search(juji_c[i]))->setFont(mDoExt_getMesgFont());
             static_cast<J2DTextBox*>(mpTitleScreen->search(juji_c[i]))->setString(0x20, "");
-            mpTitleScreen->search(fuji_c[i])->hide();
+            if (dusk::version::getGameVersion() >= dusk::version::GameVersion::WiiJpn) {
+                mpTitleScreen->search(fuji_c[i])->hide();
+            }
         } else {
             static_cast<J2DTextBox*>(mpTitleScreen->search(fuji_c[i]))->setFont(mDoExt_getMesgFont());
             static_cast<J2DTextBox*>(mpTitleScreen->search(fuji_c[i]))->setString(0x20, "");
@@ -2598,10 +2614,12 @@ dMenu_Fmap2DTop_c::dMenu_Fmap2DTop_c(JKRExpHeap* i_heap, STControl* i_stick) {
     static const u64 fst_c[5] = {MULTI_CHAR('fst_00'), MULTI_CHAR('fst_01'), MULTI_CHAR('fst_02'), MULTI_CHAR('fst_03'), MULTI_CHAR('fst_04')};
     for (int i = 0; i < 5; i++) {
 #if TARGET_PC
-        if (dusk::version::isRegionJpn()) {
+        if (dusk::version::isJpnOrLessThanWiiJpn()) {
             static_cast<J2DTextBox*>(mpTitleScreen->search(ast_c[i]))->setFont(mDoExt_getMesgFont());
             static_cast<J2DTextBox*>(mpTitleScreen->search(ast_c[i]))->setString(0x20, "");
-            mpTitleScreen->search(fst_c[i])->hide();
+            if (dusk::version::getGameVersion() >= dusk::version::GameVersion::WiiJpn) {
+                mpTitleScreen->search(fst_c[i])->hide();
+            }
         } else {
             static_cast<J2DTextBox*>(mpTitleScreen->search(fst_c[i]))->setFont(mDoExt_getMesgFont());
             static_cast<J2DTextBox*>(mpTitleScreen->search(fst_c[i]))->setString(0x20, "");
@@ -2781,6 +2799,11 @@ void dMenu_Fmap2DTop_c::_execute() {
 }
 
 void dMenu_Fmap2DTop_c::setAllAlphaRate(f32 i_rate, bool i_init) {
+#if TARGET_PC
+    if (!i_init && i_rate == 1.0f && mAlphaRate == 1.0f) {
+        return;
+    }
+#endif
     mAlphaRate = i_rate;
     if (i_init) {
         mpTitleRoot->setBackupAlpha();
@@ -2838,10 +2861,14 @@ void dMenu_Fmap2DTop_c::draw() {
 
 void dMenu_Fmap2DTop_c::btkAnimeLoop(J2DAnmTextureSRTKey* i_anm, f32 i_delta) {
     if (i_anm) {
+#if TARGET_PC
+        dusk::vdt::advance_looping_frame(mAnmFrame, i_delta, i_anm->getFrameMax());
+#else
         mAnmFrame += i_delta;
         if (mAnmFrame >= i_anm->getFrameMax()) {
             mAnmFrame -= i_anm->getFrameMax();
         }
+#endif
         i_anm->setFrame(mAnmFrame);
     } else {
         mAnmFrame = 0.0f;
@@ -2863,8 +2890,7 @@ void dMenu_Fmap2DTop_c::setTitleNameString(u32 param_0) {
     static const u64 ffont_name[7] = {
         MULTI_CHAR('ffont00'), MULTI_CHAR('ffontl0'), MULTI_CHAR('ffontl1'), MULTI_CHAR('ffontl2'), MULTI_CHAR('ffontb0'), MULTI_CHAR('ffontb3'), MULTI_CHAR('ffontb4')
     };
-
-    auto setTitleNameString_font_name = dusk::version::isRegionJpn() ? sfont_name : ffont_name;
+    auto setTitleNameString_font_name = dusk::version::isJpnOrLessThanWiiJpn() ? sfont_name : ffont_name;
 #elif VERSION == VERSION_GCN_JPN
     static const u64 sfont_name[7] = {
         MULTI_CHAR('sfont00'), MULTI_CHAR('sfontl0'), MULTI_CHAR('sfontl1'), MULTI_CHAR('sfontl2'), MULTI_CHAR('sfontb0'), MULTI_CHAR('sfontb1'), MULTI_CHAR('sfontb2')
@@ -2883,15 +2909,9 @@ void dMenu_Fmap2DTop_c::setTitleNameString(u32 param_0) {
 #endif
     for (int i = 0; i < 7; i++) {
         if (param_0 == 0) {
-            SAFE_STRCPY(((J2DTextBox*)(mpTitleScreen->search(setTitleNameString_font_name[i])))
-                       ->getStringPtr(),
-                   "");
+            SAFE_STRCPY(((J2DTextBox*)(mpTitleScreen->search(setTitleNameString_font_name[i])))->getStringPtr(), "");
         } else {
-            dMeter2Info_getStringKanji(
-                param_0,
-                ((J2DTextBox*)(mpTitleScreen->search(setTitleNameString_font_name[i])))
-                    ->getStringPtr(),
-                NULL);
+            dMeter2Info_getStringKanji(param_0, ((J2DTextBox*)(mpTitleScreen->search(setTitleNameString_font_name[i])))->getStringPtr(), NULL);
         }
     }
 }
@@ -2900,7 +2920,7 @@ void dMenu_Fmap2DTop_c::setAreaNameString(u32 param_0) {
 #if TARGET_PC
     static const u64 iarea_name[3] = {MULTI_CHAR('i_name_s'), MULTI_CHAR('i_name'), MULTI_CHAR('i_name1')};
     static const u64 farea_name[3] = {MULTI_CHAR('f_name_1'), MULTI_CHAR('f_name3'), MULTI_CHAR('f_name2')};
-    auto setAreaNameString_area_name = dusk::version::isRegionJpn() ? iarea_name : farea_name;
+    auto setAreaNameString_area_name = dusk::version::isJpnOrLessThanWiiJpn() ? iarea_name : farea_name;
 #elif VERSION == VERSION_GCN_JPN
     static const u64 iarea_name[3] = {MULTI_CHAR('i_name_s'), MULTI_CHAR('i_name'), MULTI_CHAR('i_name1')};
 #define setAreaNameString_area_name iarea_name
@@ -2910,15 +2930,9 @@ void dMenu_Fmap2DTop_c::setAreaNameString(u32 param_0) {
 #endif
     for (int i = 0; i < 3; i++) {
         if (param_0 == 0) {
-            SAFE_STRCPY(((J2DTextBox*)(mpTitleScreen->search(setAreaNameString_area_name[i])))
-                       ->getStringPtr(),
-                   "");
+            SAFE_STRCPY(((J2DTextBox*)(mpTitleScreen->search(setAreaNameString_area_name[i])))->getStringPtr(), "");
         } else {
-            dMeter2Info_getStringKanji(
-                param_0,
-                ((J2DTextBox*)(mpTitleScreen->search(setAreaNameString_area_name[i])))
-                    ->getStringPtr(),
-                NULL);
+            dMeter2Info_getStringKanji(param_0, ((J2DTextBox*)(mpTitleScreen->search(setAreaNameString_area_name[i])))->getStringPtr(), NULL);
         }
     }
 }
@@ -2937,7 +2951,7 @@ void dMenu_Fmap2DTop_c::setZButtonString(u32 param_0, u8 i_alpha) {
 #if TARGET_PC
     static const u64 cont_zt[5] = {MULTI_CHAR('cont_zt'), MULTI_CHAR('cont_zt1'), MULTI_CHAR('cont_zt2'), MULTI_CHAR('cont_zt3'), MULTI_CHAR('cont_zt4')};
     static const u64 font_zt[5] = {MULTI_CHAR('font_zt1'), MULTI_CHAR('font_zt2'), MULTI_CHAR('font_zt3'), MULTI_CHAR('font_zt4'), MULTI_CHAR('font_zt5')};
-    auto setZButtonString_font_zt = dusk::version::isRegionJpn() ? cont_zt : font_zt;
+    auto setZButtonString_font_zt = dusk::version::isJpnOrLessThanWiiJpn() ? cont_zt : font_zt;
 #elif VERSION == VERSION_GCN_JPN
     static const u64 cont_zt[5] = {MULTI_CHAR('cont_zt'), MULTI_CHAR('cont_zt1'), MULTI_CHAR('cont_zt2'), MULTI_CHAR('cont_zt3'), MULTI_CHAR('cont_zt4')};
     #define setZButtonString_font_zt cont_zt
@@ -2953,10 +2967,7 @@ void dMenu_Fmap2DTop_c::setZButtonString(u32 param_0, u8 i_alpha) {
 #endif
     } else {
         for (int i = 0; i < 5; i++) {
-            dMeter2Info_getStringKanji(
-                param_0,
-                ((J2DTextBox*)(mpTitleScreen->search(setZButtonString_font_zt[i])))->getStringPtr(),
-                NULL);
+            dMeter2Info_getStringKanji(param_0, ((J2DTextBox*)(mpTitleScreen->search(setZButtonString_font_zt[i])))->getStringPtr(), NULL);
         }
 
         if (i_alpha == ALPHA_DEFAULT) {
@@ -2975,7 +2986,7 @@ void dMenu_Fmap2DTop_c::setBButtonString(u32 param_0, u8 i_alpha) {
 #if TARGET_PC
     static const u64 cont_bt[5] = {MULTI_CHAR('cont_bt1'), MULTI_CHAR('cont_bt2'), MULTI_CHAR('cont_bt3'), MULTI_CHAR('cont_bt4'), MULTI_CHAR('cont_bt')};
     static const u64 font_bt[5] = {MULTI_CHAR('font_bt1'), MULTI_CHAR('font_bt2'), MULTI_CHAR('font_bt3'), MULTI_CHAR('font_bt4'), MULTI_CHAR('font_bt5')};
-    auto setBButtonString_font_bt = dusk::version::isRegionJpn() ? cont_bt : font_bt;
+    auto setBButtonString_font_bt = dusk::version::isJpnOrLessThanWiiJpn() ? cont_bt : font_bt;
 #elif VERSION == VERSION_GCN_JPN
     static const u64 cont_bt[5] = {MULTI_CHAR('cont_bt1'), MULTI_CHAR('cont_bt2'), MULTI_CHAR('cont_bt3'), MULTI_CHAR('cont_bt4'), MULTI_CHAR('cont_bt')};
 #define setBButtonString_font_bt cont_bt
@@ -2987,10 +2998,7 @@ void dMenu_Fmap2DTop_c::setBButtonString(u32 param_0, u8 i_alpha) {
         mAlphaButtonB = ALPHA_MIN;
     } else {
         for (int i = 0; i < 5; i++) {
-            dMeter2Info_getStringKanji(
-                param_0,
-                ((J2DTextBox*)(mpTitleScreen->search(setBButtonString_font_bt[i])))->getStringPtr(),
-                NULL);
+            dMeter2Info_getStringKanji(param_0, ((J2DTextBox*)(mpTitleScreen->search(setBButtonString_font_bt[i])))->getStringPtr(), NULL);
         }
 
         if (i_alpha == ALPHA_DEFAULT) {
@@ -3005,7 +3013,7 @@ void dMenu_Fmap2DTop_c::setAButtonString(u32 param_0, u8 i_alpha) {
 #if TARGET_PC
     static const u64 cont_at[5] = {MULTI_CHAR('cont_at'), MULTI_CHAR('cont_at1'), MULTI_CHAR('cont_at2'), MULTI_CHAR('cont_at3'), MULTI_CHAR('cont_at4')};
     static const u64 font_at[5] = {MULTI_CHAR('font_at1'), MULTI_CHAR('font_at2'), MULTI_CHAR('font_at3'), MULTI_CHAR('font_at4'), MULTI_CHAR('font_at5')};
-    auto setAButtonString_font_at = dusk::version::isRegionJpn() ? cont_at : font_at;
+    auto setAButtonString_font_at = dusk::version::isJpnOrLessThanWiiJpn() ? cont_at : font_at;
 #elif VERSION == VERSION_GCN_JPN
     static const u64 cont_at[5] = {MULTI_CHAR('cont_at'), MULTI_CHAR('cont_at1'), MULTI_CHAR('cont_at2'), MULTI_CHAR('cont_at3'), MULTI_CHAR('cont_at4')};
 #define setAButtonString_font_at cont_at
@@ -3017,10 +3025,7 @@ void dMenu_Fmap2DTop_c::setAButtonString(u32 param_0, u8 i_alpha) {
         mAlphaButtonA = ALPHA_MIN;
     } else {
         for (int i = 0; i < 5; i++) {
-            dMeter2Info_getStringKanji(
-                param_0,
-                ((J2DTextBox*)(mpTitleScreen->search(setAButtonString_font_at[i])))->getStringPtr(),
-                NULL);
+            dMeter2Info_getStringKanji(param_0, ((J2DTextBox*)(mpTitleScreen->search(setAButtonString_font_at[i])))->getStringPtr(), NULL);
         }
 
         if (i_alpha == ALPHA_DEFAULT) {
@@ -3034,8 +3039,8 @@ void dMenu_Fmap2DTop_c::setAButtonString(u32 param_0, u8 i_alpha) {
 void dMenu_Fmap2DTop_c::setCrossLRString(u32 param_0) {
 #if PLATFORM_GCN || (VERSION == VERSION_SHIELD)
 #if TARGET_PC
-    static const u64 juji_c_jpn[5] = {MULTI_CHAR('juji_c00'), MULTI_CHAR('juji_c01'), MULTI_CHAR('juji_c02'), MULTI_CHAR('juji_c03'), MULTI_CHAR('juji_c04')};
-    static const u64 juji_c[5] = {MULTI_CHAR('fuji_c00'), MULTI_CHAR('fuji_c01'), MULTI_CHAR('fuji_c02'), MULTI_CHAR('fuji_c03'), MULTI_CHAR('fuji_c04')};
+    static const u64 juji_c[5] = {MULTI_CHAR('juji_c00'), MULTI_CHAR('juji_c01'), MULTI_CHAR('juji_c02'), MULTI_CHAR('juji_c03'), MULTI_CHAR('juji_c04')};
+    static const u64 fuji_c[5] = {MULTI_CHAR('fuji_c00'), MULTI_CHAR('fuji_c01'), MULTI_CHAR('fuji_c02'), MULTI_CHAR('fuji_c03'), MULTI_CHAR('fuji_c04')};
 #elif VERSION == VERSION_GCN_JPN
     static const u64 juji_c[5] = {MULTI_CHAR('juji_c00'), MULTI_CHAR('juji_c01'), MULTI_CHAR('juji_c02'), MULTI_CHAR('juji_c03'), MULTI_CHAR('juji_c04')};
 #else
@@ -3043,14 +3048,14 @@ void dMenu_Fmap2DTop_c::setCrossLRString(u32 param_0) {
 #endif
     if (param_0 == 0) {
         for (int i = 0; i < 5; i++) {
-            J2DTextBox* text_box = static_cast<J2DTextBox*>(mpTitleScreen->search(DUSK_IF_ELSE(dusk::version::isRegionJpn() ? juji_c_jpn[i] : juji_c[i], juji_c[i])));
+            J2DTextBox* text_box = static_cast<J2DTextBox*>(mpTitleScreen->search(DUSK_IF_ELSE(dusk::version::isJpnOrLessThanWiiJpn() ? juji_c[i] : fuji_c[i], juji_c[i])));
             SAFE_STRCPY(text_box->getStringPtr(), "");
         }
         mpTitleScreen->search(MULTI_CHAR('juy_sha0'))->show();
         mAlphaDpad = 1;
     } else {
         for (int i = 0; i < 5; i++) {
-            J2DTextBox* text_box = static_cast<J2DTextBox*>(mpTitleScreen->search(DUSK_IF_ELSE(dusk::version::isRegionJpn() ? juji_c_jpn[i] : juji_c[i], juji_c[i])));
+            J2DTextBox* text_box = static_cast<J2DTextBox*>(mpTitleScreen->search(DUSK_IF_ELSE(dusk::version::isJpnOrLessThanWiiJpn() ? juji_c[i] : fuji_c[i], juji_c[i])));
             dMeter2Info_getStringKanji(param_0, text_box->getStringPtr(), NULL);
         }
         mpTitleScreen->search(MULTI_CHAR('juy_sha0'))->show();
@@ -3062,8 +3067,8 @@ void dMenu_Fmap2DTop_c::setCrossLRString(u32 param_0) {
 void dMenu_Fmap2DTop_c::set3DStickString(u32 param_0) {
 #if PLATFORM_GCN || (VERSION == VERSION_SHIELD)
 #if TARGET_PC
-    static const u64 ast_c_jpn[5] = {MULTI_CHAR('ast_00'), MULTI_CHAR('ast_01'), MULTI_CHAR('ast_02'), MULTI_CHAR('ast_03'), MULTI_CHAR('ast_04')};
-    static const u64 ast_c[5] = {MULTI_CHAR('fst_00'), MULTI_CHAR('fst_01'), MULTI_CHAR('fst_02'), MULTI_CHAR('fst_03'), MULTI_CHAR('fst_04')};
+    static const u64 ast_c[5] = {MULTI_CHAR('ast_00'), MULTI_CHAR('ast_01'), MULTI_CHAR('ast_02'), MULTI_CHAR('ast_03'), MULTI_CHAR('ast_04')};
+    static const u64 fst_c[5] = {MULTI_CHAR('fst_00'), MULTI_CHAR('fst_01'), MULTI_CHAR('fst_02'), MULTI_CHAR('fst_03'), MULTI_CHAR('fst_04')};
 #elif VERSION == VERSION_GCN_JPN
     static const u64 ast_c[5] = {MULTI_CHAR('ast_00'), MULTI_CHAR('ast_01'), MULTI_CHAR('ast_02'), MULTI_CHAR('ast_03'), MULTI_CHAR('ast_04')};
 #else
@@ -3071,14 +3076,14 @@ void dMenu_Fmap2DTop_c::set3DStickString(u32 param_0) {
 #endif
     if (param_0 == 0) {
         for (int i = 0; i < 5; i++) {
-            J2DTextBox* text_box = static_cast<J2DTextBox*>(mpTitleScreen->search(DUSK_IF_ELSE(dusk::version::isRegionJpn() ? ast_c_jpn[i] : ast_c[i], ast_c[i])));
+            J2DTextBox* text_box = static_cast<J2DTextBox*>(mpTitleScreen->search(DUSK_IF_ELSE(dusk::version::isJpnOrLessThanWiiJpn() ? ast_c[i] : fst_c[i], ast_c[i])));
             SAFE_STRCPY(text_box->getStringPtr(), "");
         }
         mpTitleScreen->search(MULTI_CHAR('as_sha0'))->show();
         mAlphaAnalogStick = 1;
     } else {
         for (int i = 0; i < 5; i++) {
-            J2DTextBox* text_box = static_cast<J2DTextBox*>(mpTitleScreen->search(DUSK_IF_ELSE(dusk::version::isRegionJpn() ? ast_c_jpn[i] : ast_c[i], ast_c[i])));
+            J2DTextBox* text_box = static_cast<J2DTextBox*>(mpTitleScreen->search(DUSK_IF_ELSE(dusk::version::isJpnOrLessThanWiiJpn() ? ast_c[i] : fst_c[i], ast_c[i])));
             dMeter2Info_getStringKanji(param_0, text_box->getStringPtr(), NULL);
         }
         mpTitleScreen->search(MULTI_CHAR('as_sha0'))->show();
@@ -3122,9 +3127,9 @@ void dMenu_Fmap2DTop_c::setArrowAlphaRatio(u8 i_mask, f32 i_rate) {
 }
 
 void dMenu_Fmap2DTop_c::setAlphaAnimeMin(CPaneMgrAlpha* i_pane) {
-    s16 timer = i_pane->getAlphaTimer();
+    DUSK_IF_ELSE(f32, s16) timer = i_pane->getAlphaTimer();
     if (timer > 0 || i_pane->getAlphaRate() != 0.0f) {
-        timer--;
+        DUSK_IF_ELSE(timer -= dusk::game_clock::original_frames(), timer--);
         if (timer < 0) {
             timer = 0;
         }
@@ -3134,12 +3139,24 @@ void dMenu_Fmap2DTop_c::setAlphaAnimeMin(CPaneMgrAlpha* i_pane) {
 }
 
 void dMenu_Fmap2DTop_c::setAlphaAnimeMid(CPaneMgrAlpha* i_pane) {
-    s16 timer = i_pane->getAlphaTimer();
+    DUSK_IF_ELSE(f32, s16) timer = i_pane->getAlphaTimer();
     if (timer != 3 || i_pane->getAlphaRate() != 0.25f) {
         if (timer > 3) {
-            timer--;
+#if TARGET_PC
+            timer -= dusk::game_clock::original_frames();
+            if (timer < 3) {
+                timer = 3;
+            }
+#endif
+            IF_NOT_DUSK(timer--);
         } else if (timer < 3) {
-            timer++;
+#if TARGET_PC
+            timer += dusk::game_clock::original_frames();
+            if (timer > 3) {
+                timer = 3;
+            }
+#endif
+            IF_NOT_DUSK(timer++);
         }
         i_pane->alphaAnimeStart(timer);
         i_pane->setAlphaRate(timer / 6.0f * 0.5f);
@@ -3147,9 +3164,9 @@ void dMenu_Fmap2DTop_c::setAlphaAnimeMid(CPaneMgrAlpha* i_pane) {
 }
 
 void dMenu_Fmap2DTop_c::setAlphaAnimeMax(CPaneMgrAlpha* i_pane) {
-    s16 timer = i_pane->getAlphaTimer();
+    DUSK_IF_ELSE(f32, s16) timer = i_pane->getAlphaTimer();
     if (timer < 5 || i_pane->getAlphaRate() != 1.0f) {
-        timer++;
+        DUSK_IF_ELSE(timer += dusk::game_clock::original_frames(), timer++);
         if (timer > 5) {
             timer = 5;
         }

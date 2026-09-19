@@ -2,7 +2,11 @@
 
 #include <mods/api.h>
 
-#define CONFIG_SERVICE_ID "dev.twilitrealm.dusklight.config"
+#ifdef __cplusplus
+#include <mods/service.hpp>
+#endif
+
+#define CONFIG_SERVICE_ID DUSKLIGHT_SERVICE_ID_PREFIX "config"
 #define CONFIG_SERVICE_MAJOR 1u
 #define CONFIG_SERVICE_MINOR 0u
 
@@ -96,13 +100,5 @@ typedef struct ConfigService {
     ModResult (*unsubscribe)(ModContext* ctx, ConfigSubscriptionHandle handle);
 } ConfigService;
 
-#ifdef __cplusplus
-#include "mods/service.hpp"
-
-template <>
-struct mods::ServiceTraits<ConfigService> {
-    static constexpr const char* id = CONFIG_SERVICE_ID;
-    static constexpr uint16_t major_version = CONFIG_SERVICE_MAJOR;
-    static constexpr uint16_t minor_version = CONFIG_SERVICE_MINOR;
-};
-#endif
+MOD_DECLARE_SERVICE(
+    ConfigService, svc_config, CONFIG_SERVICE_ID, CONFIG_SERVICE_MAJOR, CONFIG_SERVICE_MINOR);

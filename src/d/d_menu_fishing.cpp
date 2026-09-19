@@ -16,8 +16,10 @@
 #include "m_Do/m_Do_graphic.h"
 #include <cstring>
 
-#include "helpers/string.hpp"
+#if TARGET_PC
 #include "dusk/version.hpp"
+#include "helpers/string.hpp"
+#endif
 
 typedef void (dMenu_Fishing_c::*initFunc)();
 DUSK_GAME_DATA initFunc map_init_process[] = {
@@ -343,7 +345,9 @@ void dMenu_Fishing_c::screenSetBase() {
         field_0x19c[1][i]->setString(0x20, "");
 
         mpFishNameString[i] = (J2DTextBox*)mpScreen->search(name_0[i]);
+        IF_DUSK_BLOCK(dusk::version::isGcn())
         mpScreen->search(fname_0[i])->hide();
+        IF_DUSK_BLOCK_END
         mpFishNameString[i]->setFont(mDoExt_getSubFont());
         mpFishNameString[i]->setString(0x20, "");
         dMeter2Info_getStringKanji(name_id[i], mpFishNameString[i]->getStringPtr(), NULL);

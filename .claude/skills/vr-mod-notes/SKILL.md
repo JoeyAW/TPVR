@@ -13808,3 +13808,239 @@ months of narrative ago ("worth prioritizing") -- it just hadn't been
 picked up; a quick grep/read of the already-written diagnosis was faster
 than re-deriving it from scratch once the symptom (3 dots on a fresh
 install) reappeared.
+
+### Upstream dusklight v2.0.0 merged (403 commits) -- VR re-ported onto a decoupled render/interp architecture; two silent regressions found and fixed via build/in-headset testing, not diff review -- 2026-09-18
+
+**Context**: upstream (TwilitRealm/dusklight) shipped v2.0.0 -- a
+decoupled render/simulation architecture (fixed 30Hz sim tick,
+presentation runs independently and much faster -- the "4x framerate"
+claim) plus a full rewrite of the interpolation system
+(`dusk::frame_interp` -> `dusk::interp::camera/material/particle/vertex/
+samples`, one module per subsystem instead of one generic pass), a
+rewrite of aurora's render-pass recording internals (single global pass
+-> multi-attachment `RenderPass`/`FrameRecorder`), and a new
+`borealis`-based application/build framework (new submodule). Merged onto
+`test/upstream-2.0-merge` (branched off `main`, 82 commits ahead / 403
+behind at merge time) rather than directly onto `main` -- NOT YET
+FAST-FORWARDED, see this section's own notes below on whether that's
+happened yet before trusting any API name past this point.
+
+**This was not a mechanical merge.** VR-specific code had to be
+re-implemented against the new APIs, not just kept as-is:
+`dusk::vr::tick()`'s pacing parameter (`MainLoopPacer` -> `FrameTiming`,
+field rename `presentation_dt_seconds` -> `dt`), the hand/item
+"mark_live_this_frame" freshness override (ported into the new
+`dusk::interp` core, which the old `frame_interpolation.cpp/h` files it
+lived in were being deleted out from under), aurora's "protected
+offscreen pass" mechanism (the VR-eye-pass-corruption guard, re-
+implemented against the new `RenderPass`/pass-id shape), the desktop
+mirror present-source override, and the fresh-install "force
+interpolation on when a VR session is active" fix (re-applied on top of
+`game_clock.cpp`'s rewritten `advance()`). All 24 conflicted files in the
+superproject + 4 in `extern/aurora` resolved; branch builds clean
+(`windows-msvc-relwithdebinfo`) and Android (`android-arm64` + Gradle,
+see the next section). Full contemporaneous checklist committed to the
+branch at `VR_2.0_MERGE_REVIEW.md` -- read that file directly for the
+blow-by-blow; this entry is the retrospective/lessons version.
+
+**Two real regressions were found ONLY by building and by in-headset
+testing, not by reading the diff** -- both are worth remembering as a
+class of mistake, not just as fixed bugs:
+
+1. **`dComIfGd_getReflectionFovAspect()` (the VR "water renders solid
+   black" fix) got stranded in a dead branch.** Upstream restructured
+   `d_com_inf_game.h` into one giant `#if TARGET_PC` (forward-declare-only,
+   `DUSK_NOINLINE`, real bodies live in the .cpp) / `#else` (console-only,
+   inline bodies in the header) split, replacing what used to be many
+   small per-function splits. Our VR-only helper's inline body ended up
+   textually inside the new `#else` (console) branch purely because it
+   sat next to `dComIfGd_getView()`'s OLD inline body in the pre-merge
+   file -- never compiled for TARGET_PC at all, but nothing flagged a
+   conflict since the surrounding ~4500 lines genuinely were unchanged.
+   Caught by `error C3861: identifier not found` when the OTHER half of
+   this same bug (below) tried to call it. Fixed by giving it a proper
+   out-of-line PC definition in `d_com_inf_game.cpp` alongside
+   `dComIfGd_getView()`'s real definition, matching the new pattern.
+   **Compounding regression found in the same investigation**: upstream's
+   OWN new `dusk::interp::material::set_view_projection()` (which several
+   water/reflection actors now route through) built its env-map matrix
+   from `dComIfGd_getView()->fovy/aspect` DIRECTLY -- i.e. it independently
+   reintroduced the exact "water renders solid black in VR" bug this
+   helper exists to prevent, because upstream has no idea VR needs the
+   corrected values. Fixed in `ViewProjection::apply()`
+   (`src/dusk/interp/material.cpp`) to call
+   `dComIfGd_getReflectionFovAspect()` instead.
+2. **`logical_fb_size()`'s VR-only override got deleted as a false
+   duplicate.** While resolving a ~285-line conflict in
+   `extern/aurora/lib/gx/gx.cpp`, most of the conflicting block really was
+   a plain duplicate of content upstream had moved unchanged to
+   `texture.cpp` (verified line-by-line for several of the ~10 functions
+   in that block) -- but `logical_fb_size()` was NOT a plain duplicate:
+   our fork's version had an extra `&& !gfx::offscreen_uses_native_
+   logical_size()` condition upstream's never had, and it got deleted
+   along with the genuine duplicates on the same "function name exists
+   elsewhere" assumption. Symptom, reported after the merge looked done
+   and both a PC crash fix and this same regression had already shipped
+   once: **"the view is in the top left corner of the screen, just like
+   when I first made the mod"** -- i.e. VR content confined to a small
+   corner, the native-resolution viewport call landing as literal pixels
+   on the much larger eye texture instead of being scaled up. Restored
+   the condition (aurora commit, see `git log --oneline -- lib/gx/gx.cpp`
+   in the submodule around this date).
+
+**Reusable lesson (the load-bearing one from this whole merge): when a
+merge conflict resolution involves deleting a function because "the same
+name/shape exists elsewhere in the upstream rewrite," DIFF THE ACTUAL
+BODY, don't just confirm the name resolves.** Both regressions above came
+from exactly this shortcut, in two completely different files, within
+the same merge. A large upstream rewrite will genuinely relocate large
+amounts of unchanged code (true most of the time in this merge) --  but
+"true most of the time" is exactly the trap: it's what makes skipping the
+diff feel safe. The build caught the first one (a straightforward
+compile error); the second one **compiled and ran fine, only failing
+visually in a way no automated check would catch** -- a reminder that a
+green build is necessary but not sufficient after a merge this size, and
+that user-visible in-headset testing is still doing real, non-redundant
+work even after the code compiles clean.
+
+**Third find, not a regression from this merge but a bug from an
+EARLIER uncommitted session**: the first post-merge PC in-headset test
+crashed fatally (`[aurora::gpu] WebGPU error 2: Unsupported DXGI format
+5a`) inside `Session::ensureSwapchainTexture` -> `ImportSharedTextureMemory`.
+This turned out to be a real, already-root-caused-and-fixed bug from
+uncommitted WIP ("vr submit sync fix") that was sitting in `git stash`
+(stashed at the very start of the merge to get a clean working tree, then
+never reapplied) -- see the "GPU-direct swapchain copy (D3D12) --
+CONFIRMED DEAD END" section above this one for the original diagnosis
+(Virtual Desktop/AMD RX 5700 XT allocates the swapchain's real D3D12
+resource as TYPELESS regardless of the typed format requested; Dawn's
+D3D12 SharedTextureMemory backend can't import that). Reapplied just the
+two crash-fix pieces from that stash (the `swapchainImages_[0].texture->
+GetDesc().Format` mismatch check + `swapchainResourceFormatUsable_`, and
+the `encoderTaskCallback()` branch that checked the wrong flag) --
+deliberately did NOT reapply the rest of that same stash (a separate,
+much larger Android/Vulkan `AHardwareBuffer` GPU-direct feature bundled
+in the same commit but unrelated to this crash), which is still sitting
+in the stash untouched. See the dedicated Quest-perf section below for
+that feature's status.
+
+### Android/Quest OpenXR-loader JNI staging re-ported onto borealis's Gradle plugin -- verified end-to-end (native build -> Gradle -> installed APK -> real Quest 3 launch), 2026-09-18
+
+**Context**: as part of the 2.0 merge above, upstream deleted
+`platforms/android/scripts/stage-jni-libs.sh` entirely and moved native
+APK packaging (`libmain.so`/`libc++_shared.so`) into a Gradle `Sync` task
+inside borealis's own vendored plugin
+(`extern/borealis/platforms/android/gradle/borealis-application.gradle`),
+which overrides `android.sourceSets.main.jniLibs.srcDirs` to point ONLY
+at its own generated output -- the VR mod's `libopenxr_loader.so` (built
+from source via CMake `FetchContent` of `OpenXR-SDK-Source`, see the
+"Dusklight VR: building OpenXR loader from source" message earlier in
+this file / `CMakeLists.txt`) had no path into the APK anymore.
+
+**Fix**: rather than patch the vendored borealis plugin,
+`CMakeLists.txt`'s VR/OpenXR fragment (Android branch) now writes its own
+small properties file (`build/android-arm64/dusklight-android.properties`,
+same pattern as borealis's own `borealis-android.properties`) containing
+`dusklight.openxrLoader=$<TARGET_FILE:openxr_loader>` -- resolves via the
+real CMake target regardless of `FetchContent`'s internal directory
+layout, more robust than the old script's hardcoded
+`_deps/openxr_sdk_source-build/src/loader/` path guess.
+`platforms/android/app/build.gradle` (dusklight's own file, not
+borealis's) reads that properties file (no-ops cleanly if it's missing,
+e.g. `DUSK_VR=OFF`) and registers a second `Sync` task
+(`stageDusklightOpenxrLoader`) that stages the loader into its own
+generated dir, appended onto `jniLibs.srcDirs` after borealis's plugin
+has already run.
+
+**Verified thoroughly, not just "it compiled"**: `cmake --build --preset
+android-arm64` generates the properties file pointing at a real, freshly
+built `.so` (confirmed via `ls`); `gradlew assembleDebug` runs BOTH
+staging tasks (`stageBorealisJniLibs` and `stageDusklightOpenxrLoader`,
+confirmed in the Gradle output) and produces an APK confirmed via
+`unzip -l` to contain all three expected libraries; `adb install` +
+`adb shell am start` onto a real, physically connected Quest 3 launched
+the app, entered the immersive VR transition, and produced real
+`[dusk::vr::perf]` frame-timing log lines over `adb logcat` (no crash, no
+missing-library error) -- confirmed further by the user directly looking
+in the headset: **"it looks fine."**
+
+**One thing this fix does NOT address, confirmed by the user in the same
+session**: no performance improvement on Quest -- expected, since this
+was purely a packaging fix and never touched the render path. See the
+next section for that separate, pre-existing, still-open issue.
+
+### Quest VR performance (CPU-readback round trip) -- STILL UNSOLVED; the AHardwareBuffer GPU-direct fix exists but crashed undiagnosed on real hardware and was shelved, not fixed -- assessed (read-only) 2026-09-18, not yet attempted against 2.0
+
+**Status check after the above**: re-confirmed via a real Quest 3 log
+capture post-2.0-merge that the CPU-readback bottleneck described in the
+"VR performance investigation, 2026-09-16" section above is still fully
+present and unchanged -- `mapWait=14279us` on eye 0 in the capture (CPU
+blocked in `MapAsync` waiting for GPU completion before it can read
+pixels back for the manual reupload into the real XR swapchain image).
+The PC-side fix for the equivalent bottleneck (same-device D3D12
+`ImportSharedTextureMemory`, see "CPU-readback round trip eliminated for
+PC/D3D12" above) does not apply to Android -- Dawn's Vulkan backend
+exposes no way to get its own `VkDevice`/`VkQueue` out, so there's
+nothing to hand `xrCreateSession` for the same trick.
+
+**The Android-side fix DOES exist, fully written, in the pre-2.0-merge
+"vr submit sync fix" stash** (see the previous section's third find) --
+allocate a real `AHardwareBuffer`, import it independently into BOTH
+Dawn (as a normal `wgpu::Texture`, via `SharedTextureMemoryAHardwareBufferDescriptor`)
+and a raw Vulkan `VkImage` on the XR-side device
+(`VK_ANDROID_external_memory_android_hardware_buffer`) -- same physical
+memory, two unrelated Vulkan contexts -- then once Dawn's GPU work is
+confirmed complete (`Queue::OnSubmittedWorkDone()`, a completion poll,
+still zero CPU-visible pixel bytes), a plain `vkCmdCopyImage` on the XR
+device moves it into the real swapchain image. `ensureAhbResources()`/
+`beginSwapchainAccessForFrame()`/`encodeSwapchainCopy()`/
+`finishAhbGpuCopy()` (Vulkan branch, `vr_xr_submit.hpp`) and the
+device-extension negotiation in `vr_xr_bootstrap.hpp`
+(`createXrGraphicsDevice()`) are all fully implemented, not a sketch.
+
+**But it crashed the one time it was tested on a real Quest 3, and the
+fix that shipped was to disable it, not to root-cause it.** The disable
+is a SEPARATE, easy-to-miss third stash -- inside the `extern/aurora`
+submodule itself (`git stash show -p` there, "WIP gpu.cpp/hpp changes
+before 2.0 merge test"), not in any of the three dusklight VR files --
+hardcoding `g_sharedTextureMemoryAHardwareBufferSupported = false` on
+Android with a comment reading, in full: "DELIBERATELY DISABLED
+2026-09-17 -- confirmed real crash on a real Quest 3 the first time this
+path was exercised: Aurora's uncaptured-error callback fired a fatal
+abort (`WebGPU error 2: Expected chain root to match one of the following
+branch types with optional extensions:`)... not yet root-caused." That
+flag gates everything downstream, so reapplying the stash as-is would
+land an inert (safely-CPU-readback-falling-back) feature, not a working
+one.
+
+**What re-attempting this would actually require** (assessed by a
+dedicated fork this session, not yet started):
+1. Reapply both stash halves (dusklight's three files -- mechanically
+   updating the `MainLoopPacer` -> `FrameTiming` rename the D3D12 fix
+   already went through -- AND the separate aurora-submodule stash) with
+   the AHardwareBuffer flag still hardcoded false; confirm it builds and
+   CPU-readback behavior is unaffected.
+2. Add the diagnostic logging the stash's own comment says was never
+   added (bracket `ImportSharedTextureMemory()`/`BeginAccess()`/
+   `EndAccess()` to find which specific call the "chain root" validation
+   error is actually about), flip the flag on, get a fresh real-hardware
+   crash capture -- the Dawn version changed under this merge
+   (`v20260618.032059` -> `v20260807.225922`, same migration that
+   happened for the PC path), so the crash could reproduce identically,
+   differently, or not at all. Genuinely unknown until tested.
+3. Only after that's actually root-caused (not just "disabled again")
+   does iterating on a real fix make sense.
+Also flagged: even a working first version wouldn't fully close the gap
+to zero-CPU-block -- the stash's own comment already names the documented
+next step if it's still slow (an async semaphore handoff via
+`SharedFence`/`vkQueueSubmit` wait, instead of the simpler but still-
+blocking `OnSubmittedWorkDone()` + `vkWaitForFences` this version uses).
+
+**Do not assume this is a quick follow-up to the PC fix.** The PC
+GPU-direct crash was found AND root-caused AND fixed in one session. This
+one was found, NOT root-caused, and shelved -- reopening it is a genuine
+multi-session debugging effort against real hardware, not a bounded
+"port this stash forward" task, and step 2 above could just reproduce the
+exact same unsolved crash. User was given this assessment directly and
+asked how to proceed before any code was touched; check this section's
+own future follow-ups for what was decided.

@@ -72,7 +72,7 @@ public:
     struct ScoreCount {
         cXyz field_0x0;
         u16 field_0xc;
-        u8 field_0xe;
+        DUSK_IF_ELSE(f32, u8) field_0xe;
         u8 field_0xf;
     };
 

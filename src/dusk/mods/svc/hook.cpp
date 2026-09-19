@@ -86,6 +86,7 @@ struct InstalledHook {
     InstalledBackend backend{};
     void* original = nullptr;
     ModContext* active = nullptr;
+    void** activeStore = nullptr;
     std::vector<HookCandidate> candidates;
 };
 
@@ -141,6 +142,15 @@ void sort_hooks(std::vector<T>& hooks) {
         }
         return a.order < b.order;
     });
+}
+
+bool erase_callbacks(HookSlot& slot, ModContext* context) {
+    std::erase_if(slot.pre, [&](const PreHookFn& hook) { return hook.context == context; });
+    std::erase_if(slot.post, [&](const VoidHookFn& hook) { return hook.context == context; });
+    if (slot.replace.context == context) {
+        slot.replace = {};
+    }
+    return slot.pre.empty() && slot.post.empty() && slot.replace.replaceCallback == nullptr;
 }
 
 // Once a hook is installed, funchook has patched the target's entry: its bytes lead to the
@@ -287,27 +297,32 @@ bool install_backend(
 #endif
 }
 
-void deactivate_backend(void* target, InstalledBackend& backend) {
+bool deactivate_backend(void* target, InstalledBackend& backend) {
 #if DUSK_HAS_PREPATCH
     if (backend.kind == BackendKind::Prepatch) {
         prepatch::publish(backend.prepatchSite, nullptr);
         backend = {};
-        return;
+        return true;
     }
 #endif
 #if DUSK_HAS_FUNCHOOK
     if (backend.kind == BackendKind::Funchook) {
         const int uninst = funchook_uninstall(backend.handle, 0);
+        if (uninst != 0) {
+            DuskLog.warn("HookSystem: funchook uninstall for {:p} failed: {}", target,
+                funchook_error_message(backend.handle));
+            return false;
+        }
         const int destr = funchook_destroy(backend.handle);
-        if (uninst != 0 || destr != 0) {
-            DuskLog.warn("HookSystem: funchook uninstall/destroy for {:p} returned {}/{}", target,
-                uninst, destr);
+        if (destr != 0) {
+            DuskLog.warn("HookSystem: funchook destroy for {:p} returned {}", target, destr);
         }
     }
 #else
     (void)target;
 #endif
     backend = {};
+    return true;
 }
 
 bool handoff_backend(
@@ -334,6 +349,46 @@ bool handoff_backend(
     (void)outOriginal;
     return false;
 #endif
+}
+
+bool handoff_hook(void* target, InstalledHook& entry) {
+#if DUSK_HAS_PREPATCH
+    const bool prepatched = entry.backend.kind == BackendKind::Prepatch;
+#else
+    constexpr bool prepatched = false;
+#endif
+    if (!prepatched && !deactivate_backend(target, entry.backend)) {
+        DuskLog.fatal("HookSystem: cannot hand off a hook that remains installed at {:p}", target);
+    }
+
+    entry.active = nullptr;
+    entry.activeStore = nullptr;
+    for (auto& candidate : entry.candidates) {
+        void* original = nullptr;
+        if (!handoff_backend(target, entry, candidate, &original)) {
+            continue;
+        }
+        entry.original = original;
+        entry.active = candidate.context;
+        entry.activeStore = candidate.origStore;
+        break;
+    }
+
+    if (entry.active == nullptr) {
+        DuskLog.warn("HookSystem: no reinstallable trampoline for {:p}; hooks there are "
+                     "disabled until a mod reinstalls one",
+            target);
+        for (auto& candidate : entry.candidates) {
+            *candidate.origStore = target;
+        }
+        deactivate_backend(target, entry.backend);
+        return false;
+    }
+
+    for (auto& candidate : entry.candidates) {
+        *candidate.origStore = entry.original;
+    }
+    return true;
 }
 
 ModResult hook_install(ModContext* context, void* fnAddr, void* trampolineFn, void** outOriginal) {
@@ -390,6 +445,7 @@ ModResult hook_install(ModContext* context, void* fnAddr, void* trampolineFn, vo
     entry.backend = backend;
     entry.original = *outOriginal;
     entry.active = context;
+    entry.activeStore = outOriginal;
     entry.candidates.push_back({context, trampolineFn, outOriginal, s_nextOrder++});
     return MOD_OK;
 }
@@ -457,6 +513,64 @@ ModResult hook_replace(
         return MOD_OK;
     }
     return MOD_INVALID_ARGUMENT;
+}
+
+ModResult hook_uninstall(ModContext* context, void* fnAddr, void** originalFnSlot) {
+    if (context == nullptr || fnAddr == nullptr || originalFnSlot == nullptr) {
+        return MOD_INVALID_ARGUMENT;
+    }
+
+    fnAddr = resolve_target(fnAddr);
+    if (!declared_target(context, fnAddr)) {
+        return reject_undeclared(context, fnAddr);
+    }
+
+    const auto key = reinterpret_cast<uintptr_t>(fnAddr);
+    const auto installedIt = s_installed.find(key);
+    if (installedIt == s_installed.end()) {
+        return MOD_INVALID_ARGUMENT;
+    }
+
+    auto& entry = installedIt->second;
+    const auto candidateIt =
+        std::ranges::find_if(entry.candidates, [&](const HookCandidate& candidate) {
+            return candidate.context == context && candidate.origStore == originalFnSlot;
+        });
+    if (candidateIt == entry.candidates.end()) {
+        return MOD_INVALID_ARGUMENT;
+    }
+
+    const bool removedActive = entry.activeStore == originalFnSlot;
+#if DUSK_HAS_FUNCHOOK
+    if (removedActive && entry.backend.kind == BackendKind::Funchook &&
+        !deactivate_backend(fnAddr, entry.backend)) {
+        return MOD_ERROR;
+    }
+#endif
+
+    if (const auto registryIt = s_registry.find(key);
+        registryIt != s_registry.end() && erase_callbacks(registryIt->second, context))
+    {
+        s_registry.erase(registryIt);
+    }
+
+    entry.candidates.erase(candidateIt);
+    *originalFnSlot = nullptr;
+    if (!removedActive) {
+        return MOD_OK;
+    }
+
+    auto* target = reinterpret_cast<void*>(key);
+    if (entry.candidates.empty()) {
+        deactivate_backend(target, entry.backend);
+        s_installed.erase(installedIt);
+        return MOD_OK;
+    }
+    if (!handoff_hook(target, entry)) {
+        s_installed.erase(installedIt);
+        return MOD_ERROR;
+    }
+    return MOD_OK;
 }
 
 ModResult hook_dispatch_pre(
@@ -643,7 +757,8 @@ bool resolve_symbol_checked(const char* symbol, bool requireCode, void** out, st
         why = fmt::format("symbol '{}' not found", symbol);
         return false;
     case manifest::ResolveStatus::Ambiguous:
-        why = fmt::format("'{}' maps to more than one address; use the mangled name", symbol);
+        why = fmt::format(
+            "'{}' maps to more than one address; use a qualified or mangled name", symbol);
         return false;
     }
     why = "unexpected resolve failure";
@@ -775,13 +890,7 @@ void hook_remove_mod(LoadedMod& mod) {
     s_declaredTargets.erase(context);
 
     for (auto it = s_registry.begin(); it != s_registry.end();) {
-        auto& slot = it->second;
-        std::erase_if(slot.pre, [&](const PreHookFn& hook) { return hook.context == context; });
-        std::erase_if(slot.post, [&](const VoidHookFn& hook) { return hook.context == context; });
-        if (slot.replace.context == context) {
-            slot.replace = {};
-        }
-        if (slot.pre.empty() && slot.post.empty() && slot.replace.replaceCallback == nullptr) {
+        if (erase_callbacks(it->second, context)) {
             it = s_registry.erase(it);
         } else {
             ++it;
@@ -801,49 +910,19 @@ void hook_remove_mod(LoadedMod& mod) {
 
         auto* target = reinterpret_cast<void*>(it->first);
         if (entry.candidates.empty()) {
-            deactivate_backend(target, entry.backend);
+            if (!deactivate_backend(target, entry.backend)) {
+                DuskLog.fatal("HookSystem: cannot detach a mod with a live hook at {:p}", target);
+            }
             it = s_installed.erase(it);
             continue;
         }
 
-        // A prepatch may be atomically updated directly.
-        // Funchook must first restore the original instructions before reinstalling.
-#if DUSK_HAS_PREPATCH
-        const bool prepatched = entry.backend.kind == BackendKind::Prepatch;
-#else
-        constexpr bool prepatched = false;
-#endif
-        if (!prepatched) {
-            deactivate_backend(target, entry.backend);
-        }
-        entry.active = nullptr;
-        for (auto& cand : entry.candidates) {
-            void* original = nullptr;
-            if (!handoff_backend(target, entry, cand, &original)) {
-                continue;
-            }
-            entry.original = original;
-            entry.active = cand.context;
-            DuskLog.info("HookSystem: replaced trampoline for {:p}: {} -> {} (tramp={:p})", target,
-                mod_id_from_context(context), mod_id_from_context(cand.context), cand.trampoline);
-            break;
-        }
-
-        if (entry.active == nullptr) {
-            DuskLog.warn("HookSystem: no reinstallable trampoline for {:p}; hooks there are "
-                         "disabled until a mod reinstalls one",
-                target);
-            for (auto& cand : entry.candidates) {
-                *cand.origStore = target;
-            }
-            deactivate_backend(target, entry.backend);
+        if (!handoff_hook(target, entry)) {
             it = s_installed.erase(it);
             continue;
         }
-
-        for (auto& cand : entry.candidates) {
-            *cand.origStore = entry.original;
-        }
+        DuskLog.info("HookSystem: replaced trampoline for {:p}: {} -> {}", target,
+            mod_id_from_context(context), mod_id_from_context(entry.active));
         ++it;
     }
 }
@@ -860,6 +939,9 @@ ModResult hook_add_post(ModContext*, void*, HookPostFn, const HookOptions*) {
     return MOD_UNSUPPORTED;
 }
 ModResult hook_replace(ModContext*, void*, HookReplaceFn, const HookOptions*) {
+    return MOD_UNSUPPORTED;
+}
+ModResult hook_uninstall(ModContext*, void*, void**) {
     return MOD_UNSUPPORTED;
 }
 ModResult hook_dispatch_pre(ModContext*, void*, void*, void*, int* outSkipOriginal) {
@@ -902,6 +984,7 @@ constexpr HookService s_hookService{
     .dispatch_pre = hook_dispatch_pre,
     .dispatch_post = hook_dispatch_post,
     .resolve = hook_resolve,
+    .uninstall = hook_uninstall,
 };
 
 }  // namespace

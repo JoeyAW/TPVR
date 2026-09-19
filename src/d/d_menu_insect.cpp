@@ -22,10 +22,10 @@
 #include <cstdio>
 #include <cstring>
 
-#include "dusk/version.hpp"
-
 #if TARGET_PC
+#include "dusk/game_clock.h"
 #include "dusk/menu_pointer.h"
+#include "dusk/version.hpp"
 #endif
 
 typedef void (dMenu_Insect_c::*initFunc)();
@@ -165,6 +165,11 @@ void dMenu_Insect_c::_move() {
 
 void dMenu_Insect_c::_draw() {
     if (mpArchive != NULL) {
+#if TARGET_PC
+        if (dusk::game_clock::is_presentation_frame()) {
+            mpExpParent->presentAnime();
+        }
+#endif
         J2DGrafContext* grafPort = dComIfGp_getCurrentGrafPort();
         mpBlackTex->setAlpha(0xff);
 
@@ -194,6 +199,7 @@ void dMenu_Insect_c::_draw() {
         // operations applied which cannot easily be reverse engineered
         mpSelect_c->translate(g_drawHIO.mInsectListScreen.mConfirmOptionPosX_4x3 + 486.0f,
                               g_drawHIO.mInsectListScreen.mConfirmOptionPosY_4x3 + 209.0f);
+        IF_DUSK(mpSelect_c->presentAnims());
         mpSelect_c->draw(0.0f, 0.0f);
         mpIconScreen->draw(0.0f, 0.0f, grafPort);
     }

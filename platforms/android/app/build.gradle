@@ -2,74 +2,67 @@ plugins {
     id 'com.android.application'
 }
 
-def versionNameStr = (System.getenv("DUSK_VERSION") ?: "v0.1.0").replaceFirst("^v", "")
-def versionCodeInt = (System.getenv("DUSK_VERSION_CODE") ?: "100000").toInteger()
-
 def duskRepoDir = rootProject.projectDir.parentFile.parentFile
-def duskGeneratedAssetsDir = layout.buildDirectory.dir('generated/assets/dusklight').get().asFile
-def syncDuskAssets = tasks.register('syncDuskAssets', Sync) {
-    from(new File(duskRepoDir, 'res')) {
-        into 'res'
-        exclude '**/.DS_Store'
-    }
-    // Staged by platforms/android/scripts/stage-jni-libs.sh
-    from(new File(projectDir, 'src/main/bundled_mods')) {
-        into 'mods'
-        include '*.dusk'
-    }
-    into duskGeneratedAssetsDir
-}
+def borealisDir = new File(duskRepoDir, 'extern/borealis')
 
-android {
-    namespace 'dev.twilitrealm.dusk'
-    compileSdk 36
+ext.borealisAndroid = [
+    borealisDir: borealisDir,
+    propertiesFile: new File(duskRepoDir, 'build/android-arm64/borealis-android.properties'),
+    namespace: 'dev.twilitrealm.dusk',
+    applicationId: 'dev.twilitrealm.dusk',
+    abis: ['arm64-v8a'],
+    assets: [
+        [
+            from: new File(duskRepoDir, 'res'),
+            into: 'res',
+            excludes: ['**/.DS_Store']
+        ],
+        [
+            from: new File(duskRepoDir, 'build/android-arm64/bundled_mods'),
+            into: 'mods',
+            includes: ['*.dusk']
+        ]
+    ],
+    proguardRules: file('proguard-rules.pro')
+]
 
-    defaultConfig {
-        applicationId 'dev.twilitrealm.dusk'
-        minSdk 26
-        targetSdk 36
-        versionCode versionCodeInt
-        versionName versionNameStr
-    }
+apply from: new File(borealisDir, 'platforms/android/gradle/borealis-application.gradle')
 
-    buildTypes {
-        debug {
-            minifyEnabled false
+// Upstream 2.0 replaced the old shell-script JNI staging (stage-jni-
+// libs.sh) with borealis-application.gradle's own stageBorealisJniLibs
+// task above, which only knows about libmain.so/libc++_shared.so --
+// nothing about our VR mod's extra libopenxr_loader.so dependency.
+// dusklight-android.properties is OUR OWN file (see CMakeLists.txt's VR/
+// OpenXR fragment, "Dusklight VR: Android OpenXR loader staging
+// properties"), independent of borealis's, so this stays a no-op if VR
+// wasn't configured (e.g. DUSK_VR=OFF) rather than failing the build.
+def dusklightPropertiesFile = new File(duskRepoDir, 'build/android-arm64/dusklight-android.properties')
+if (dusklightPropertiesFile.isFile()) {
+    def dusklightProperties = new Properties()
+    dusklightPropertiesFile.withInputStream { dusklightProperties.load(it) }
+    def openxrLoaderPath = dusklightProperties.getProperty('dusklight.openxrLoader')
+    def openxrLoaderAbi = dusklightProperties.getProperty('dusklight.androidAbi')
+    if (openxrLoaderPath && openxrLoaderAbi) {
+        def openxrLoaderFile = file(openxrLoaderPath)
+        def stagedOpenxrDir = layout.buildDirectory.dir('generated/jniLibs/dusklight')
+        def stageOpenxrLoader = tasks.register('stageDusklightOpenxrLoader', Sync) {
+            from(openxrLoaderFile) {
+                rename { 'libopenxr_loader.so' }
+                into openxrLoaderAbi
+            }
+            into(stagedOpenxrDir)
+            doFirst {
+                if (!openxrLoaderFile.isFile()) {
+                    throw new GradleException(
+                        "OpenXR loader library is missing: ${openxrLoaderFile}. Build the CMake VR target first.")
+                }
+            }
         }
-        release {
-            minifyEnabled false
-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-        }
-    }
-
-    sourceSets {
-        main {
-            jniLibs.srcDirs = ['src/main/jniLibs']
-            assets.srcDirs = [duskGeneratedAssetsDir]
-        }
-    }
-
-    splits {
-        abi {
-            enable true
-            reset()
-            include 'arm64-v8a', 'x86_64'
-            universalApk false
-        }
-    }
-
-    lint {
-        abortOnError false
+        android.sourceSets.main.jniLibs.srcDirs += [stagedOpenxrDir]
+        tasks.named('preBuild').configure { dependsOn(stageOpenxrLoader) }
     }
 }
 
 dependencies {
     implementation fileTree(dir: 'libs', include: ['*.jar'])
-}
-
-tasks.configureEach { task ->
-    if ((task.name.startsWith('merge') && task.name.endsWith('Assets')) ||
-        task.name.toLowerCase().contains('lint')) {
-        task.dependsOn(syncDuskAssets)
-    }
 }

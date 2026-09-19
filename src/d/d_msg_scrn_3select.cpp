@@ -5,28 +5,53 @@
 
 #include "d/dolzel.h" // IWYU pragma: keep
 
-#include <cstring>
+#include "d/d_msg_scrn_3select.h"
 #include "JSystem/J2DGraph/J2DAnmLoader.h"
 #include "JSystem/J2DGraph/J2DGrafContext.h"
 #include "JSystem/J2DGraph/J2DScreen.h"
 #include "JSystem/J2DGraph/J2DTextBox.h"
+#include <cstring>
 #include "d/d_com_inf_game.h"
-#include "d/d_msg_object.h"
-#include "d/d_msg_scrn_3select.h"
-#include "d/d_pane_class.h"
 #include "d/d_select_cursor.h"
-#include "dusk/version.hpp"
+#include "d/d_msg_object.h"
+#include "d/d_pane_class.h"
 
 #if TARGET_PC
+#include "dusk/interp/user_interface.h"
 #include "dusk/menu_pointer.h"
+#include "dusk/version.hpp"
+
+#include "d/d_msg_scrn_talk.h"
+
+#include "JSystem/J3DGraphBase/J3DTransform.h"
+
+#include <absl/container/flat_hash_map.h>
 
 namespace {
+struct SelectionAnimation {
+    dusk::vdt::FrameAnimation bck[3], bpk, btk;
+    f32 paneFrames[3] = {-1.0f, -1.0f, -1.0f};
+    f32 scaleFrames[3] = {};
+    f32 appliedFrames[3] = {-1.0f, -1.0f, -1.0f};
+};
+
+absl::flat_hash_map<const dMsgScrn3Select_c*, SelectionAnimation> sSelectionAnimations;
+
+void selectTransform(dMsgScrn3Select_c& screen, int selection, bool preserveScale, f32 step = 0.0f, f32 target = 0.0f);
+
 bool hit_choice_pane(CPaneMgr* pane, f32 padding) {
     return pane != NULL && pane->getPanePtr() != NULL && pane->getPanePtr()->isVisible() &&
            dusk::menu_pointer::hit_pane(pane, padding);
 }
 }  // namespace
 #endif
+
+#define PROC_OPEN2_BCK_START 190.0f
+#define PROC_OPEN2_BCK_END 199.0f
+#define PROC_CHANGE_BCK_START_A 300.0f
+#define PROC_CHANGE_BCK_START_B 400.0f
+#define PROC_CHANGE_BCK_END_A 303.0f
+#define PROC_CHANGE_BCK_END_B 403.0f
 
 typedef void (dMsgScrn3Select_c::*processFn)();
 DUSK_GAME_DATA processFn process[] = {
@@ -35,6 +60,7 @@ DUSK_GAME_DATA processFn process[] = {
 };
 
 dMsgScrn3Select_c::dMsgScrn3Select_c() {
+    IF_DUSK(sSelectionAnimations.erase(this));
     static u64 const tag_name[3][12] = {
         // A
         'a_n', 'a_g', 'a_gr', 'a_m', MULTI_CHAR('w_yes_00'), MULTI_CHAR('w_yes_01'), MULTI_CHAR('w_yes_02'), MULTI_CHAR('w_yes_03'), MULTI_CHAR('w_yes_04'),
@@ -61,7 +87,7 @@ dMsgScrn3Select_c::dMsgScrn3Select_c() {
     mpAnmBck = (J2DAnmTransform*)J2DAnmLoaderDataBase::load(
         JKRGetNameResource("zelda_window_3menu.bck", dComIfGp_getMsgArchive(0)));
     mBckFrame = 0.0f;
-    mBckFrame = 190.0f;
+    mBckFrame = PROC_OPEN2_BCK_START;
     mOffsetX = 0.0f;
 
     mpAnmBpk = (J2DAnmColorKey*)J2DAnmLoaderDataBase::load(
@@ -320,6 +346,7 @@ dMsgScrn3Select_c::dMsgScrn3Select_c() {
 }
 
 dMsgScrn3Select_c::~dMsgScrn3Select_c() {
+    IF_DUSK(sSelectionAnimations.erase(this));
     JKR_DELETE(mpScreen);
     mpScreen = NULL;
 
@@ -441,6 +468,66 @@ void dMsgScrn3Select_c::translate(f32 i_x, f32 i_y) {
     mpParent->translate(i_x, i_y);
 }
 
+#if TARGET_PC
+void dMsgScrn3Select_c::presentAnims() {
+    const auto found = sSelectionAnimations.find(this);
+    if (found == sSelectionAnimations.end()) {
+        return;
+    }
+    auto& animations = found->second;
+    if (animations.paneFrames[0] < 0.0f ||
+        (mProcess == PROC_MAX_e && animations.appliedFrames[0] == animations.paneFrames[0]))
+    {
+        return;
+    }
+    const u8 updates = field_0x114;
+    field_0x114 = 0;
+    for (int i = 0; i < 3; ++i) {
+        auto* pane = mpSel_c[i]->getPanePtr();
+        const f32 frame = animations.bck[i].advance(animations.paneFrames[i]);
+        if (frame == animations.appliedFrames[i]) {
+            continue;
+        }
+        animations.appliedFrames[i] = frame;
+        mpAnmBck->setFrame(frame);
+        pane->setAnimation(mpAnmBck);
+        pane->animationTransform();
+        pane->setAnimation((J2DAnmTransform*)nullptr);
+        if (pane->field_0x4 != 0xFFFF) {
+            J3DTransformInfo layout;
+            if (animations.scaleFrames[i] >= 0.0f) {
+                mpAnmBck->setFrame(animations.scaleFrames[i]);
+                mpAnmBck->getTransform(pane->field_0x4, &layout);
+                pane->scale(layout.mScale.x, layout.mScale.z);
+            }
+            if (mProcess == PROC_OPEN2_e && mBckFrame == PROC_OPEN2_BCK_START) {
+                mpAnmBck->setFrame(PROC_OPEN2_BCK_START);
+                mpAnmBck->getTransform(pane->field_0x4, &layout);
+                pane->translate(layout.mTranslate.x, pane->getTranslateY());
+            }
+        }
+        onAnimeUpdate(i);
+    }
+    mpAnmBpk->setFrame(animations.bpk.advance(mBpkFrame));
+    mpAnmBtk->setFrame(animations.btk.advance(mBtkFrame));
+
+    mpScreen->animation();
+
+    for (int i = 0; i < 3; i++) {
+        if (i == mSelNo) {
+            mpSelCld_c[i]->getPanePtr()->scale(1.0f, 1.0f);
+            mpSelCldr_c[i]->getPanePtr()->scale(1.0f, 1.0f);
+        } else {
+            mpSelCld_c[i]->getPanePtr()->scale(0.0f, 0.0f);
+            mpSelCldr_c[i]->getPanePtr()->scale(0.0f, 0.0f);
+        }
+    }
+    selectTrans();
+
+    field_0x114 = updates;
+}
+#endif
+
 void dMsgScrn3Select_c::draw(f32 i_xPos, f32 i_yPos) {
     J2DGrafContext* port = dComIfGp_getCurrentGrafPort();
     port->setup2D();
@@ -488,6 +575,10 @@ void dMsgScrn3Select_c::draw(f32 i_xPos, f32 i_yPos) {
 }
 
 void dMsgScrn3Select_c::selAnimeInit(u8 i_selNum, u8 i_selNo, u8 param_2, f32 i_width, u8 param_4) {
+#if TARGET_PC
+    auto& animations = sSelectionAnimations[this];
+    animations = {};
+#endif
     mSelNo = i_selNo;
     field_0x110 = i_selNo;
     mSelNum = i_selNum;
@@ -539,11 +630,13 @@ void dMsgScrn3Select_c::selAnimeInit(u8 i_selNum, u8 i_selNo, u8 param_2, f32 i_
         break;
     }
 
-    mBckFrame = 190.0f;
+    mBckFrame = PROC_OPEN2_BCK_START;
+    IF_DUSK(mProcess = PROC_OPEN1_e);
 
     for (int i = 0; i < 3; i++) {
         selectAnimeTransform(i);
     }
+    IF_DUSK(presentAnims());
 
     selectScale();
     selectTrans();
@@ -565,17 +658,44 @@ void dMsgScrn3Select_c::selAnimeInit(u8 i_selNum, u8 i_selNo, u8 param_2, f32 i_
     }
 
     mProcess = PROC_OPEN1_e;
+#if TARGET_PC
+    animations.bpk.start(mBpkFrame, 0.0f, 1.0f, mpAnmBpk->getFrameMax());
+    animations.btk.start(mBtkFrame, 0.0f, 1.0f, mpAnmBtk->getFrameMax());
+#endif
 }
 
 bool dMsgScrn3Select_c::selAnimeMove(u8 i_selNum, u8 param_1, bool param_2) {
+    IF_DUSK(auto& animations = sSelectionAnimations[this]);
     field_0x110 = param_1;
     mSelNum = i_selNum;
     field_0x114 = 0;
     field_0x108 = param_2;
 #if TARGET_PC
-    pointerMove();
-#endif
-
+    dMsgObject_c* msg = dMsgObject_getMsgObjectClass();
+    if (mProcess >= PROC_MAX_e) {
+        return false;
+    }
+    const bool midnaPending = msg != NULL && msg->isMidonaMessage() && msg->field_0x1a3 != 0 &&
+                              msg->mpScrnDraw != NULL &&
+                              static_cast<dMsgScrnTalk_c*>(msg->mpScrnDraw)->mpSelect_c == this;
+    if (!midnaPending) {
+        pointerMove();
+    }
+    const bool finishingMidna = midnaPending && (msg->getStatusLocal() == 8 || msg->getStatusLocal() == 9);
+    do {
+        (this->*process[mProcess])();
+        mBpkFrame = std::fmod(mBpkFrame + 1.0f, mpAnmBpk->getFrameMax());
+        mBtkFrame = std::fmod(mBtkFrame + 1.0f, mpAnmBtk->getFrameMax());
+    } while (finishingMidna && mProcess != PROC_SELECT_e && mProcess < PROC_MAX_e);
+    if (finishingMidna) {
+        for (int i = 0; i < 3; ++i) {
+            animations.bck[i].finish(animations.paneFrames[i]);
+        }
+        animations.bpk.start(mBpkFrame, 0.0f, 1.0f, mpAnmBpk->getFrameMax());
+        animations.btk.start(mBtkFrame, 0.0f, 1.0f, mpAnmBtk->getFrameMax());
+    }
+    presentAnims();
+#else
     (this->*process[mProcess])();
 
     mBpkFrame++;
@@ -603,6 +723,7 @@ bool dMsgScrn3Select_c::selAnimeMove(u8 i_selNum, u8 param_1, bool param_2) {
     }
 
     selectTrans();
+#endif
 
     for (int i = 0; i < 3; i++) {
         if (i == mSelNo) {
@@ -673,14 +794,18 @@ bool dMsgScrn3Select_c::selAnimeEnd() {
     field_0x114 = 0;
 
     if (mProcess != PROC_CLOSE_e) {
-        mBckFrame = 199.0f;
+        mBckFrame = PROC_OPEN2_BCK_END;
 
         for (int i = 0; i < 3; i++) {
+#if TARGET_PC
+            selectTransform(*this, i, true);
+#else
             f32 scale_x = mpSel_c[i]->getPanePtr()->getScaleX();
             f32 scale_y = mpSel_c[i]->getPanePtr()->getScaleY();
 
             selectAnimeTransform(i);
             mpSel_c[i]->getPanePtr()->scale(scale_x, scale_y);
+#endif
         }
 
         mProcess = PROC_CLOSE_e;
@@ -693,12 +818,15 @@ bool dMsgScrn3Select_c::selAnimeEnd() {
     if (mBpkFrame >= mpAnmBpk->getFrameMax()) {
         mBpkFrame -= mpAnmBpk->getFrameMax();
     }
-    mpAnmBpk->setFrame(mBpkFrame);
+    IF_NOT_DUSK(mpAnmBpk->setFrame(mBpkFrame));
 
     mBtkFrame++;
     if (mBtkFrame >= mpAnmBtk->getFrameMax()) {
         mBtkFrame -= mpAnmBtk->getFrameMax();
     }
+#if TARGET_PC
+    presentAnims();
+#else
     mpAnmBtk->setFrame(mBtkFrame);
 
     mpScreen->animation();
@@ -714,6 +842,7 @@ bool dMsgScrn3Select_c::selAnimeEnd() {
     }
 
     selectTrans();
+#endif
     return mProcess == PROC_MAX_e ? TRUE : FALSE;
 }
 
@@ -764,14 +893,18 @@ void dMsgScrn3Select_c::open1Proc() {
         mBckFrame = sel_anm_frame[mSelNo];
 
         for (int i = 0; i < 3; i++) {
+#if TARGET_PC
+            selectAnimeTransform(i);
+#else
             f32 x = mpSel_c[i]->getPosX();
             selectAnimeTransform(i);
 
             mpSel_c[i]->move(x, mpSel_c[i]->getPosY());
+#endif
         }
     }
 
-    mBckFrame = 190.0f;
+    mBckFrame = PROC_OPEN2_BCK_START;
     mProcess = PROC_OPEN2_e;
 }
 
@@ -781,7 +914,7 @@ void dMsgScrn3Select_c::open2Proc() {
     mBckFrame++;
     mpSelectCursor->setAlphaRate(1.0f);
 
-    if (mBckFrame >= 199.0f) {
+    if (mBckFrame >= PROC_OPEN2_BCK_END) {
         if (mSelNo != 0xFF) {
             mBckFrame = sel_anm_frame[mSelNo];
         }
@@ -791,11 +924,15 @@ void dMsgScrn3Select_c::open2Proc() {
     }
 
     for (int i = 0; i < 3; i++) {
+#if TARGET_PC
+        selectTransform(*this, i, true, mProcess == PROC_OPEN2_e ? 1.0f : 0.0f, PROC_OPEN2_BCK_END);
+#else
         f32 scale_x = mpSel_c[i]->getPanePtr()->getScaleX();
         f32 scale_y = mpSel_c[i]->getPanePtr()->getScaleY();
 
         selectAnimeTransform(i);
         mpSel_c[i]->getPanePtr()->scale(scale_x, scale_y);
+#endif
     }
 }
 
@@ -815,56 +952,56 @@ void dMsgScrn3Select_c::selectProc() {
         switch (mLastSelNo) {
         case 0:
             if (mSelNo == 1) {
-                mBckFrame = 303.0f;
+                mBckFrame = PROC_CHANGE_BCK_END_A;
                 selectAnimeTransform(1);
 
-                mBckFrame = 300.0f;
+                mBckFrame = PROC_CHANGE_BCK_START_A;
                 selectAnimeTransform(0);
             } else if (mSelNo == 2) {
-                mBckFrame = 403.0f;
+                mBckFrame = PROC_CHANGE_BCK_END_B;
                 selectAnimeTransform(2);
 
-                mBckFrame = 400.0f;
+                mBckFrame = PROC_CHANGE_BCK_START_B;
                 selectAnimeTransform(0);
             }
             break;
         case 1:
             if (mSelNo == 0) {
-                mBckFrame = 300.0f;
+                mBckFrame = PROC_CHANGE_BCK_START_A;
                 selectAnimeTransform(0);
 
-                mBckFrame = 303.0f;
+                mBckFrame = PROC_CHANGE_BCK_END_A;
                 selectAnimeTransform(1);
             } else if (mSelNo == 2) {
-                mBckFrame = 403.0f;
+                mBckFrame = PROC_CHANGE_BCK_END_B;
                 selectAnimeTransform(2);
 
-                mBckFrame = 400.0f;
+                mBckFrame = PROC_CHANGE_BCK_START_B;
                 selectAnimeTransform(1);
             }
             break;
         case 2:
             if (mSelNo == 1) {
-                mBckFrame = 400.0f;
+                mBckFrame = PROC_CHANGE_BCK_START_B;
                 selectAnimeTransform(1);
 
-                mBckFrame = 403.0f;
+                mBckFrame = PROC_CHANGE_BCK_END_B;
                 selectAnimeTransform(2);
             } else if (mSelNo == 0) {
-                mBckFrame = 300.0f;
+                mBckFrame = PROC_CHANGE_BCK_START_A;
                 selectAnimeTransform(0);
 
-                mBckFrame = 303.0f;
+                mBckFrame = PROC_CHANGE_BCK_END_A;
                 selectAnimeTransform(2);
             }
             break;
         case 0xFF:
             if (mSelNo == 0) {
-                mBckFrame = 300.0f;
+                mBckFrame = PROC_CHANGE_BCK_START_A;
             } else if (mSelNo == 1) {
-                mBckFrame = 303.0f;
+                mBckFrame = PROC_CHANGE_BCK_END_A;
             } else if (mSelNo == 2) {
-                mBckFrame = 403.0f;
+                mBckFrame = PROC_CHANGE_BCK_END_B;
             }
 
             for (int i = 0; i < 3; i++) {
@@ -885,13 +1022,13 @@ void dMsgScrn3Select_c::selectProc() {
 void dMsgScrn3Select_c::changeProc() {
     if (mSelNo == 0xFF) {
         if (mLastSelNo == 0) {
-            mBckFrame = 303.0f;
+            mBckFrame = PROC_CHANGE_BCK_END_A;
             selectAnimeTransform(0);
         } else if (mLastSelNo == 1) {
-            mBckFrame = 300.0f;
+            mBckFrame = PROC_CHANGE_BCK_START_A;
             selectAnimeTransform(1);
         } else if (mLastSelNo == 2) {
-            mBckFrame = 400.0f;
+            mBckFrame = PROC_CHANGE_BCK_START_B;
             selectAnimeTransform(2);
         }
 
@@ -901,26 +1038,28 @@ void dMsgScrn3Select_c::changeProc() {
         case 0:
             if (mSelNo == 1) {
                 if (field_0x108 != 0) {
-                    mBckFrame = 303.0f;
+                    mBckFrame = PROC_CHANGE_BCK_END_A;
                 } else {
                     mBckFrame++;
                 }
 
-                selectAnimeTransform(0);
+                DUSK_IF_ELSE(selectTransform(*this, 0, false, 1.0f, PROC_CHANGE_BCK_END_A),
+                             selectAnimeTransform(0));
 
-                if (mBckFrame >= 303.0f) {
+                if (mBckFrame >= PROC_CHANGE_BCK_END_A) {
                     mProcess = PROC_SELECT_e;
                 }
             } else if (mSelNo == 2) {
                 if (field_0x108 != 0) {
-                    mBckFrame = 403.0f;
+                    mBckFrame = PROC_CHANGE_BCK_END_B;
                 } else {
                     mBckFrame++;
                 }
 
-                selectAnimeTransform(0);
+                DUSK_IF_ELSE(selectTransform(*this, 0, false, 1.0f, PROC_CHANGE_BCK_END_B),
+                             selectAnimeTransform(0));
 
-                if (mBckFrame >= 403.0f) {
+                if (mBckFrame >= PROC_CHANGE_BCK_END_B) {
                     mProcess = PROC_SELECT_e;
                 }
             }
@@ -928,26 +1067,28 @@ void dMsgScrn3Select_c::changeProc() {
         case 1:
             if (mSelNo == 0) {
                 if (field_0x108 != 0) {
-                    mBckFrame = 300.0f;
+                    mBckFrame = PROC_CHANGE_BCK_START_A;
                 } else {
                     mBckFrame--;
                 }
 
-                selectAnimeTransform(1);
+                DUSK_IF_ELSE(selectTransform(*this, 1, false, -1.0f, PROC_CHANGE_BCK_START_A),
+                             selectAnimeTransform(1));
 
-                if (mBckFrame <= 300.0f) {
+                if (mBckFrame <= PROC_CHANGE_BCK_START_A) {
                     mProcess = PROC_SELECT_e;
                 }
             } else if (mSelNo == 2) {
                 if (field_0x108 != 0) {
-                    mBckFrame = 403.0f;
+                    mBckFrame = PROC_CHANGE_BCK_END_B;
                 } else {
                     mBckFrame++;
                 }
 
-                selectAnimeTransform(1);
+                DUSK_IF_ELSE(selectTransform(*this, 1, false, 1.0f, PROC_CHANGE_BCK_END_B),
+                             selectAnimeTransform(1));
 
-                if (mBckFrame >= 403.0f) {
+                if (mBckFrame >= PROC_CHANGE_BCK_END_B) {
                     mProcess = PROC_SELECT_e;
                 }
             }
@@ -955,26 +1096,28 @@ void dMsgScrn3Select_c::changeProc() {
         case 2:
             if (mSelNo == 1) {
                 if (field_0x108 != 0) {
-                    mBckFrame = 400.0f;
+                    mBckFrame = PROC_CHANGE_BCK_START_B;
                 } else {
                     mBckFrame--;
                 }
 
-                selectAnimeTransform(2);
+                DUSK_IF_ELSE(selectTransform(*this, 2, false, -1.0f, PROC_CHANGE_BCK_START_B),
+                             selectAnimeTransform(2));
 
-                if (mBckFrame <= 400.0f) {
+                if (mBckFrame <= PROC_CHANGE_BCK_START_B) {
                     mProcess = PROC_SELECT_e;
                 }
             } else if (mSelNo == 0) {
                 if (field_0x108 != 0) {
-                    mBckFrame = 300.0f;
+                    mBckFrame = PROC_CHANGE_BCK_START_A;
                 } else {
                     mBckFrame--;
                 }
 
-                selectAnimeTransform(2);
+                DUSK_IF_ELSE(selectTransform(*this, 2, false, -1.0f, PROC_CHANGE_BCK_START_A),
+                             selectAnimeTransform(2));
 
-                if (mBckFrame <= 300.0f) {
+                if (mBckFrame <= PROC_CHANGE_BCK_START_A) {
                     mProcess = PROC_SELECT_e;
                 }
             }
@@ -988,14 +1131,18 @@ void dMsgScrn3Select_c::closeProc() {
     mBckFrame--;
 
     for (int i = 0; i < 3; i++) {
+#if TARGET_PC
+        selectTransform(*this, i, true, -1.0f, PROC_OPEN2_BCK_START);
+#else
         f32 scale_x = mpSel_c[i]->getPanePtr()->getScaleX();
         f32 scale_y = mpSel_c[i]->getPanePtr()->getScaleY();
 
         selectAnimeTransform(i);
         mpSel_c[i]->getPanePtr()->scale(scale_x, scale_y);
+#endif
     }
 
-    if (mBckFrame <= 190.0f) {
+    if (mBckFrame <= PROC_OPEN2_BCK_START) {
         mProcess = PROC_MAX_e;
     }
 }
@@ -1142,11 +1289,36 @@ void dMsgScrn3Select_c::selectTrans() {
     }
 }
 
+#if TARGET_PC
+namespace {
+void selectTransform(dMsgScrn3Select_c& screen, int selection, bool preserveScale, f32 step, f32 target) {
+    auto& animations = sSelectionAnimations[&screen];
+    animations.appliedFrames[selection] = -1.0f;
+    auto& visual = animations.bck[selection];
+    if (step != 0.0f && screen.mBckFrame != target) {
+        visual.approach(screen.mBckFrame - step, target);
+    } else {
+        visual.finish(screen.mBckFrame);
+    }
+    if (!preserveScale) {
+        animations.scaleFrames[selection] = -1.0f;
+    } else if (animations.scaleFrames[selection] < 0.0f) {
+        animations.scaleFrames[selection] = animations.paneFrames[selection];
+    }
+    animations.paneFrames[selection] = screen.mBckFrame;
+}
+}  // namespace
+#endif
+
 void dMsgScrn3Select_c::selectAnimeTransform(int i_sel) {
+#if TARGET_PC
+    selectTransform(*this, i_sel, false);
+#else
     mpAnmBck->setFrame(mBckFrame);
     mpSel_c[i_sel]->getPanePtr()->setAnimation(mpAnmBck);
     mpSel_c[i_sel]->getPanePtr()->animationTransform();
     mpSel_c[i_sel]->getPanePtr()->setAnimation((J2DAnmTransform*)NULL);
 
     onAnimeUpdate(i_sel);
+#endif
 }

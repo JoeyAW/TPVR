@@ -12,17 +12,19 @@
 #include "global.h"
 #include <stdint.h>
 
-#ifdef TARGET_PC
+#if TARGET_PC
 #include "dusk/dusk.h"
-#include "dusk/frame_interpolation.h"
+#include "dusk/game_clock.h"
+#include "dusk/interp/frame_interpolation.h"
 #include "dusk/logging.h"
 #include "dusk/settings.h"
 #include "dusk/time.h"
-#include "f_op/f_op_overlap_mng.h"
 #include "helpers/gx_helper.h"
 
-#include "SDL3/SDL_timer.h"
-#include "tracy/Tracy.hpp"
+#include "f_op/f_op_overlap_mng.h"
+
+#include <SDL3/SDL_timer.h>
+#include <tracy/Tracy.hpp>
 
 #include <chrono>
 #endif
@@ -38,7 +40,7 @@ void JFWDisplay::ctor_subroutine(bool enableAlpha) {
     mTickRate = 0;
     mCombinationRatio = 0.0f;
     field_0x30 = 0;
-    field_0x2c = OSGetTick();
+    field_0x2c = DUSK_IF_ELSE(static_cast<OSTick>(OSGetNativeTime()), OSGetTick());
     field_0x34 = 0;
     field_0x48 = 0;
     field_0x4a = 0;
@@ -217,12 +219,13 @@ void JFWDisplay::endGX() {
 
     if (mFader != NULL) {
         ortho.setPort();
-#ifdef TARGET_PC
-        if (dusk::frame_interp::get_ui_tick_pending()) {
-            mFader->advance();
-        }
-        if (mFader->getStatus() != JUTFader::Wait) {
-            mFader->draw();
+#if TARGET_PC
+        if (dusk::game_clock::g_frameTiming.separatePresentation) {
+            if (mFader->getStatus() != JUTFader::Wait) {
+                mFader->draw();
+            }
+        } else {
+            mFader->control();
         }
 #else
         mFader->control();
@@ -258,7 +261,7 @@ void JFWDisplay::beginRender() {
     waitForTick(mTickRate, mFrameRate);
     JUTVideo::getManager()->waitRetraceIfNeed();
 
-    OSTick tick = OSGetTick();
+    OSTick tick = DUSK_IF_ELSE(static_cast<OSTick>(OSGetNativeTime()), OSGetTick());
     field_0x30 = tick - field_0x2c;
     field_0x2c = tick;
     field_0x34 = field_0x2c - JUTVideo::getVideoLastTick();
@@ -371,7 +374,7 @@ constexpr auto FRAME_PERIOD = std::chrono::duration_cast<std::chrono::nanosecond
 constexpr auto RETRACE_PERIOD = FRAME_PERIOD / 2;
 
 static void waitPrecise(Limiter& limiter, Limiter::duration_t targetNs) {
-   const auto sleepTime = limiter.Sleep(targetNs);
+    const auto sleepTime = limiter.Sleep(targetNs);
     dusk::frameUsagePct =
         100.0f * (1.0f - static_cast<float>(sleepTime) / static_cast<float>(targetNs));
 }
@@ -381,15 +384,12 @@ static void waitForTick(u32 p1, u16 p2) {
 #if TARGET_PC
     static Limiter limiter;
 
-    if (dusk::frame_interp::is_enabled() && !dusk::getTransientSettings().skipFrameRateLimit) {
-        dusk::frameUsagePct = 0.f; 
-        return; 
+    if (dusk::interp::is_enabled() || dusk::getTransientSettings().turboMode) {
+        limiter.Reset();
+        dusk::frameUsagePct = 0.f;
+        return;
     }
 
-    if (dusk::getTransientSettings().skipFrameRateLimit) {
-        p1 = OS_TIMER_CLOCK / 120;
-    }
-    
     if (fopOvlpM_IsPeek() && dusk::getTransientSettings().stateShareLoadActive) {
         return;
     }
@@ -399,7 +399,6 @@ static void waitForTick(u32 p1, u16 p2) {
 
     if (p1 != 0) {
 #if TARGET_PC
-        static Limiter limiter;
         waitPrecise(limiter, static_cast<Uint64>(OSTicksToMicroseconds(p1)) * 1000ULL);
 #else
         static OSTime nextTick = OSGetTime();
@@ -413,7 +412,6 @@ static void waitForTick(u32 p1, u16 p2) {
     } else {
         u32 uVar1 = (p2 == 0) ? 1 : p2;
 #if TARGET_PC
-        static Limiter limiter;
         waitPrecise(limiter, static_cast<Uint64>((RETRACE_PERIOD * uVar1).count()));
 #else
         static u32 nextCount = VIGetRetraceCount();
@@ -452,13 +450,13 @@ static void dummy() {
     JUTXfb::getManager()->setDisplayingXfbIndex(0);
 }
 
-static Mtx e_mtx ATTRIBUTE_ALIGN(32) = {
+ATTRIBUTE_ALIGN(32) static Mtx e_mtx = {
     {1.0f, 0.0f, 0.0f, 0.0f},
     {0.0f, 1.0f, 0.0f, 0.0f},
     {0.0f, 0.0f, 1.0f, 0.0f},
 };
 
-static u8 clear_z_TX[64] ATTRIBUTE_ALIGN(32) = {
+ATTRIBUTE_ALIGN(32) static u8 clear_z_TX[64] = {
     0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF,
     0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF,
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,

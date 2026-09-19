@@ -20,7 +20,7 @@
 #include "d/actor/d_a_midna.h"  // Wolf-mode Midna head/mask hiding
 #include "d/d_com_inf_game.h"
 #include "m_Do/m_Do_ext.h"  // mDoExt_McaMorf::getModel(), for the fishing rod's live-refresh
-#include "dusk/frame_interpolation.h"
+#include "dusk/interp/frame_interpolation.h"
 #include "f_op/f_op_view.h"
 #include "JSystem/J3DGraphAnimator/J3DModel.h"
 #include "JSystem/J3DGraphAnimator/J3DModelData.h"
@@ -1708,8 +1708,8 @@ inline void refreshTrackedHandDrawMtxLive(J3DModel* handModel) {
 
     applyTrackedHandMtx(handModel);
 
-    dusk::frame_interp::mark_live_this_frame(handModel->getAnmMtx(RIGHT_HAND_JOINT));
-    dusk::frame_interp::mark_live_this_frame(handModel->getAnmMtx(LEFT_HAND_JOINT));
+    dusk::interp::mark_live_this_frame(handModel->getAnmMtx(RIGHT_HAND_JOINT));
+    dusk::interp::mark_live_this_frame(handModel->getAnmMtx(LEFT_HAND_JOINT));
 }
 
 // Sword/shield tracked attachment -- same underlying bug class as
@@ -2066,7 +2066,7 @@ inline void lerpMtxElementwise(Mtx out, MtxP a, MtxP b, float t) {
 // point since nothing has overwritten it yet this tick -- same ordering
 // guarantee applyTrackedItemMtxOneLive()'s gate cache relies on) into curr.
 // Every real frame, blends prev/curr with the real interpolation fraction
-// for THIS frame (dusk::frame_interp::get_interpolation_step()) -- same
+// for THIS frame (dusk::interp::get_interpolation_step()) -- same
 // prev/curr-snapshot-and-lerp shape already proven for Link's own head
 // anchor (getVrCameraEyeAnchor()), just applied to a different value.
 // Per-element matrix lerp (not a proper slerp) matches frame_interp's own
@@ -2078,7 +2078,7 @@ inline void refreshRestingPoseSmoothed(
 {
     if (!model) return;
 
-    const uint64_t tick = dusk::frame_interp::sim_tick_seq();
+    const uint64_t tick = dusk::interp::sim_tick_seq();
     if (cachedTick != tick) {
         cachedTick = tick;
         if (valid) {
@@ -2091,7 +2091,7 @@ inline void refreshRestingPoseSmoothed(
     }
 
     Mtx blended;
-    lerpMtxElementwise(blended, prevMtx, currMtx, dusk::frame_interp::get_interpolation_step());
+    lerpMtxElementwise(blended, prevMtx, currMtx, dusk::interp::get_interpolation_step());
     model->setBaseTRMtx(blended);
     model->calc();
 }
@@ -2132,11 +2132,11 @@ inline void markModelJointsLive(J3DModel* model) {
     if (!model) return;
     const u16 jointNum = model->getModelData()->getJointNum();
     for (u16 i = 0; i < jointNum; ++i) {
-        dusk::frame_interp::mark_live_this_frame(model->getAnmMtx(i));
+        dusk::interp::mark_live_this_frame(model->getAnmMtx(i));
     }
     const u16 wEvlpNum = model->getModelData()->getWEvlpMtxNum();
     for (u16 i = 0; i < wEvlpNum; ++i) {
-        dusk::frame_interp::mark_live_this_frame(model->getWeightAnmMtx(i));
+        dusk::interp::mark_live_this_frame(model->getWeightAnmMtx(i));
     }
 }
 
@@ -2352,7 +2352,7 @@ struct RawBasisCache {
 // called before any override write to `model` this frame.
 inline void captureRawBasisOnce(J3DModel* model, RawBasisCache& cache) {
     if (!model) return;
-    const uint64_t tick = dusk::frame_interp::sim_tick_seq();
+    const uint64_t tick = dusk::interp::sim_tick_seq();
     if (cache.valid && cache.tick == tick) return;
     cache.tick = tick;
     MTXCopy(model->getBaseTRMtx(), cache.mtx);
@@ -2542,7 +2542,7 @@ inline void refreshTrackedHeldItemMtxLive() {
                 // so the visible result is correct every real frame
                 // regardless of the underlying sim-tick cadence.
                 // mark_live_this_frame() stops JPADrawRotBillboard()'s own
-                // dusk::frame_interp::lookup_replacement(ptcl, ...) check
+                // dusk::interp::lookup_replacement(ptcl, ...) check
                 // from substituting a stale interpolated snapshot over what
                 // this loop just wrote -- uses the particle pointer itself as
                 // the key, the same identity that lookup keys off.
@@ -2555,7 +2555,7 @@ inline void refreshTrackedHeldItemMtxLive() {
                     p->mOffsetPosition.set(flamePos.x, flamePos.y, flamePos.z);
                     p->mPosition.set(flamePos.x + localX, flamePos.y + localY, flamePos.z + localZ);
                     p->setStatus(0x20);
-                    dusk::frame_interp::mark_live_this_frame(p);
+                    dusk::interp::mark_live_this_frame(p);
                 }
                 for (JPANode<JPABaseParticle>* node = flameEmitter->mAlivePtclChld.getFirst();
                      node != flameEmitter->mAlivePtclChld.getEnd(); node = node->getNext()) {
@@ -2566,7 +2566,7 @@ inline void refreshTrackedHeldItemMtxLive() {
                     p->mOffsetPosition.set(flamePos.x, flamePos.y, flamePos.z);
                     p->mPosition.set(flamePos.x + localX, flamePos.y + localY, flamePos.z + localZ);
                     p->setStatus(0x20);
-                    dusk::frame_interp::mark_live_this_frame(p);
+                    dusk::interp::mark_live_this_frame(p);
                 }
             }
         }
@@ -3308,7 +3308,7 @@ inline cXyz computeRawCoreAnchoredEye(daAlink_c* link) {
     // (current.pos only actually changes once per tick) so this can't
     // misfire by comparing two reads of the same tick's position.
     {
-        const uint64_t posSimTick = dusk::frame_interp::sim_tick_seq();
+        const uint64_t posSimTick = dusk::interp::sim_tick_seq();
         if (!s_coreAnchorLastTickPosValid) {
             s_coreAnchorLastTickPos = link->current.pos;
             s_coreAnchorLastTickPosValid = true;
@@ -3342,7 +3342,7 @@ inline cXyz computeRawCoreAnchoredEye(daAlink_c* link) {
     }
 
     if (!s_coreAnchorCalibrated) {
-        const uint64_t simTick = dusk::frame_interp::sim_tick_seq();
+        const uint64_t simTick = dusk::interp::sim_tick_seq();
         if (!s_coreAnchorActivationTickKnown) {
             // First frame this activation has been observed -- don't
             // calibrate off it directly, just remember which tick it was.
@@ -3767,7 +3767,7 @@ inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye,
             // as every other recalibration reset in this function).
             detail::s_fallbackHeadPosCalibrated = false;
 
-            const uint64_t wolfSimTick = dusk::frame_interp::sim_tick_seq();
+            const uint64_t wolfSimTick = dusk::interp::sim_tick_seq();
             cXyz freshWolfEye = link->current.pos;
             freshWolfEye.y += detail::kWolfCameraHeightUnits;
             const float wolfYawRad = static_cast<float>(link->current.angle.y) * (3.14159265f / 32768.0f);
@@ -3785,7 +3785,7 @@ inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye,
                 detail::s_lastSeenWolfSimTick = wolfSimTick;
             }
 
-            const float wolfStep = dusk::frame_interp::get_interpolation_step();
+            const float wolfStep = dusk::interp::get_interpolation_step();
             const cXyz wolfExtrapolated = detail::lerpXyz(
                 detail::s_wolfEyeAnchorPrev, detail::s_wolfEyeAnchorCurr,
                 wolfStep + detail::kEyeAnchorExtrapolationGain);
@@ -3856,7 +3856,7 @@ inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye,
     detail::s_wolfHeadPosCalibrated = false;
     detail::s_fallbackHeadPosCalibrated = false;
 
-    const uint64_t simTick = dusk::frame_interp::sim_tick_seq();
+    const uint64_t simTick = dusk::interp::sim_tick_seq();
 
     // During ordinary gameplay: Link's root/core position -- physics-driven
     // (same value setMatrix() uses to place mpLinkModel itself), not
@@ -3879,7 +3879,7 @@ inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye,
         detail::s_lastSeenSimTick = simTick;
     }
 
-    const float step = dusk::frame_interp::get_interpolation_step();
+    const float step = dusk::interp::get_interpolation_step();
     // See detail::kEyeAnchorExtrapolationGain's own comment (above,
     // next to lerpXyz()) for why this adds the gain to `step` instead of
     // passing `step` straight through -- extrapolates ahead to roughly

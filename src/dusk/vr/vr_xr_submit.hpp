@@ -40,6 +40,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include <webgpu/webgpu_cpp.h>
@@ -56,6 +58,19 @@
 // bootstrap.hpp itself needs.
 #include <vulkan/vulkan.h>
 #include <android/log.h>
+// AHardwareBuffer allocation (AHardwareBuffer_allocate/_acquire/_release) --
+// the interop object the GPU-direct swapchain-copy path below wraps into
+// both Dawn (via ImportSharedTextureMemory) and a raw Vulkan VkImage on the
+// XR-side device, sidestepping the fact that Dawn's Vulkan backend exposes
+// no way to hand it an existing VkImage/VkDevice directly (see this
+// project's own notes on why the D3D12 same-device trick doesn't port to
+// Vulkan as-is).
+#include <android/hardware_buffer.h>
+// g_queue/g_device/g_sharedTextureMemoryAHardwareBufferSupported -- same
+// role this header plays for the D3D12 branch below (g_sharedFenceDxgiSupported/
+// g_sharedTextureMemoryD3D12Supported), just the Android/Vulkan feature-flag
+// counterpart. Same relative path as the D3D12 branch's own include.
+#include "../../../extern/aurora/lib/webgpu/gpu.hpp"
 #else
 #include <d3d12.h>
 #include <dxgi1_4.h>
@@ -1119,6 +1134,616 @@ public:
     }
 #endif  // !DUSK_VR_XR_GRAPHICS_VULKAN
 
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+    // AHARDWAREBUFFER GPU-DIRECT SWAPCHAIN-COPY PATH (usesAhbGpuDirect_ --
+    // see that field's comment for the full "why this exists" writeup).
+    // Dawn's Vulkan backend exposes NO way to get its own VkDevice/
+    // VkPhysicalDevice/VkQueue (confirmed by reading the vendored
+    // VulkanBackend.h directly -- only GetInstance()/GetInstanceProcAddr()
+    // exist, unlike the D3D12 backend's GetD3D12Device()/
+    // GetD3D12CommandQueue() the branch above relies on), so the D3D12
+    // same-device trick genuinely does not port to Vulkan -- there is
+    // nothing to hand xrCreateSession. Instead: allocate a real
+    // AHardwareBuffer, wrap it into BOTH Dawn (as a normal wgpu::Texture,
+    // via ImportSharedTextureMemory + SharedTextureMemoryAHardwareBufferDescriptor
+    // -- render into it exactly like the swapchain-texture case above) AND
+    // a raw VkImage on the XR-side device (VK_ANDROID_external_memory_
+    // android_hardware_buffer, plain Vulkan, no Dawn involved) -- the SAME
+    // physical memory, imported independently into two otherwise-unrelated
+    // Vulkan devices/instances. Once Dawn's write into its half is
+    // GPU-complete, a plain vkCmdCopyImage on the XR device moves it into
+    // the real swapchain image -- zero CPU-visible pixel data at any
+    // point, unlike the CPU-readback path's MapAsync+memcpy+manual-
+    // reupload chain.
+    //
+    // NOT attempted this pass: a fully async, semaphore-gated handoff
+    // (Dawn's SharedTextureMemory::EndAccess() can export a real
+    // wgpu::SharedFence -- confirmed via SharedFenceVkSemaphoreOpaqueFD's
+    // presence in the vendored webgpu.h -- that the XR-side vkQueueSubmit
+    // could wait on directly instead of the CPU blocking on Dawn's queue
+    // at all first). This first version uses a simpler, still-real fix
+    // instead: wait for Dawn's GPU work via Queue::OnSubmittedWorkDone()
+    // (a lightweight completion poll, NOT a memory-mapping wait -- no
+    // pixel bytes ever become CPU-visible) before issuing the XR-side
+    // copy, then a plain vkWaitForFences on that copy's own completion
+    // (same "block fully every frame, correctness first" choice this
+    // file's CPU-copy path already makes on this branch). If real
+    // in-headset numbers ever show this wait is still a dominant cost,
+    // the semaphore-export path above is the documented next step -- not
+    // attempted blind on a first pass with no way to verify it against
+    // real hardware locally.
+
+    // TEMPORARY DIAGNOSTIC (2026-09-18) -- wraps a single Dawn call in a
+    // validation error scope and logs (never fatally aborts) whatever
+    // comes back, tagged with `label`. The first real in-headset test of
+    // this whole AHardwareBuffer path fatally aborted with "WebGPU error
+    // 2: Expected chain root to match one of the following branch types
+    // with optional extensions:" from Aurora's uncaptured-error callback
+    // (gpu.cpp's SetUncapturedErrorCallback, which FATALs once
+    // g_initialized) -- which call actually produced it was never
+    // isolated, only guessed at from the message text alone.
+    // PushErrorScope/PopErrorScope intercept errors BEFORE they ever reach
+    // that uncaptured callback, so wrapping every risky call below is safe
+    // to leave in place while diagnosing -- it cannot itself trigger
+    // another fatal abort, even if the same bug reproduces immediately.
+    // Remove once the real cause is found and fixed, per this project's
+    // usual practice for capped diagnostic scaffolding.
+    static void logDawnErrorScope(const char* label) {
+        bool done = false;
+        const auto future = aurora::webgpu::g_device.PopErrorScope(
+            wgpu::CallbackMode::WaitAnyOnly,
+            [&done, label](wgpu::PopErrorScopeStatus status, wgpu::ErrorType type, wgpu::StringView message) {
+                done = true;
+                if (status != wgpu::PopErrorScopeStatus::Success) {
+                    char buf[256];
+                    duskVrSnprintf(buf, sizeof(buf),
+                                "[dusk::vr::ahbdiag] %s -- PopErrorScope itself failed, status=%d\n",
+                                label, static_cast<int>(status));
+                    duskVrLog(buf);
+                    return;
+                }
+                if (type != wgpu::ErrorType::NoError) {
+                    const std::string msg{std::string_view{message}};
+                    char buf[512];
+                    duskVrSnprintf(buf, sizeof(buf),
+                                "[dusk::vr::ahbdiag] %s -- WebGPU error %d: %s\n",
+                                label, static_cast<int>(type), msg.c_str());
+                    duskVrLog(buf);
+                } else {
+                    char buf[128];
+                    duskVrSnprintf(buf, sizeof(buf), "[dusk::vr::ahbdiag] %s -- clean, no error\n", label);
+                    duskVrLog(buf);
+                }
+            });
+        aurora::webgpu::g_instance.WaitAny(future, 5000000000);
+        if (!done) {
+            char buf[192];
+            duskVrSnprintf(buf, sizeof(buf), "[dusk::vr::ahbdiag] %s -- PopErrorScope timed out\n", label);
+            duskVrLog(buf);
+        }
+    }
+
+    // Lazily allocates the shared AHardwareBuffer and wraps it into both
+    // Dawn (ahbMemory_/ahbTexture_) and the XR-side device (xrAhbImage_/
+    // xrAhbMemory_) -- one AHardwareBuffer for the whole session's
+    // lifetime, matching swapchainTextures_'s own "create once, reuse
+    // every frame" shape on the D3D12 branch. width/height are the FULL
+    // double-wide swapchain dimensions (both eyes share this one
+    // resource, offset via dstXOffset in encodeSwapchainCopy() below, same
+    // shape as the D3D12 branch's swapchainTextures_). Only ever called
+    // when usesAhbGpuDirect() is true.
+    void ensureAhbResources(uint32_t width, uint32_t height) {
+        if (ahbTexture_) {
+            return; // already allocated/imported
+        }
+
+        AHardwareBuffer_Desc desc{};
+        desc.width = width;
+        desc.height = height;
+        desc.layers = 1;
+        desc.format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
+        // GPU_COLOR_OUTPUT: Dawn renders into it as a copy destination.
+        // GPU_SAMPLED_IMAGE: required by the AHardwareBuffer Vulkan import
+        // spec for ANY Vulkan-side use of the buffer, including as a plain
+        // vkCmdCopyImage source on the XR device below.
+        desc.usage = AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT | AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
+        if (AHardwareBuffer_allocate(&desc, &ahb_) != 0 || ahb_ == nullptr) {
+            duskVrLog("[dusk::vr] ensureAhbResources: AHardwareBuffer_allocate failed\n");
+            return;
+        }
+
+        // --- Dawn side: wrap the AHardwareBuffer as a normal wgpu::Texture. ---
+        wgpu::SharedTextureMemoryAHardwareBufferDescriptor ahbDesc{};
+        ahbDesc.handle = ahb_;
+
+        wgpu::SharedTextureMemoryDescriptor stmDesc{};
+        stmDesc.nextInChain = &ahbDesc;
+        aurora::webgpu::g_device.PushErrorScope(wgpu::ErrorFilter::Validation);
+        ahbMemory_ = aurora::webgpu::g_device.ImportSharedTextureMemory(&stmDesc);
+        logDawnErrorScope("ImportSharedTextureMemory");
+
+        wgpu::TextureDescriptor texDesc{};
+        // AHardwareBuffer's format above (R8G8B8A8_UNORM) is the actual
+        // memory layout Dawn wraps, regardless of the swapchain's own
+        // chosen format/conversion -- the gamma-compute shader already
+        // writes final, correctly byte-ordered output for whatever the
+        // CHOSEN swapchain format needs (see encoderTaskCallback()'s
+        // existing swapRB handling), so this texture's format only needs
+        // to match the AHardwareBuffer's real byte layout, not
+        // swapchainDxgiFormat_.
+        texDesc.format = wgpu::TextureFormat::RGBA8Unorm;
+        texDesc.size = {width, height, 1};
+        texDesc.usage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopyDst;
+        aurora::webgpu::g_device.PushErrorScope(wgpu::ErrorFilter::Validation);
+        ahbTexture_ = ahbMemory_.CreateTexture(&texDesc);
+        logDawnErrorScope("ahbMemory_.CreateTexture");
+
+        // --- XR-side: import the SAME AHardwareBuffer as a raw VkImage. ---
+        VkAndroidHardwareBufferFormatPropertiesANDROID formatProps{
+            VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID};
+        VkAndroidHardwareBufferPropertiesANDROID bufferProps{
+            VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID, &formatProps};
+        if (vkGetAndroidHardwareBufferPropertiesANDROID(xrDevice_, ahb_, &bufferProps) != VK_SUCCESS) {
+            duskVrLog("[dusk::vr] ensureAhbResources: vkGetAndroidHardwareBufferPropertiesANDROID failed\n");
+            return;
+        }
+
+        // formatProps.format is VK_FORMAT_UNDEFINED for some AHardwareBuffer
+        // formats, which requires chaining a VkExternalFormatANDROID (an
+        // opaque, driver-defined "external format") instead of using a
+        // real VkFormat -- R8G8B8A8_UNORM (requested above) is a standard
+        // format expected to map to a real, non-UNDEFINED VkFormat on
+        // every conformant Android Vulkan driver, so this branch is not
+        // expected to be taken; kept as a defensive fallback rather than
+        // assumed impossible.
+        VkExternalFormatANDROID externalFormat{VK_STRUCTURE_TYPE_EXTERNAL_FORMAT_ANDROID};
+        VkExternalMemoryImageCreateInfo extMemImageInfo{
+            VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
+        extMemImageInfo.handleTypes =
+            VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
+        VkFormat imageFormat = formatProps.format;
+        if (imageFormat == VK_FORMAT_UNDEFINED) {
+            externalFormat.externalFormat = formatProps.externalFormat;
+            extMemImageInfo.pNext = &externalFormat;
+        }
+
+        VkImageCreateInfo imageCI{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        imageCI.pNext = &extMemImageInfo;
+        imageCI.imageType = VK_IMAGE_TYPE_2D;
+        imageCI.format = imageFormat;
+        imageCI.extent = {width, height, 1};
+        imageCI.mipLevels = 1;
+        imageCI.arrayLayers = 1;
+        imageCI.samples = VK_SAMPLE_COUNT_1_BIT;
+        imageCI.tiling = VK_IMAGE_TILING_OPTIMAL;
+        // TRANSFER_SRC: read by vkCmdCopyImage below -- all this side ever
+        // does with the image. The AHardwareBuffer's own usage flags
+        // (GPU_COLOR_OUTPUT|GPU_SAMPLED_IMAGE above) are what actually
+        // govern what's allowed against the real underlying memory.
+        imageCI.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        imageCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        imageCI.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (vkCreateImage(xrDevice_, &imageCI, nullptr, &xrAhbImage_) != VK_SUCCESS) {
+            duskVrLog("[dusk::vr] ensureAhbResources: vkCreateImage (AHB import) failed\n");
+            return;
+        }
+
+        VkImportAndroidHardwareBufferInfoANDROID importInfo{
+            VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID};
+        importInfo.buffer = ahb_;
+
+        VkMemoryDedicatedAllocateInfo dedicatedInfo{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+                                                     &importInfo};
+        dedicatedInfo.image = xrAhbImage_;
+
+        VkMemoryAllocateInfo allocInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &dedicatedInfo};
+        allocInfo.allocationSize = bufferProps.allocationSize;
+
+        VkPhysicalDeviceMemoryProperties memProps{};
+        vkGetPhysicalDeviceMemoryProperties(xrPhysicalDevice_, &memProps);
+        uint32_t memTypeIndex = UINT32_MAX;
+        for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
+            if (bufferProps.memoryTypeBits & (1u << i)) {
+                memTypeIndex = i;
+                break;
+            }
+        }
+        if (memTypeIndex == UINT32_MAX) {
+            duskVrLog("[dusk::vr] ensureAhbResources: no matching Vulkan memory type for AHardwareBuffer import\n");
+            return;
+        }
+        allocInfo.memoryTypeIndex = memTypeIndex;
+
+        if (vkAllocateMemory(xrDevice_, &allocInfo, nullptr, &xrAhbMemory_) != VK_SUCCESS) {
+            duskVrLog("[dusk::vr] ensureAhbResources: vkAllocateMemory (AHB import) failed\n");
+            return;
+        }
+        if (vkBindImageMemory(xrDevice_, xrAhbImage_, xrAhbMemory_, 0) != VK_SUCCESS) {
+            duskVrLog("[dusk::vr] ensureAhbResources: vkBindImageMemory (AHB import) failed\n");
+            return;
+        }
+    }
+
+    // Call ONCE per frame, right after xrAcquireSwapchainImage/
+    // xrWaitSwapchainImage succeed -- same timing/role as the D3D12
+    // branch's beginSwapchainAccessForFrame() above (reused name
+    // deliberately -- vr_main.cpp's call site doesn't need to know which
+    // branch it's linked against). NOT per eye -- both eyes write into the
+    // same shared ahbTexture_ this frame, just different halves.
+    void beginSwapchainAccessForFrame(uint32_t /*index*/, uint32_t width, uint32_t height) {
+        ensureAhbResources(width, height);
+        if (!ahbTexture_) {
+            return; // allocation/import failed -- see the logged reason above
+        }
+
+        // FOUND 2026-09-18 via the error-scope diagnostic below (first real
+        // in-headset capture that didn't just fatal-abort blind): Dawn's
+        // Vulkan SharedTextureMemory backend REQUIRES a chained
+        // SharedTextureMemoryVkImageLayoutBeginState here -- "Expected
+        // chain root to match one of the following branch types with
+        // optional extensions: [ SType::SharedTextureMemoryVkImageLayoutBeginState ]
+        // Instead found: (  )". Without it, BeginAccess silently fails to
+        // actually grant access (no exception at the call site itself),
+        // and the very next GPU submit using ahbTexture_ hard-aborts with
+        // "used in a submit without current access" -- this is
+        // (independently) exactly what crashed the very first time this
+        // whole path was ever exercised (2026-09-17), just never isolated
+        // to this specific call before now.
+        //
+        // oldLayout=UNDEFINED/newLayout=UNDEFINED matches the "don't care
+        // about prior content, fully overwritten every frame" pattern this
+        // file's OWN XR-side barrier already uses unconditionally on
+        // xrAhbImage_ in finishAhbGpuCopy() (srcToTransfer: also
+        // UNDEFINED -> TRANSFER_SRC_OPTIMAL, every single frame, never
+        // tracking a real previous layout) -- kept symmetric rather than
+        // inventing a second, untested convention. Genuinely unverified
+        // whether Dawn's Vulkan backend treats UNDEFINED->UNDEFINED as
+        // "no transition needed" or something else; the matching
+        // SharedTextureMemoryVkImageLayoutEndState chained onto EndAccess
+        // below logs what Dawn actually reports leaving it in, which is
+        // the next thing to check if this still doesn't work.
+        wgpu::SharedTextureMemoryVkImageLayoutBeginState vkLayoutBegin{};
+        vkLayoutBegin.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        vkLayoutBegin.newLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        wgpu::SharedTextureMemoryBeginAccessDescriptor beginDesc{};
+        beginDesc.nextInChain = &vkLayoutBegin;
+        // Same reasoning as the D3D12 branch's identical field: both eyes
+        // fully overwrite their half every frame, and `initialized` also
+        // gates whether Dawn treats the resource as safe to touch at all.
+        beginDesc.initialized = true;
+        // TEMPORARY DIAGNOSTIC (2026-09-18, see logDawnErrorScope()'s own
+        // comment) -- capped to the first 20 real frames only, since this
+        // runs every frame and the earlier crash reportedly happened
+        // almost immediately once this path was first exercised.
+        static int s_ahbDiagFramesRemaining = 20;
+        const bool diagThisFrame = s_ahbDiagFramesRemaining > 0;
+        if (diagThisFrame) {
+            --s_ahbDiagFramesRemaining;
+            aurora::webgpu::g_device.PushErrorScope(wgpu::ErrorFilter::Validation);
+        }
+        ahbMemory_.BeginAccess(ahbTexture_, &beginDesc);
+        if (diagThisFrame) {
+            logDawnErrorScope("ahbMemory_.BeginAccess");
+        }
+    }
+
+    // The GPU-direct equivalent of encodeEyeCopy() for this branch -- call
+    // once per eye, same call site/timing as the D3D12 branch's
+    // encodeSwapchainCopy() (reused name deliberately, see
+    // beginSwapchainAccessForFrame()'s comment). Pushes the SAME encoder
+    // task type encodeEyeCopy() uses -- encoderTaskCallback() branches on
+    // usesAhbGpuDirect_ to decide whether its tail writes into res.readback
+    // (CPU path) or ahbTexture_ (this path) -- so no second task type/
+    // registration is needed. swapchainIndex is threaded through unused
+    // (kept for call-site parity with the D3D12 branch's identical
+    // signature) -- the actual swapchain image isn't touched until
+    // finishAhbGpuCopy() runs, once per FRAME, not per eye.
+    void encodeSwapchainCopy(const wgpu::Texture& srcTexture, uint32_t eyeIndex, uint32_t swapchainIndex,
+                              uint32_t eyeWidth, uint32_t eyeHeight, uint32_t dstXOffset,
+                              wgpu::TextureFormat format) {
+        ensureCpuCopyBuffers(eyeIndex, eyeWidth, eyeHeight, format);
+
+        if (pendingCopySrc_.size() <= eyeIndex) {
+            pendingCopySrc_.resize(eyeIndex + 1);
+        }
+        pendingCopySrc_[eyeIndex] = srcTexture;
+
+        const CpuCopyTaskPayload payload{
+            .eyeIndex = eyeIndex,
+            .eyeWidth = eyeWidth,
+            .eyeHeight = eyeHeight,
+            .swapchainIndex = swapchainIndex,
+            .dstXOffset = dstXOffset,
+        };
+        static_assert(sizeof(CpuCopyTaskPayload) <= aurora::gfx::InlineDrawPayloadSize,
+                      "CpuCopyTaskPayload too large for inline encoder task payload");
+        aurora::gfx::push_encoder_task(cpuCopyTaskId_, &payload, sizeof(payload));
+    }
+
+    void ensureAhbCopyCmdList() {
+        if (ahbCopyCmdReady_) {
+            return;
+        }
+        VkCommandPoolCreateInfo poolCI{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+        poolCI.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        poolCI.queueFamilyIndex = xrQueueFamilyIndex_;
+        vkCreateCommandPool(xrDevice_, &poolCI, nullptr, &ahbCopyCmdPool_);
+
+        VkCommandBufferAllocateInfo cbAllocInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        cbAllocInfo.commandPool = ahbCopyCmdPool_;
+        cbAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cbAllocInfo.commandBufferCount = 1;
+        vkAllocateCommandBuffers(xrDevice_, &cbAllocInfo, &ahbCopyCmdBuf_);
+
+        VkFenceCreateInfo fenceCI{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        vkCreateFence(xrDevice_, &fenceCI, nullptr, &ahbCopyFence_);
+
+        ahbCopyCmdReady_ = true;
+    }
+
+    // Call ONCE per frame (not per eye -- both eyes already wrote into
+    // their half of the shared ahbTexture_ via encodeSwapchainCopy()
+    // above), from submitFrame(), in place of the normal readbackEyeCopy()
+    // per-eye loop, when usesAhbGpuDirect() is true. width/height are the
+    // full double-wide swapchain dimensions, same values
+    // beginSwapchainAccessForFrame() was called with this frame.
+    void finishAhbGpuCopy(uint32_t swapchainIndex, uint32_t width, uint32_t height) {
+        if (!ahbTexture_) {
+            return; // ensureAhbResources() failed earlier this session -- already logged
+        }
+        ensureAhbCopyCmdList();
+
+        // Closes out this frame's BeginAccess -- required regardless of
+        // whether the fence info below is used (see beginSwapchainAccessForFrame()'s
+        // comment; this bracket must close every frame it opens, same as
+        // the D3D12 branch's swapchainMemory_[index].BeginAccess/EndAccess
+        // pair via endAccessAll()). The returned fence(s) are not consulted
+        // on this first-pass implementation -- see this block's own
+        // top-of-section comment on why a simpler OnSubmittedWorkDone()
+        // wait was used instead.
+        // Chained ChainedStructOut -- Dawn WRITES the layout it's actually
+        // leaving the image in here (see vkLayoutBegin's comment in
+        // beginSwapchainAccessForFrame() for why this matters: it tells us
+        // whether the UNDEFINED->UNDEFINED begin-state assumption there is
+        // actually consistent with what Dawn itself reports on the way
+        // out). Logged, not yet fed back into next frame's BeginAccess --
+        // see that function's own comment for why (matches the XR-side
+        // barrier's existing "always assume UNDEFINED" convention).
+        wgpu::SharedTextureMemoryVkImageLayoutEndState vkLayoutEnd{};
+        wgpu::SharedTextureMemoryEndAccessState endState{};
+        endState.nextInChain = &vkLayoutEnd;
+        // TEMPORARY DIAGNOSTIC (2026-09-18, see logDawnErrorScope()'s own
+        // comment) -- capped to the first 20 real frames, same reasoning
+        // as beginSwapchainAccessForFrame()'s matching wrap.
+        static int s_ahbEndAccessDiagFramesRemaining = 20;
+        const bool diagThisFrame = s_ahbEndAccessDiagFramesRemaining > 0;
+        if (diagThisFrame) {
+            --s_ahbEndAccessDiagFramesRemaining;
+            aurora::webgpu::g_device.PushErrorScope(wgpu::ErrorFilter::Validation);
+        }
+        ahbMemory_.EndAccess(ahbTexture_, &endState);
+        if (diagThisFrame) {
+            logDawnErrorScope("ahbMemory_.EndAccess");
+            char buf[192];
+            duskVrSnprintf(buf, sizeof(buf),
+                        "[dusk::vr::ahbdiag] EndAccess reported oldLayout=%d newLayout=%d\n",
+                        vkLayoutEnd.oldLayout, vkLayoutEnd.newLayout);
+            duskVrLog(buf);
+        }
+
+        // ASYNC SEMAPHORE HANDOFF (2026-09-18, replaces the original
+        // CPU-blocking OnSubmittedWorkDone() poll -- see this section's
+        // top-of-file comment: "NOT attempted this pass... First version
+        // uses a simpler... fix instead", now attempted for real).
+        // endState.fences (populated now that SharedFenceVkSemaphoreOpaqueFD/
+        // SyncFD is enabled at device-creation time -- see gpu.cpp's
+        // feature-request fix) is Dawn's own documented mechanism for
+        // exactly this: "the fence(s) that must be waited on before using
+        // the texture's contents outside of this API." Export the first
+        // one's raw Vulkan semaphore FD, import it into the XR-side
+        // device, and have THIS frame's copy submit wait on it on the GPU
+        // -- no CPU stall at all for this half of the handoff.
+        bool haveGpuWaitSemaphore = false;
+        if (supportsExternalSemaphoreFd_ && endState.fenceCount > 0 && endState.fences != nullptr) {
+            // FOUND 2026-09-18 via a real crash on this exact call:
+            // requesting the SharedFenceVkSemaphoreOpaqueFD feature at
+            // device-creation time (gpu.cpp) does not mean Dawn will
+            // actually EXPORT this specific fence in that same type. A
+            // prior version of this code also requested SharedFenceSyncFD
+            // as a fallback feature, and Dawn's Vulkan backend chose to
+            // export as SyncFD type on this device/driver regardless of
+            // which feature we'd asked for first -- which (a) crashed
+            // once already from chaining the WRONG export-info struct type
+            // (assumed from the requested feature, not the real one), and
+            // (b) crashed AGAIN after that was fixed, from a real fdsan
+            // file-descriptor double-close specific to importing a
+            // SyncFD-exported handle into Vulkan (Dawn's own internal
+            // ownership of that fd number apparently doesn't survive
+            // Vulkan's import taking ownership per spec, for this handle
+            // type specifically -- never fully root-caused without Dawn's
+            // own source). gpu.cpp now ONLY ever requests
+            // SharedFenceVkSemaphoreOpaqueFD (no SyncFD fallback), so this
+            // check should always see that type in practice -- but still
+            // verified here, not assumed, and any OTHER type (should it
+            // ever occur) safely skips straight to the CPU-wait fallback
+            // below rather than importing an unverified handle type.
+            wgpu::SharedFenceExportInfo typeQuery{};
+            endState.fences[0].ExportInfo(&typeQuery);
+
+            int rawFd = -1;
+            VkExternalSemaphoreHandleTypeFlagBits vkHandleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+            if (typeQuery.type == wgpu::SharedFenceType::VkSemaphoreOpaqueFD) {
+                wgpu::SharedFenceVkSemaphoreOpaqueFDExportInfo vkExportInfo{};
+                wgpu::SharedFenceExportInfo exportInfo{};
+                exportInfo.nextInChain = &vkExportInfo;
+                endState.fences[0].ExportInfo(&exportInfo);
+                rawFd = vkExportInfo.handle;
+                vkHandleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+            } else {
+                char buf[128];
+                duskVrSnprintf(buf, sizeof(buf),
+                            "[dusk::vr] finishAhbGpuCopy: unexpected SharedFenceType=%d -- "
+                            "falling back to CPU wait this frame\n",
+                            static_cast<int>(typeQuery.type));
+                duskVrLog(buf);
+            }
+
+            if (rawFd >= 0) {
+                if (ahbDawnCompleteSemaphore_ == VK_NULL_HANDLE) {
+                    VkSemaphoreCreateInfo semCI{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+                    vkCreateSemaphore(xrDevice_, &semCI, nullptr, &ahbDawnCompleteSemaphore_);
+                }
+                if (ahbDawnCompleteSemaphore_ != VK_NULL_HANDLE) {
+                    VkImportSemaphoreFdInfoKHR importInfo{VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR};
+                    importInfo.semaphore = ahbDawnCompleteSemaphore_;
+                    // TEMPORARY: this FD represents one specific frame's
+                    // one-shot signal -- after being waited on by this
+                    // frame's vkQueueSubmit below, the semaphore reverts
+                    // to its original (unsignaled) payload, ready for the
+                    // NEXT frame's fresh import into the SAME object. See
+                    // ahbDawnCompleteSemaphore_'s own declaration comment
+                    // for why no pool is needed.
+                    importInfo.flags = VK_SEMAPHORE_IMPORT_TEMPORARY_BIT;
+                    importInfo.handleType = vkHandleType;
+                    importInfo.fd = rawFd;
+                    // vkImportSemaphoreFdKHR is NOT directly linkable
+                    // through Android's Vulkan loader (unlike core
+                    // functions or a handful of vendor extensions this
+                    // file already calls directly, e.g.
+                    // vkGetAndroidHardwareBufferPropertiesANDROID) --
+                    // confirmed the hard way: this call linked fine
+                    // syntactically but failed at LINK time with
+                    // "undefined symbol: vkImportSemaphoreFdKHR". Must be
+                    // resolved dynamically via vkGetDeviceProcAddr, same
+                    // as any non-core Vulkan extension on this platform.
+                    // Resolved once and cached (static local, keyed by
+                    // xrDevice_ implicitly since there's only ever one XR
+                    // session/device for the process's lifetime).
+                    static PFN_vkImportSemaphoreFdKHR pfnImportSemaphoreFdKHR = nullptr;
+                    if (!pfnImportSemaphoreFdKHR) {
+                        pfnImportSemaphoreFdKHR = reinterpret_cast<PFN_vkImportSemaphoreFdKHR>(
+                            vkGetDeviceProcAddr(xrDevice_, "vkImportSemaphoreFdKHR"));
+                    }
+                    // On success, Vulkan takes ownership of the FD -- do
+                    // NOT close it ourselves either way (on failure, the
+                    // FD is still ours and technically leaks here, but a
+                    // failure on this path is already unexpected/logged
+                    // and this is a diagnostic-era first pass, not a
+                    // steady-state error case to optimize for).
+                    haveGpuWaitSemaphore = pfnImportSemaphoreFdKHR != nullptr &&
+                                           pfnImportSemaphoreFdKHR(xrDevice_, &importInfo) == VK_SUCCESS;
+                    if (!haveGpuWaitSemaphore) {
+                        duskVrLog("[dusk::vr] finishAhbGpuCopy: vkImportSemaphoreFdKHR "
+                                  "unavailable/failed -- falling back to CPU wait this frame\n");
+                    }
+                }
+            }
+        }
+        if (!haveGpuWaitSemaphore) {
+            // Fallback: the original CPU-blocking wait, only when the
+            // GPU-side handoff above wasn't available this frame (missing
+            // fence, export failed, import failed, or the XR device never
+            // got VK_KHR_external_semaphore_fd at all) -- keeps this path
+            // correct regardless of whether the async handoff pans out on
+            // every driver.
+            bool workDone = false;
+            const auto future = aurora::webgpu::g_queue.OnSubmittedWorkDone(
+                wgpu::CallbackMode::WaitAnyOnly,
+                [&workDone](wgpu::QueueWorkDoneStatus /*status*/, wgpu::StringView /*message*/) {
+                    workDone = true;
+                });
+            aurora::webgpu::g_instance.WaitAny(future, 5000000000);
+            if (!workDone) {
+                duskVrLog("[dusk::vr] finishAhbGpuCopy: OnSubmittedWorkDone timed out -- skipping this frame's swapchain copy\n");
+                return;
+            }
+        }
+
+        vkResetCommandPool(xrDevice_, ahbCopyCmdPool_, 0);
+        VkCommandBufferBeginInfo cbBegin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        cbBegin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(ahbCopyCmdBuf_, &cbBegin);
+
+        VkImage dstImage = swapchainImages_[swapchainIndex].image;
+
+        VkImageSubresourceRange colorRange{};
+        colorRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        colorRange.levelCount = 1;
+        colorRange.layerCount = 1;
+
+        // Two barriers this frame: the AHB-imported source image goes
+        // UNDEFINED -> TRANSFER_SRC (first real use -- content is whatever
+        // Dawn's compute pass just wrote, discarding any prior layout is
+        // correct since we're about to read the whole thing), and the
+        // swapchain destination goes UNDEFINED -> TRANSFER_DST -> (after
+        // the copy) COLOR_ATTACHMENT_OPTIMAL, same final layout choice
+        // already made (and flagged as unverified against the runtime's
+        // real expectation) by readbackEyeCopy()'s existing Vulkan branch.
+        VkImageMemoryBarrier srcToTransfer{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        srcToTransfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        srcToTransfer.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        srcToTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        srcToTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        srcToTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        srcToTransfer.image = xrAhbImage_;
+        srcToTransfer.subresourceRange = colorRange;
+
+        VkImageMemoryBarrier dstToTransfer{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        dstToTransfer.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        dstToTransfer.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        dstToTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        dstToTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        dstToTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        dstToTransfer.image = dstImage;
+        dstToTransfer.subresourceRange = colorRange;
+
+        VkImageMemoryBarrier toTransferBarriers[] = {srcToTransfer, dstToTransfer};
+        vkCmdPipelineBarrier(ahbCopyCmdBuf_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2,
+                              toTransferBarriers);
+
+        VkImageCopy region{};
+        region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.srcSubresource.layerCount = 1;
+        region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.dstSubresource.layerCount = 1;
+        region.dstOffset = {0, 0, 0};
+        region.extent = {width, height, 1};
+        vkCmdCopyImage(ahbCopyCmdBuf_, xrAhbImage_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dstImage,
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+        VkImageMemoryBarrier dstToPresent = dstToTransfer;
+        dstToPresent.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        dstToPresent.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        dstToPresent.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        dstToPresent.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        vkCmdPipelineBarrier(ahbCopyCmdBuf_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                              VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr,
+                              1, &dstToPresent);
+
+        vkEndCommandBuffer(ahbCopyCmdBuf_);
+
+        VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &ahbCopyCmdBuf_;
+        // Real GPU-side wait for Dawn's write, replacing the CPU-blocking
+        // OnSubmittedWorkDone() poll above whenever haveGpuWaitSemaphore is
+        // true -- see this function's own top comment. TRANSFER_BIT covers
+        // the barrier/copy this submission actually performs against the
+        // AHB-imported image (its first real use each frame).
+        const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        if (haveGpuWaitSemaphore) {
+            submitInfo.waitSemaphoreCount = 1;
+            submitInfo.pWaitSemaphores = &ahbDawnCompleteSemaphore_;
+            submitInfo.pWaitDstStageMask = &waitStage;
+        }
+        vkResetFences(xrDevice_, 1, &ahbCopyFence_);
+        vkQueueSubmit(xrQueue_, 1, &submitInfo, ahbCopyFence_);
+        vkWaitForFences(xrDevice_, 1, &ahbCopyFence_, VK_TRUE, UINT64_MAX);
+    }
+#endif  // DUSK_VR_XR_GRAPHICS_VULKAN
+
     // Call once per eye AFTER aurora_end_frame() has returned for this
     // frame -- see the WHY THIS IS SPLIT IN TWO note above. Same
     // eyeIndex/swapchainIndex/eyeWidth/eyeHeight/dstXOffset/format as the
@@ -1144,6 +1769,15 @@ public:
         if (usesGpuDirectSwapchainCopy()) {
             return;
         }
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+        // Same reasoning, Vulkan/AHardwareBuffer GPU-direct path (see
+        // usesAhbGpuDirect()'s comment) -- vr_main.cpp's submitFrame()
+        // calls finishAhbGpuCopy() ONCE per frame instead of this
+        // function's normal per-eye loop when this is true.
+        if (usesAhbGpuDirect()) {
+            return;
+        }
+#endif
         ensureCpuCopyCmdList();
         auto& res = cpuCopyBuffers_[eyeIndex];
 
@@ -1626,6 +2260,33 @@ private:
                 mutableCmd.CopyBufferToTexture(&srcBuf, &dstTex, &extent);
                 return;
             }
+#else
+            // AHARDWAREBUFFER GPU-DIRECT PATH (see usesAhbGpuDirect()'s and
+            // ensureAhbResources()'s comments) -- same shape as the D3D12
+            // branch above, just targeting ahbTexture_ (a separate,
+            // interop-friendly staging texture Dawn owns) instead of the
+            // swapchain texture directly, since Dawn has no way to wrap the
+            // real swapchain image on this platform at all. The actual
+            // swapchain image is written later, once per frame (not here,
+            // not per eye), by finishAhbGpuCopy()'s raw Vulkan
+            // vkCmdCopyImage on the XR-side device.
+            if (self->usesAhbGpuDirect()) {
+                wgpu::TexelCopyBufferInfo srcBuf{};
+                srcBuf.buffer = res.gammaStorage;
+                srcBuf.layout.offset = 0;
+                srcBuf.layout.bytesPerRow = res.bytesPerRow;
+                srcBuf.layout.rowsPerImage = p.eyeHeight;
+
+                wgpu::TexelCopyTextureInfo dstTex{};
+                dstTex.texture = self->ahbTexture_;
+                dstTex.mipLevel = 0;
+                dstTex.origin = {p.dstXOffset, 0, 0};
+                dstTex.aspect = wgpu::TextureAspect::All;
+
+                wgpu::Extent3D extent{p.eyeWidth, p.eyeHeight, 1};
+                mutableCmd.CopyBufferToTexture(&srcBuf, &dstTex, &extent);
+                return;
+            }
 #endif
 
             mutableCmd.CopyBufferToBuffer(res.gammaStorage, 0, res.readback, 0,
@@ -1806,6 +2467,38 @@ public:
         return sameDeviceAsAurora_ && useGammaComputePath_ && swapchainResourceFormatUsable_;
     }
 
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+    // Vulkan/Android counterpart of sameDeviceAsAurora_/usesGpuDirectSwapchainCopy()
+    // above -- see the AHARDWAREBUFFER GPU-DIRECT SWAPCHAIN-COPY PATH
+    // comment (near ensureAhbResources()) for the full "why this exists
+    // and why it's a different mechanism than the D3D12 branch's" writeup.
+    // Set once in vr_main.cpp's startup() when BOTH sides independently
+    // support the AHardwareBuffer interop: Dawn's own adapter
+    // (aurora::webgpu::g_sharedTextureMemoryAHardwareBufferSupported) and
+    // the XR-side device's actually-enabled Vulkan extension
+    // (vr_xr::XrGraphicsDevice::supportsAndroidHardwareBuffer, from
+    // createXrGraphicsDevice()) -- same "both sides must independently
+    // support it" shape as the D3D12 path's adaptersMatch+
+    // g_sharedTextureMemoryD3D12Supported pair. Also requires
+    // useGammaComputePath_, same reasoning as usesGpuDirectSwapchainCopy()
+    // above -- the rare PackR10G10B10A2 fallback format keeps the old CPU
+    // path unconditionally on this branch too.
+    void setUsesAhbGpuDirect(bool v) { usesAhbGpuDirect_ = v; }
+    bool usesAhbGpuDirect() const { return usesAhbGpuDirect_ && useGammaComputePath_; }
+
+    // Set once at startup (vr_main.cpp's startup(), from
+    // vr_xr::XrGraphicsDevice::supportsExternalSemaphoreFd) -- whether the
+    // XR-side device actually got VK_KHR_external_semaphore_fd enabled.
+    // Read by finishAhbGpuCopy() to decide whether the real async
+    // semaphore handoff (Dawn's exported SharedFence imported as a
+    // VkSemaphore the copy's own vkQueueSubmit waits on) is available, or
+    // whether to fall back to the original CPU-blocking
+    // OnSubmittedWorkDone() poll -- same "detect, don't assume, fail safe
+    // to the known-correct path" discipline as every other GPU-direct
+    // feature-gate in this file.
+    void setSupportsExternalSemaphoreFd(bool v) { supportsExternalSemaphoreFd_ = v; }
+#endif
+
 private:
 
     // Live-adjustable gamma exponent for every NON-SteamVR runtime (see
@@ -1950,6 +2643,26 @@ private:
     VkDevice xrDevice_ = VK_NULL_HANDLE;
     VkQueue xrQueue_ = VK_NULL_HANDLE;
     uint32_t xrQueueFamilyIndex_ = 0;
+
+    // --- AHardwareBuffer GPU-direct swapchain-copy path state -- see
+    // ensureAhbResources()'s comment for the full mechanism. ---
+    bool usesAhbGpuDirect_ = false;
+    bool supportsExternalSemaphoreFd_ = false;
+    // Reused every frame -- see finishAhbGpuCopy()'s comment for why a
+    // single persistent semaphore (re-imported each frame, not a pool) is
+    // safe here: it's imported, waited on by that SAME frame's
+    // vkQueueSubmit, and consumed/reverted by that wait before the next
+    // frame ever re-imports into it -- no cross-frame overlap.
+    VkSemaphore ahbDawnCompleteSemaphore_ = VK_NULL_HANDLE;
+    AHardwareBuffer* ahb_ = nullptr;
+    wgpu::SharedTextureMemory ahbMemory_;
+    wgpu::Texture ahbTexture_;
+    VkImage xrAhbImage_ = VK_NULL_HANDLE;
+    VkDeviceMemory xrAhbMemory_ = VK_NULL_HANDLE;
+    VkCommandPool ahbCopyCmdPool_ = VK_NULL_HANDLE;
+    VkCommandBuffer ahbCopyCmdBuf_ = VK_NULL_HANDLE;
+    VkFence ahbCopyFence_ = VK_NULL_HANDLE;
+    bool ahbCopyCmdReady_ = false;
 #else
     // --- fence sync state ---
     Microsoft::WRL::ComPtr<ID3D12Device> xrDevice_;

@@ -734,6 +734,44 @@ bool startup() {
         g_ownedSession = std::make_unique<Session>(boot.instance, boot.systemId, session, localSpace, gfx.device, gfx.commandQueue);
 #endif
         g_ownedSession->setSameDeviceAsAurora(reusedAuroraDevice);
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+        // AHardwareBuffer GPU-direct swapchain-copy path (see Session::
+        // usesAhbGpuDirect_'s comment) -- requires BOTH sides to
+        // independently support the interop: Dawn's own adapter
+        // (aurora::webgpu::g_sharedTextureMemoryAHardwareBufferSupported,
+        // requested at Dawn device-creation time in gpu.cpp) and the
+        // XR-side device's actually-enabled Vulkan extension
+        // (gfx.supportsAndroidHardwareBuffer, from createXrGraphicsDevice()
+        // above). Same "both sides must independently support it, don't
+        // assume" shape as the D3D12 path's adaptersMatch+
+        // g_sharedTextureMemoryD3D12Supported pair.
+        const bool ahbSupported =
+            aurora::webgpu::g_sharedTextureMemoryAHardwareBufferSupported && gfx.supportsAndroidHardwareBuffer;
+        g_ownedSession->setUsesAhbGpuDirect(ahbSupported);
+        {
+            char msg[256];
+            duskVrSnprintf(msg, sizeof(msg),
+                        "[dusk::vr::startup] AHardwareBuffer GPU-direct swapchain path: "
+                        "dawnSupported=%d xrDeviceSupported=%d -> %s\n",
+                        aurora::webgpu::g_sharedTextureMemoryAHardwareBufferSupported,
+                        gfx.supportsAndroidHardwareBuffer, ahbSupported ? "ENABLED" : "disabled (falling back to CPU readback)");
+            duskVrLog(msg);
+        }
+        // Async semaphore-gated handoff for the AHB path above (2026-09-18,
+        // see Session::finishAhbGpuCopy()'s own comment) -- independent
+        // gate from ahbSupported itself: even if the AHB path is disabled
+        // entirely, this flag is harmless to set (never consulted unless
+        // usesAhbGpuDirect() is also true).
+        g_ownedSession->setSupportsExternalSemaphoreFd(gfx.supportsExternalSemaphoreFd);
+        {
+            char msg[160];
+            duskVrSnprintf(msg, sizeof(msg),
+                        "[dusk::vr::startup] AHardwareBuffer async semaphore handoff: "
+                        "xrDeviceSupportsExternalSemaphoreFd=%d\n",
+                        gfx.supportsExternalSemaphoreFd);
+            duskVrLog(msg);
+        }
+#endif
         // Real "is this SteamVR" signal for Session::effectiveGammaExponent()
         // -- see isSteamVr_'s own comment (vr_xr_submit.hpp) for why this can
         // no longer be inferred from which swapchain format ended up chosen.
@@ -2019,15 +2057,22 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     // frame, so BeginAccess must only be opened once, not once per eye.
     // Full (double-wide) dimensions, matching exactly what startup()'s
     // createSwapchain(eyeWidth * 2, eyeHeight, ...) call actually allocated.
+    // beginSwapchainAccessForFrame() now has a real implementation on BOTH
+    // branches (D3D12: wraps the real swapchain texture directly, see
+    // sameDeviceAsAurora_'s comment; Vulkan: wraps an AHardwareBuffer
+    // staging texture instead, see usesAhbGpuDirect_'s/ensureAhbResources()'s
+    // comment for why Dawn can't touch the real swapchain image on this
+    // platform) -- same function name on both, different gating flag per
+    // branch since the two GPU-direct mechanisms are independently
+    // detected/enabled.
 #if !DUSK_VR_XR_GRAPHICS_VULKAN
-    // beginSwapchainAccessForFrame() only exists on the D3D12 build of
-    // Session (see vr_xr_submit.hpp's matching #if !DUSK_VR_XR_GRAPHICS_VULKAN
-    // guard around its definition) -- usesGpuDirectSwapchainCopy() itself
-    // compiles everywhere and just returns false on Vulkan (sameDeviceAsAurora_
-    // is never set true there), but calling this method unconditionally would
-    // still fail to COMPILE on Android/Vulkan, where the method doesn't exist
-    // on the class at all.
     if (g_session->usesGpuDirectSwapchainCopy()) {
+        g_session->beginSwapchainAccessForFrame(
+            swapchainIndex, configViews[0].recommendedImageRectWidth * 2,
+            configViews[0].recommendedImageRectHeight);
+    }
+#else
+    if (g_session->usesAhbGpuDirect()) {
         g_session->beginSwapchainAccessForFrame(
             swapchainIndex, configViews[0].recommendedImageRectWidth * 2,
             configViews[0].recommendedImageRectHeight);
@@ -2262,11 +2307,19 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         // (encodeEyeCopy() + submitFrame()'s later readbackEyeCopy()) with
         // one same-device GPU copy straight into the swapchain image,
         // already BeginAccess'd once this frame above.
+        // encodeSwapchainCopy() now has a real implementation on both
+        // branches (see beginSwapchainAccessForFrame()'s call site above
+        // for the same reasoning) -- D3D12 writes straight into the real
+        // swapchain texture; Vulkan writes into an AHardwareBuffer staging
+        // texture instead (see usesAhbGpuDirect_'s comment).
 #if !DUSK_VR_XR_GRAPHICS_VULKAN
-        // encodeSwapchainCopy() only exists on the D3D12 build of Session --
-        // see the matching #if guard on beginSwapchainAccessForFrame()'s call
-        // site above for why this can't just be a runtime-only check.
         if (g_session->usesGpuDirectSwapchainCopy()) {
+            g_session->encodeSwapchainCopy(
+                targets.colorTexture, eye, swapchainIndex, eyeParams.width, eyeParams.height,
+                eye * eyeParams.width, aurora::gfx::color_format());
+        } else
+#else
+        if (g_session->usesAhbGpuDirect()) {
             g_session->encodeSwapchainCopy(
                 targets.colorTexture, eye, swapchainIndex, eyeParams.width, eyeParams.height,
                 eye * eyeParams.width, aurora::gfx::color_format());
@@ -2407,6 +2460,26 @@ void submitFrame() {
         g_session->readbackEyeCopy(eye.eyeIndex, eye.swapchainIndex, eye.eyeWidth, eye.eyeHeight,
                                     eye.dstXOffset, aurora::gfx::color_format());
     }
+
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+    // AHARDWAREBUFFER GPU-DIRECT PATH (see Session::usesAhbGpuDirect_'s
+    // comment): readbackEyeCopy() above already no-op'd for every eye on
+    // this path (see its own early-return) -- do the ONE real, whole-frame
+    // GPU-side copy here instead, using whichever eye this frame actually
+    // rendered (both eyes share the same swapchainIndex/eyeHeight; the
+    // width passed must be the FULL double-wide image, not one eye's
+    // half, matching exactly what beginSwapchainAccessForFrame() was
+    // called with earlier in tick()).
+    if (g_session->usesAhbGpuDirect()) {
+        for (const auto& eye : g_pendingSubmit.eyes) {
+            if (!eye.valid) {
+                continue;
+            }
+            g_session->finishAhbGpuCopy(eye.swapchainIndex, eye.eyeWidth * 2, eye.eyeHeight);
+            break;
+        }
+    }
+#endif
 
     g_session->endAccessAll();
 

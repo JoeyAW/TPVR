@@ -38,7 +38,10 @@
 #include "m_Do/m_Do_mtx.h"
 
 #if TARGET_PC
+#include "dusk/game_clock.h"
+#include "dusk/interp/user_interface.h"
 #include "dusk/menu_pointer.h"
+#include "dusk/utilities.hpp"
 #endif
 
 typedef void (dMenu_Collect2D_c::*initFunc)();
@@ -101,11 +104,44 @@ dMenu_Collect2D_c::~dMenu_Collect2D_c() {
 }
 
 #if TARGET_PC
+static dusk::utils::PaneCache mpScreenPanes[] = {
+    {MULTI_CHAR('sa_tex_n'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('op_tex_n'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('heart_n'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('wolf_n'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('item_0_n'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('item_1_n'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('item_2_n'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('fish_3_n'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('lett_4_n'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('maki_5_n'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('fuku_n0'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('fuku_n1'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('fuku_n2'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('tate_n0'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('tate_n1'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('ken_n0'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('ken_n1'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('kabu_6n'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('t_t00'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('f_t00'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('itemn_n'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('infotxtn'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('sa_op_n'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('title_n'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('menu_n'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('w_er_n'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('center_n'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('info_n'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('lavel_n'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('modelbgn'), 0.0f, 0.0f, false},
+};
+
 void dMenu_Collect2D_c::menuCollectWide() {
     static bool cachedPanes = false;
     // Get pre-scale values for each pane
     if (!cachedPanes) {
-        for (PaneCache& entry : mpScreenPanes) {
+        for (dusk::utils::PaneCache& entry : mpScreenPanes) {
             J2DPane* pane = mpScreen->search(entry.tag);
             if (!entry.cached) {
                 entry.origTransX = pane->getTranslateX();
@@ -119,7 +155,7 @@ void dMenu_Collect2D_c::menuCollectWide() {
     // Reset all panes
     mpScreen->scale(1.0f, 1.0f);
     mpScreen->translate(0.0f, 0.0f);
-    for (PaneCache& entry : mpScreenPanes) {
+    for (dusk::utils::PaneCache& entry : mpScreenPanes) {
         J2DPane* pane = mpScreen->search(entry.tag);
         pane->scale(1.0f, 1.0f);
         pane->translate(entry.origTransX, entry.origTransY);
@@ -965,10 +1001,14 @@ void dMenu_Collect2D_c::animationSet() {
 
 void dMenu_Collect2D_c::btkAnimeLoop0(J2DAnmTextureSRTKey* i_SRTKey) {
     if (i_SRTKey != NULL) {
+#if TARGET_PC
+        dusk::vdt::advance_looping_frame(mFrame, 1.0f, i_SRTKey->getFrameMax());
+#else
         mFrame++;
         if (mFrame >= i_SRTKey->getFrameMax()) {
             mFrame -= i_SRTKey->getFrameMax();
         }
+#endif
         i_SRTKey->setFrame(mFrame);
     } else {
         mFrame = 0.0f;
@@ -982,6 +1022,11 @@ void dMenu_Collect2D_c::btkAnimeLoop0(J2DAnmTextureSRTKey* i_SRTKey) {
 }
 
 void dMenu_Collect2D_c::setBackAlpha() {
+#if TARGET_PC
+    const f32 target = mProcess >= 1 && mProcess <= 18 ? 1.0f : 0.0f;
+    dusk::vdt::advance_toward_frame(mBackAlpha, target, 0.2f);
+    mpBlackTex->setAlpha(mBackAlpha * 150.0f);
+#else
     f32 alpha = mpBlackTex->getAlpha() / 150.0f;
 
     switch (mProcess) {
@@ -1022,6 +1067,7 @@ void dMenu_Collect2D_c::setBackAlpha() {
     }
 
     mpBlackTex->setAlpha(alpha * 150.0f);
+#endif
 }
 
 // Not sure if this works without gotos
@@ -2401,17 +2447,22 @@ void dMenu_Collect2D_c::_move() {
     if (mProcess != last_process) {
         (this->*init[mProcess])();
     }
+#if !TARGET_PC
     btkAnimeLoop0(mpAnmKey);
     mpScreen->animation();
     setBackAlpha();
+#endif
     setHIO(false);
 }
 
 
 void dMenu_Collect2D_c::_draw() {
-    #if TARGET_PC
+#if TARGET_PC
+    btkAnimeLoop0(mpAnmKey);
+    mpScreen->animation();
+    setBackAlpha();
     menuCollectWide();
-    #endif
+#endif
 
     J2DGrafContext* grafPort = dComIfGp_getCurrentGrafPort();
     grafPort->setup2D();
@@ -3022,7 +3073,7 @@ DUSK_GAME_DATA f32 dMenu_Collect3D_c::mViewOffsetY = -100.0f;
 
 void dMenu_Collect3D_c::setupItem3D(Mtx param_0) {
     GXSetViewport(0.0f, mViewOffsetY, FB_WIDTH, FB_HEIGHT, 0.0f, 1.0f);
-    mViewOffsetY = -100.0f;
+    IF_NOT_DUSK(mViewOffsetY = -100.0f);
     Mtx44 projection;
     C_MTXPerspective(projection, 45.0f, mDoGph_gInf_c::getAspect(), 1.0f, 100000.0f);
     GXSetProjection(projection, GX_PERSPECTIVE);
@@ -3123,6 +3174,8 @@ void dMenu_Collect_c::_move() {
 
 void dMenu_Collect_c::draw() {
     dComIfGd_set2DOpa(mpCollect2D);
+    IF_DUSK_BLOCK(dusk::game_clock::is_sim_frame())
     mpCollect3D->draw();
+    IF_DUSK_BLOCK_END
     mpCollect2D->drawTop();
 }

@@ -77,7 +77,6 @@ public:
     virtual void draw();
     virtual ~daAlink_blur_c() {}
 
-    // private:
     /* 0x010 */ ResTIMG* m_blurTex;
     /* 0x014 */ int field_0x14;
     /* 0x018 */ u8 field_0x18[4];
@@ -113,7 +112,6 @@ public:
 
     void onAppearFlg() { mAppearFlg = true; }
 
-private:
     /* 0x04 */ s16 mHitFlg;
     /* 0x06 */ s16 mAppearFlg;
     /* 0x08 */ f32 mKeepMinY;
@@ -126,7 +124,11 @@ public:
     BOOL create();
     void update();
     virtual void draw();
+#if TARGET_PC
+    virtual ~daAlink_lockCursor_c();
+#else
     virtual ~daAlink_lockCursor_c() {}
+#endif
 
     void initFrame() {
         field_0x4 = 0;
@@ -4700,29 +4702,6 @@ public:
     bool checkAimContext();
     bool checkAimInputContext();
 
-    void onIronBallChainInterpCallback();
-
-    static const int IRON_BALL_CHAIN_COUNT = 102;
-    cXyz mIBChainInterpPrevPos[IRON_BALL_CHAIN_COUNT];
-    cXyz mIBChainInterpCurrPos[IRON_BALL_CHAIN_COUNT];
-    csXyz mIBChainInterpPrevAngle[IRON_BALL_CHAIN_COUNT];
-    csXyz mIBChainInterpCurrAngle[IRON_BALL_CHAIN_COUNT];
-    cXyz mIBChainInterpPrevHandRoot;
-    cXyz mIBChainInterpCurrHandRoot;
-    bool mIBChainInterpPrevValid;
-    bool mIBChainInterpCurrValid;
-
-    cXyz mHsChainInterpPrevTop;
-    cXyz mHsChainInterpCurrTop;
-    cXyz mHsChainInterpPrevRoot;
-    cXyz mHsChainInterpCurrRoot;
-    cXyz mHsChainInterpPrevSubRoot;
-    cXyz mHsChainInterpCurrSubRoot;
-    cXyz mHsChainInterpPrevSubTop;
-    cXyz mHsChainInterpCurrSubTop;
-    bool mHsChainInterpPrevValid;
-    bool mHsChainInterpCurrValid;
-
     bool mIsRollstab = false;
 #endif
 };  // Size: 0x385C
@@ -8591,8 +8570,10 @@ struct daAlink_cutHorseParamTbl {
     /* 0xA */ u8 m_cutType;
 };  // Size: 0xC
 
+#if !TARGET_PC
 inline BOOL dComIfGs_isTransformLV(int i_no);
 inline BOOL dComIfGs_isEventBit(const u16);
+#endif
 
 static fopAc_ac_c* daAlink_searchPortal(fopAc_ac_c* i_actor, void* i_data);
 static fopAc_ac_c* daAlink_searchCanoe(fopAc_ac_c* i_actor, void* i_data);

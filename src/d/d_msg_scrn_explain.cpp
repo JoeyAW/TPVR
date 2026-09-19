@@ -14,7 +14,10 @@
 #include <cstdio>
 #include <cstring>
 
+#if TARGET_PC
+#include "dusk/interp/user_interface.h"
 #include "dusk/version.hpp"
+#endif
 
 #if TARGET_PC || VERSION == VERSION_GCN_JPN
 #define STR_BUF_LEN 528
@@ -324,6 +327,7 @@ dMsgScrnExplain_c::~dMsgScrnExplain_c() {
 void dMsgScrnExplain_c::move() {
     u8 currentStatus = mStatus;
 
+#if !TARGET_PC
     f32 y_offset = 0.0f;
     if (field_0x66 == 2) {
         y_offset = -35.0f;
@@ -333,6 +337,7 @@ void dMsgScrnExplain_c::move() {
         mpRoot_c[i]->paneTrans(field_0x48 + g_MsgObject_HIO_c.mChoicePos[0][6],
                                field_0x4c + g_MsgObject_HIO_c.mBoxPos[0][6] + y_offset);
     }
+#endif
 
     (this->*move_process[mStatus])();
 
@@ -344,7 +349,29 @@ void dMsgScrnExplain_c::move() {
                                      g_MsgObject_HIO_c.mBoxTalkScaleY);
 }
 
+#if TARGET_PC
+void dMsgScrnExplain_c::presentAnims() {
+    if (mStatus == STATUS_OPEN_e || mStatus == STATUS_CLOSE_e) {
+        dusk::vdt::advance_toward_frame(field_0x5a, mStatus == STATUS_OPEN_e ? 5.0f : 0.0f, 1.0f);
+        field_0x48 = FB_WIDTH_BASE * getAlphaRatio();
+        for (int i = 0; i < 2; i++) {
+            mpRoot_c[i]->setAlphaRate(1.0f - getAlphaRatio());
+        }
+        if (mpBackTex != NULL) {
+            mpBackTex->setAlpha((1.0f - getAlphaRatio()) * 150.0f);
+        }
+    }
+
+    const f32 y_offset = field_0x66 == 2 ? -35.0f : 0.0f;
+    for (int i = 0; i < 2; i++) {
+        mpRoot_c[i]->paneTrans(field_0x48 + g_MsgObject_HIO_c.mChoicePos[0][6],
+                               field_0x4c + g_MsgObject_HIO_c.mBoxPos[0][6] + y_offset);
+    }
+}
+#endif
+
 void dMsgScrnExplain_c::draw(J2DOrthoGraph* i_graf) {
+    IF_DUSK(presentAnims());
     if (mStatus == STATUS_WAIT_e || mStatus == STATUS_OPEN_REQ_e) {
         return;
     }
@@ -387,6 +414,7 @@ void dMsgScrnExplain_c::draw(J2DOrthoGraph* i_graf) {
 
         mpSelect_c->translate(486.0f + g_MsgObject_HIO_c.mChoicePos[0][7],
                               209.0f + g_MsgObject_HIO_c.mBoxPos[0][7] + y_offset);
+        IF_DUSK(mpSelect_c->presentAnims());
         mpSelect_c->draw(0.0f, 0.0f);
     }
 
@@ -443,7 +471,7 @@ void dMsgScrnExplain_c::open_init() {
 }
 
 void dMsgScrnExplain_c::open_proc() {
-    field_0x5a++;
+    IF_NOT_DUSK(field_0x5a++);
     if (field_0x5a >= 5) {
         field_0x5a = 5;
         if (field_0x64 == 1 || field_0x64 == 2) {
@@ -625,7 +653,7 @@ void dMsgScrnExplain_c::close_proc() {
         iVar1 = true;
     }
 
-    field_0x5a--;
+    IF_NOT_DUSK(field_0x5a--);
     if (field_0x5a <= 0) {
         field_0x5a = 0;
         if (iVar1) {

@@ -1,15 +1,16 @@
 #include "JSystem/JSystem.h" // IWYU pragma: keep
 
-#include "JSystem/J3DGraphBase/J3DFifo.h"
 #include "JSystem/J3DGraphBase/J3DSys.h"
 #include "JSystem/J3DGraphBase/J3DTevs.h"
 #include "JSystem/J3DGraphBase/J3DTexture.h"
-#include "helpers/gx_helper.h"
+#include "JSystem/J3DGraphBase/J3DFifo.h"
 #include "global.h"
-#include "tracy/Tracy.hpp"
 
 #if TARGET_PC
-#include "dusk/frame_interpolation.h"
+#include "dusk/interp/frame_interpolation.h"
+#include "helpers/gx_helper.h"
+
+#include <tracy/Tracy.hpp>
 #endif
 
 DUSK_GAME_DATA J3DSys j3dSys;
@@ -23,9 +24,9 @@ DUSK_GAME_DATA Vec J3DSys::mParentS;
 DUSK_GAME_DATA J3DTexCoordScaleInfo J3DSys::sTexCoordScaleTable[8];
 
 #if TARGET_PC // Original game bug, array is too small.
-static u8 NullTexData[0x20] ATTRIBUTE_ALIGN(32) = {0};
+ATTRIBUTE_ALIGN(32) static u8 NullTexData[0x20] = {0};
 #else
-static u8 NullTexData[0x10] ATTRIBUTE_ALIGN(32) = {0};
+ATTRIBUTE_ALIGN(32) static u8 NullTexData[0x10] = {0};
 #endif
 
 static Mtx j3dIdentityMtx = {
@@ -378,7 +379,7 @@ void J3DSys::reinitPixelProc() {
 #if TARGET_PC
 void J3DSys::setViewMtx(const Mtx m) {
     Mtx patched;
-    if (dusk::frame_interp::lookup_replacement(m, patched)) {
+    if (dusk::interp::lookup_replacement(m, patched)) {
         m = patched;
     }
     MTXCopy(m, mViewMtx);

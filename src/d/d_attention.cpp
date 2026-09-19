@@ -164,6 +164,7 @@ dAttention_c::dAttention_c(fopAc_ac_c* i_player, u32 i_padNo) {
     mPadNo = i_padNo;
 
     mLockTargetID = fpcM_ERROR_PROCESS_ID_e;
+    IF_DUSK(mTargetActorID = fpcM_ERROR_PROCESS_ID_e);
     field_0x32e = 0;
     field_0x32f = 0;
 
@@ -1455,6 +1456,13 @@ if (dusk::getSettings().game.recordingMode) {
             }
             #endif
 
+#if TARGET_PC
+            if (mTargetActorID != fopAcM_GetID(lockon_actor) ||
+                (fopAcM_GetName(lockon_actor) == fpcNm_Tag_Wljump_e &&
+                 mDrawAttnPos != lockon_actor->attention_info.position)) {
+                draw[0].mModel[draw[0].mDrawType]->forgetMtx();
+            }
+#endif
             draw[0].draw(lockon_actor->attention_info.position, inv_m);
 
             if (mLockonCount >= 2 && draw[1].field_0x173 == 2) {
@@ -1483,6 +1491,12 @@ if (dusk::getSettings().game.recordingMode) {
             fopAc_ac_c* actor = fopAcM_SearchByID(mTargetActorID);
 
             if (actor != NULL) {
+#if TARGET_PC
+                if (fopAcM_GetName(actor) == fpcNm_Tag_Wljump_e &&
+                    mDrawAttnPos != actor->attention_info.position) {
+                    draw[0].mModel[draw[0].mDrawType]->forgetMtx();
+                }
+#endif
                 draw[0].draw(actor->attention_info.position, inv_m);
                 mDrawAttnPos = actor->attention_info.position;
             } else {
@@ -1506,6 +1520,7 @@ void dAttention_c::lockSoundStart(u32 i_sfxID) {
 
 void dAttDraw_c::setAnm(u8 i_drawType, f32 i_anmSpeed) {
     mDrawType = i_drawType;
+    IF_DUSK(mModel[mDrawType]->forgetMtx());
     mNoticeCursorBck[mDrawType].reset();
     mNoticeCursorBck[mDrawType].setPlaySpeed(i_anmSpeed);
     mNoticeCursorBpk[mDrawType].reset();

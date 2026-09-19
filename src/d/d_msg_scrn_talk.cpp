@@ -20,10 +20,10 @@
 #include "JSystem/J2DGraph/J2DScreen.h"
 #include <cstring>
 
-#include "dusk/version.hpp"
-
 #if TARGET_PC
+#include "dusk/interp/user_interface.h"
 #include "dusk/settings.h"
+#include "dusk/version.hpp"
 #endif
 
 #if TARGET_PC
@@ -374,6 +374,15 @@ void dMsgScrnTalk_c::exec() {
     }
 }
 
+#if TARGET_PC
+void dMsgScrnTalk_c::presentAnims() {
+    dMsgScrnBase_c::presentAnims();
+    if (mpSelect_c != NULL) {
+        mpSelect_c->presentAnims();
+    }
+}
+#endif
+
 void dMsgScrnTalk_c::drawSelf() {
 #if TARGET_PC
     if (dusk::getSettings().game.recordingMode) {
@@ -405,7 +414,7 @@ void dMsgScrnTalk_c::drawSelf() {
                     }
                 }
                 if (field_0x35c[i] > 0) {
-                    field_0x35c[i]--;
+                    DUSK_IF_ELSE(dusk::vdt::advance_toward_frame(field_0x35c[i], 0.0f, 1.0f), field_0x35c[i]--);
                 } else {
                     mpLight_c->draw(
                         &mCharInfoPtr[i].field_0x14, mCharInfoPtr[i].field_0x00, mCharInfoPtr[i].field_0x04,
@@ -489,6 +498,12 @@ bool dMsgScrnTalk_c::selectAnimeEnd() {
     }
     return false;
 }
+
+#if TARGET_PC
+bool dMsgScrnTalk_c::isSelectAnimeActive() {
+    return mpSelect_c != NULL && mpSelect_c->isAnimeActive();
+}
+#endif
 
 void dMsgScrnTalk_c::fukiScale(f32 param_0) {
 }

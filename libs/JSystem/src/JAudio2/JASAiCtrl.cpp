@@ -18,7 +18,9 @@
 #include <os.h>
 #include <stdint.h>
 
-#include "tracy/Tracy.hpp"
+#if TARGET_PC
+#include <tracy/Tracy.hpp>
+#endif
 
 DUSK_GAME_DATA s16* JASDriver::sDmaDacBuffer[3];
 
@@ -44,7 +46,7 @@ DUSK_GAME_DATA u32 JASDriver::sOutputRate;
 
 DUSK_GAME_DATA JASMixMode JASDriver::sMixMode = MIX_MODE_EXTRA;
 
-DUSK_GAME_DATA f32 JASDriver::sDacRate = 32028.5f;
+DUSK_GAME_DATA f32 JASDriver::sDacRate = DUSK_IF_ELSE(32000.0f, 32028.5f);
 
 DUSK_GAME_DATA u32 JASDriver::sSubFrames = 0x00000007;
 
@@ -109,9 +111,7 @@ void JASDriver::setOutputRate(JASOutputRate param_0) {
         sDacRate = 48000.0f;
     }
 
-#if !TARGET_PC
-    sDacRate *= 1.0008897f;
-#endif
+    IF_NOT_DUSK(sDacRate *= 1.0008897f);
 }
 
 DUSK_GAME_DATA const JASDriver::MixFunc JASDriver::sMixFuncs[4] = {

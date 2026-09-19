@@ -19,6 +19,10 @@
 #include "c/c_dylink.h"
 #include "m_Do/m_Do_printf.h"
 
+#if TARGET_PC
+#include "dusk/interp/samples.h"
+#endif
+
 #if DEBUG
 class print_error_check_c {
 public:
@@ -413,6 +417,7 @@ static int fopAc_Delete(void* i_this) {
     #endif
 
     if (ret == TRUE) {
+        IF_DUSK(dusk::interp::erase_owned_samples(actor));
         fopAcTg_ActorQTo(&actor->actor_tag);
         fopDwTg_DrawQTo(&actor->draw_tag);
         fopAcM_DeleteHeap((fopAc_ac_c*) i_this);
@@ -454,6 +459,10 @@ static int fopAc_Create(void* i_this) {
         actor->cullType = profile->cullType;
 
         fopAcM_prm_class* append = fopAcM_GetAppend(actor);
+#if TARGET_PC
+        actor->mItemGiveTag = append != NULL ? append->mItemGiveTag : 0;
+        actor->mItemGiveOriginalNo = append != NULL ? append->mItemGiveOriginalNo : 0xFF;
+#endif
         if (append != NULL) {
             fopAcM_SetParam(actor, append->base.parameters);
             actor->home.pos = append->base.position;

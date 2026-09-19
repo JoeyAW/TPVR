@@ -8,22 +8,21 @@
 #include "m_Do/m_Do_controller_pad.h"
 #include <cstdio>
 #include <cstring>
-
 #include "JSystem/J2DGraph/J2DAnmLoader.h"
-#include "dusk/version.hpp"
 #include "f_op/f_op_msg_mng.h"
+
+#if TARGET_PC
+#include "dusk/game_clock.h"
+#include "dusk/interp/user_interface.h"
+#include "dusk/utilities.hpp"
+#include "dusk/version.hpp"
 
 static bool isPalOrJpn() {
     return dusk::version::isRegionPal() || dusk::version::isRegionJpn();
 }
 
-#if TARGET_PC
 #define SJIS_MOJI(wmoji) ((static_cast<u16>(static_cast<u8>((wmoji)[0])) << 8) | static_cast<u8>((wmoji)[1]))
-#else
-#define SJIS_MOJI(wmoji) *(u16*)wmoji
-#endif
 
-#if TARGET_PC
 static const char* l_mojiHira[65] = {
     "\x82\xA0", "\x82\xA2", "\x82\xA4", "\x82\xA6", "\x82\xA8", "\x82\xA9", "\x82\xAB", "\x82\xAD", "\x82\xAF", "\x82\xB1", "\x82\xB3", "\x82\xB5", "\x82\xB7",
     "\x82\xB9", "\x82\xBB", "\x82\xBD", "\x82\xBF", "\x82\xC2", "\x82\xC4", "\x82\xC6", "\x82\xC8", "\x82\xC9", "\x82\xCA", "\x82\xCB", "\x82\xCC", "\x82\xCD",
@@ -79,6 +78,8 @@ static const char* l_mojiEisu[65] = {
     "X", "k", "x", ",", "L", "Y", "l", "y", ".", "M", "Z", "m", "z", " ",
 };
 #else
+#define SJIS_MOJI(wmoji) *(u16*)wmoji
+
 static const char* l_mojiHira[65] = {
     "あ", "い", "う", "え", "お", "か", "き", "く", "け", "こ", "さ", "し", "す",
     "せ", "そ", "た", "ち", "つ", "て", "と", "な", "に", "ぬ", "ね", "の", "は",
@@ -432,7 +433,7 @@ void dName_c::_move() {
     }
     #endif
 
-    cursorAnm();
+    IF_NOT_DUSK(cursorAnm());
 }
 
 int dName_c::nameCheck() {
@@ -477,6 +478,10 @@ void dName_c::playNameSet(int nameLength) {
 }
 
 void dName_c::cursorAnm() {
+#if TARGET_PC
+    dusk::vdt::present_looping(mCurColAnmF, mCursorColorKey, 2.0f);
+    dusk::vdt::present_looping(mCurTexAnmF, mCursorTexKey, 2.0f);
+#else
     mCurColAnmF += 2;
     if (mCurColAnmF >= mCursorColorKey->getFrameMax()) {
         mCurColAnmF -= mCursorColorKey->getFrameMax();
@@ -488,6 +493,7 @@ void dName_c::cursorAnm() {
         mCurTexAnmF -= mCursorTexKey->getFrameMax();
     }
     mCursorTexKey->setFrame(mCurTexAnmF);
+#endif
 
     nameIn.NameInScr->animation();
 }
@@ -1089,9 +1095,7 @@ void dName_c::selectCursorMove() {
     ((J2DTextBox*)mMojiIcon[mCharRow + mCharColumn * 5]->getPanePtr())
         ->setWhite(JUtility::TColor(0xC8, 0xC8, 0xC8, 0xFF));
 
-    #if TARGET_PC
-    nameWide();
-    #endif
+    IF_DUSK(nameWide());
 
     Vec pos = mMojiIcon[mCharRow + mCharColumn * 5]->getGlobalVtxCenter(false, 0);
     mSelIcon->setPos(pos.x, pos.y, mMojiIcon[mCharRow + mCharColumn * 5]->getPanePtr(), true);
@@ -1512,11 +1516,31 @@ void dName_c::selectCursorPosSet(int row) {
 }
 
 #if TARGET_PC
+
+static dusk::utils::PaneCache l_tagName[] = {
+    {MULTI_CHAR('m_00_0'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_00_1'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_00_2'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_00_3'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_00_4'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_01_0'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_01_1'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_01_2'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_01_3'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('m_01_4'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_02_0'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_02_1'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_02_2'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_02_3'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_02_4'), 0.0f, 0.0f, false}, {MULTI_CHAR('m03_0'), 0.0f, 0.0f, false},  {MULTI_CHAR('m03_1'), 0.0f, 0.0f, false},  {MULTI_CHAR('m03_2'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('m03_3'), 0.0f, 0.0f, false},  {MULTI_CHAR('m03_4'), 0.0f, 0.0f, false},  {MULTI_CHAR('m_04_0'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_04_1'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_04_2'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_04_3'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_04_4'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_05_0'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_05_1'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('m_05_2'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_05_3'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_05_4'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_06_0'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_06_1'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_06_2'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_06_3'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_06_4'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_07_0'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('m_07_1'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_07_2'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_07_3'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_07_4'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_08_0'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_08_1'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_08_2'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_08_3'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_08_4'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('m_09_0'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_09_1'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_09_2'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_09_3'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_09_4'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_10_0'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_10_1'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_10_2'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_10_3'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('m_10_4'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_11_0'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_11_1'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_11_2'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_11_3'), 0.0f, 0.0f, false}, {MULTI_CHAR('m_11_4'), 0.0f, 0.0f, false}, {MULTI_CHAR('m12_0'), 0.0f, 0.0f, false},  {MULTI_CHAR('m12_1'), 0.0f, 0.0f, false},  {MULTI_CHAR('m12_2'), 0.0f, 0.0f, false},
+    {MULTI_CHAR('m12_3'), 0.0f, 0.0f, false},  {MULTI_CHAR('m12_4'), 0.0f, 0.0f, false}, {MULTI_CHAR('p_end_2'), 0.0f, 0.0f, false}, {MULTI_CHAR('p_end_1'), 0.0f, 0.0f, false}, {MULTI_CHAR('p_end_0'), 0.0f, 0.0f, false},
+};
+
+static dusk::utils::PaneCache l_nameTagName[] = {
+    {MULTI_CHAR('name_00'), 0.0f, 0.0f, false}, {MULTI_CHAR('name_01'), 0.0f, 0.0f, false}, {MULTI_CHAR('name_02'), 0.0f, 0.0f, false}, {MULTI_CHAR('name_03'), 0.0f, 0.0f, false}, {MULTI_CHAR('name_04'), 0.0f, 0.0f, false}, {MULTI_CHAR('name_05'), 0.0f, 0.0f, false}, {MULTI_CHAR('name_06'), 0.0f, 0.0f, false}, {MULTI_CHAR('name_07'), 0.0f, 0.0f, false},
+};
+
+static dusk::utils::PaneCache l_nameCurTagName[] = {
+    {MULTI_CHAR('s__n_00'), 0.0f, 0.0f, false}, {MULTI_CHAR('s__n_01'), 0.0f, 0.0f, false}, {MULTI_CHAR('s__n_02'), 0.0f, 0.0f, false}, {MULTI_CHAR('s__n_03'), 0.0f, 0.0f, false}, {MULTI_CHAR('s__n_04'), 0.0f, 0.0f, false}, {MULTI_CHAR('s__n_05'), 0.0f, 0.0f, false}, {MULTI_CHAR('s__n_06'), 0.0f, 0.0f, false}, {MULTI_CHAR('s__n_07'), 0.0f, 0.0f, false},
+};
+
 void dName_c::nameWide() {
     static bool cachedPanes = false;
     // Get pre-scale values for each pane
     if (!cachedPanes) {
-        for (PaneCache& entry : l_tagName) {
+        for (dusk::utils::PaneCache& entry : l_tagName) {
             J2DPane* pane = nameIn.NameInScr->search(entry.tag);
             if (!entry.cached) {
                 entry.origTransX = pane->getTranslateX();
@@ -1524,7 +1548,7 @@ void dName_c::nameWide() {
                 entry.cached = true;
             }
         }
-        for (PaneCache& entry : l_nameTagName) {
+        for (dusk::utils::PaneCache& entry : l_nameTagName) {
             J2DPane* pane = nameIn.NameInScr->search(entry.tag);
             if (!entry.cached) {
                 entry.origTransX = pane->getTranslateX();
@@ -1532,7 +1556,7 @@ void dName_c::nameWide() {
                 entry.cached = true;
             }
         }
-        for (PaneCache& entry : l_nameCurTagName) {
+        for (dusk::utils::PaneCache& entry : l_nameCurTagName) {
             J2DPane* pane = nameIn.NameInScr->search(entry.tag);
             if (!entry.cached) {
                 entry.origTransX = pane->getTranslateX();
@@ -1546,19 +1570,19 @@ void dName_c::nameWide() {
     // Reset all panes
     nameIn.NameInScr->scale(1.0f, 1.0f);
     nameIn.NameInScr->translate(0.0f, 0.0f);
-    for (PaneCache& entry : l_tagName) {
+    for (dusk::utils::PaneCache& entry : l_tagName) {
         J2DPane* pane = nameIn.NameInScr->search(entry.tag);
         pane->setBasePosition(J2DBasePosition_4);
         pane->scale(1.0f, 1.0f);
         pane->translate(entry.origTransX, entry.origTransY);
     }
-    for (PaneCache& entry : l_nameTagName) {
+    for (dusk::utils::PaneCache& entry : l_nameTagName) {
         J2DPane* pane = nameIn.NameInScr->search(entry.tag);
         pane->setBasePosition(J2DBasePosition_4);
         pane->scale(1.0f, 1.0f);
         pane->translate(entry.origTransX, entry.origTransY);
     }
-    for (PaneCache& entry : l_nameCurTagName) {
+    for (dusk::utils::PaneCache& entry : l_nameCurTagName) {
         J2DPane* pane = nameIn.NameInScr->search(entry.tag);
         pane->setBasePosition(J2DBasePosition_4);
         pane->scale(1.0f, 1.0f);
@@ -1574,17 +1598,17 @@ void dName_c::nameWide() {
             break;
         default: // Wii and Dusklight
             // List of Characters Box
-            for (PaneCache& entry : l_tagName) {
+            for (dusk::utils::PaneCache& entry : l_tagName) {
                 J2DPane* pane = nameIn.NameInScr->search(entry.tag);
                 pane->scale(mDoGph_gInf_c::hudAspectScaleDown, 1.0f);
             }
             // Letters being typed
-            for (PaneCache& entry : l_nameTagName) {
+            for (dusk::utils::PaneCache& entry : l_nameTagName) {
                 J2DPane* pane = nameIn.NameInScr->search(entry.tag);
                 pane->scale(mDoGph_gInf_c::hudAspectScaleDown, 1.0f);
             }
             // Underscores when typing below letters
-            for (PaneCache& entry : l_nameCurTagName) {
+            for (dusk::utils::PaneCache& entry : l_nameCurTagName) {
                 J2DPane* pane = nameIn.NameInScr->search(entry.tag);
                 pane->scale(mDoGph_gInf_c::hudAspectScaleDown, 1.0f);
             }
@@ -1598,9 +1622,20 @@ void dName_c::nameWide() {
 #endif
 
 void dName_c::_draw() {
-    #if TARGET_PC
-    nameWide();
-    #endif
+#if TARGET_PC
+    if (dusk::game_clock::is_presentation_frame()) {
+        for (int i = 0; i < 65; ++i) {
+            mMojiIcon[i]->presentAnime();
+        }
+        for (int i = 0; i < 4; ++i) {
+            if (mMenuIcon[i] != NULL) {
+                mMenuIcon[i]->presentAnime();
+            }
+        }
+        cursorAnm();
+        nameWide();
+    }
+#endif
 
     dComIfGd_set2DOpa(&nameIn);
     dComIfGd_set2DOpa(mSelIcon);

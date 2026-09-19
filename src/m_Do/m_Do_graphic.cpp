@@ -45,7 +45,6 @@
 #include "m_Do/m_Do_graphic.h"
 #include "m_Do/m_Do_machine.h"
 #include "m_Do/m_Do_main.h"
-#include "tracy/Tracy.hpp"
 
 #if PLATFORM_WII || PLATFORM_SHIELD
 #include <revolution/sc.h>
@@ -56,17 +55,19 @@
 #endif
 
 #if TARGET_PC
-#include <SDL3/SDL_video.h>
-#include "aurora/lib/window.hpp"
-#include "d/actor/d_a_horse.h"
 #include "dusk/dusk.h"
-#include "helpers/endian.h"
-#include "dusk/frame_interpolation.h"
+#include "dusk/game_clock.h"
 #include "dusk/gfx.hpp"
-#include "helpers/gx_helper.h"
 #include "dusk/imgui/ImGuiConsole.hpp"
+#include "dusk/interp/frame_interpolation.h"
 #include "dusk/logging.h"
 #include "dusk/settings.h"
+#include "helpers/endian.h"
+#include "helpers/gx_helper.h"
+
+#include <aurora/lib/window.hpp>
+#include <SDL3/SDL_video.h>
+#include <tracy/Tracy.hpp>
 #endif
 
 class mDoGph_HIO_c : public JORReflexible {
@@ -499,43 +500,30 @@ void darwFilter(GXColor matColor) {
 }
 
 void mDoGph_gInf_c::calcFade() {
-#if TARGET_PC
-    if (dusk::frame_interp::get_ui_tick_pending())
-#endif
-    {
-        if (mFade != 0) {
-            mFadeRate += mFadeSpeed;
+    if (mFade != 0) {
+        mFadeRate += mFadeSpeed IF_DUSK(* dusk::game_clock::original_frames());
 
-            if (mFadeRate < 0.0f) {
-                mFadeRate = 0.0f;
-                mFade = 0;
-            } else {
-                if (mFadeRate > 1.0f) {
-                    mFadeRate = 1.0f;
-                }
-            }
-            mFadeColor.a = 255.0f * mFadeRate;
+        if (mFadeRate < 0.0f) {
+            mFadeRate = 0.0f;
+            mFade = 0;
         } else {
-            if (dComIfG_getBrightness() != 255) {
-                mFadeColor.r = 0;
-                mFadeColor.g = 0;
-                mFadeColor.b = 0;
-                mFadeColor.a = 255 - dComIfG_getBrightness();
-            } else {
-                mFadeColor.a = 0;
+            if (mFadeRate > 1.0f) {
+                mFadeRate = 1.0f;
             }
+        }
+        mFadeColor.a = 255.0f * mFadeRate;
+    } else {
+        if (dComIfG_getBrightness() != 255) {
+            mFadeColor.r = 0;
+            mFadeColor.g = 0;
+            mFadeColor.b = 0;
+            mFadeColor.a = 255 - dComIfG_getBrightness();
+        } else {
+            mFadeColor.a = 0;
         }
     }
 
     if (mFadeColor.a != 0) {
-#ifdef TARGET_PC
-        if (dusk::frame_interp::is_enabled() && mFade != 0) {
-            const auto step = dusk::frame_interp::get_interpolation_step();
-            const auto progress = mFadeSpeed < 0.0f ? 1.0f - mFadeRate : mFadeRate;
-            const auto fade_amt = mFadeRate + mFadeSpeed * (step - 1.0f + progress);
-            mFadeColor.a = 255.0f * std::clamp(fade_amt, 0.0f, 1.0f);
-        }
-#endif
         darwFilter(mFadeColor);
     }
 }
@@ -2217,16 +2205,6 @@ static void captureScreenPerspDrawInfo(JPADrawInfo& info) {
 
 static void drawItem3D() {
     ZoneScoped;
-#ifdef TARGET_PC
-    if (dusk::frame_interp::is_enabled()) {
-        // FRAME INTERP NOTE: Title screen needs 0.0f while everything else that runs through this is -100.0f.
-        if (fopAcM_SearchByName(fpcNm_TITLE_e) != nullptr) {
-            dMenu_Collect3D_c::setViewPortOffsetY(0.0f);
-        } else {
-            dMenu_Collect3D_c::setViewPortOffsetY(-100.0f);
-        }
-    }
-#endif
     Mtx item_mtx;
     dMenu_Collect3D_c::setupItem3D(item_mtx);
 
@@ -2256,12 +2234,7 @@ static void mDoGph_drawHud2D() {
     dComIfGp_setCurrentGrafPort(&ortho);
 
     GXSetClipMode(GX_CLIP_ENABLE);
-#if TARGET_PC
-    if (dusk::frame_interp::get_ui_tick_pending())
-#endif
-    {
-        dDlst_list_c::calcWipe();
-    }
+    dDlst_list_c::calcWipe();
     j3dSys.reinitGX();
 
     ortho.setOrtho(mDoGph_gInf_c::getMinXF(), mDoGph_gInf_c::getMinYF(),
@@ -2418,12 +2391,7 @@ int mDoGph_Painter() {
     drawHeapMap();
     #endif
 
-#ifdef TARGET_PC
-    if (dusk::frame_interp::get_ui_tick_pending())
-#endif
-    {
-        dComIfGp_particle_calcMenu();
-    }
+    IF_NOT_DUSK(dComIfGp_particle_calcMenu());
 
     JFWDisplay::getManager()->setFader(mDoGph_gInf_c::getFader());
     mDoGph_gInf_c::setClearColor(mDoGph_gInf_c::getBackColor());
@@ -2566,7 +2534,7 @@ int mDoGph_Painter() {
 #endif
             dKy_setLight();
 #if TARGET_PC
-            if (dusk::frame_interp::is_enabled()) {
+            if (dusk::interp::is_enabled()) {
                 dKy_setLight_again();
             }
 #endif
@@ -2646,12 +2614,8 @@ int mDoGph_Painter() {
             }
 
 #if TARGET_PC
-            if (dusk::frame_interp::is_enabled()) {
-                // FRAME INTERP NOTE: Currently only recalculating points for Epona's reins. Need a more global solution.
-                if (daHorse_c* horse = dComIfGp_getHorseActor()) {
-                    horse->lerpControlPoints(dusk::frame_interp::get_interpolation_step());
-                }
-                g_dComIfG_gameInfo.drawlist.refresh3DlineMats(camera_p->view.lookat.eye);
+            if (dusk::interp::is_enabled()) {
+                g_dComIfG_gameInfo.drawlist.refresh3DlineMats();
             }
 #endif
 

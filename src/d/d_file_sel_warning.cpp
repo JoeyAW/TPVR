@@ -11,7 +11,11 @@
 #include "d/d_file_sel_warning.h"
 #include "d/d_msg_string.h"
 #include "d/d_pane_class.h"
+
+#if TARGET_PC
+#include "dusk/interp/user_interface.h"
 #include "dusk/version.hpp"
+#endif
 
 typedef void (dFile_warning_c::*procFunc)();
 static procFunc fileWarningProc[] = {&dFile_warning_c::modeWait, &dFile_warning_c::modeMove};
@@ -58,6 +62,10 @@ void dFile_warning_c::screenSet() {
     mFileWarn.Scr->setAnimation(field_0x24);
     field_0x24->setFrame(2849.0f);
     mFileWarn.Scr->animation();
+#if TARGET_PC
+    field_0x28 = 2849;
+    field_0x2c = 2849;
+#endif
 
     mFileWarn.mFont = mDoExt_getMesgFont();
     mpRootPane = JKR_NEW CPaneMgr(mFileWarn.Scr, MULTI_CHAR('Nm_02'), 0, NULL);
@@ -113,6 +121,7 @@ bool dFile_warning_c::baseMoveAnm() {
     bool rt;
 
     if (field_0x28 != field_0x2c) {
+#if !TARGET_PC
         if (field_0x28 < field_0x2c) {
             field_0x28 += 2;
 
@@ -129,6 +138,7 @@ bool dFile_warning_c::baseMoveAnm() {
 
         field_0x24->setFrame(field_0x28);
         mFileWarn.Scr->animation();
+#endif
         rt = false;
     }
 
@@ -145,6 +155,19 @@ bool dFile_warning_c::baseMoveAnm() {
 
     return rt;
 }
+
+#if TARGET_PC
+void dFile_warning_c::presentAnims() {
+    if (field_0x28 == field_0x2c) {
+        return;
+    }
+    dusk::vdt::present_toward(field_0x28, (f32)field_0x2c, field_0x24);
+    mFileWarn.Scr->animation();
+    if (mPosY != 0.0f) {
+        mpRootPane->translate(mpRootPane->getTranslateX(), mPosY - field_0x34);
+    }
+}
+#endif
 
 void dFile_warning_c::openInit() {
     field_0x28 = 2849;

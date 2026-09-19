@@ -29,9 +29,12 @@
 #include "m_Do/m_Do_controller_pad.h"            // mDoCPd_c::getSubStickX -- real physical gamepad C-stick
 #include "m_Do/m_Do_graphic.h"                  // mDoGph_gInf_c::captureHudBillboard
 #include "f_pc/f_pc_manager.h"                  // fpcM_DrawIterater, fpcM_Draw
-#include "dusk/game_clock.h"                    // dusk::game_clock::MainLoopPacer
+#include "dusk/game_clock.h"                    // dusk::game_clock::FrameTiming
 #include "dusk/settings.h"                      // dusk::getSettings().game.vrDesktopMirror
-#include "dusk/logging.h"                       // DuskLog-style aurora::Module, see VrLog below
+#include "dusk/logging.h"                       // DuskLog
+#include <aurora/lib/logging.hpp>               // aurora::Module, see VrLog below -- dusk/logging.h's
+                                                 // own DuskLog moved to borealis::Log in 2.0 and no
+                                                 // longer pulls this in transitively the way it used to
 #include "dusk/ui/ui.hpp"                       // dusk::ui::any_document_visible() -- VR menu billboard gating
 
 #include "dusk/vr/vr_xr_bootstrap.hpp"
@@ -137,7 +140,7 @@ vr_combat::SwingDetector g_rightThrust = [] {
 // neutrally and turn around" movement hitting 1.44 m/s -- just over
 // round 1's 1.4 m/s trigger -- firing a spurious attack (confirms the
 // "swings when I move normally" report). The dt source itself (predDt vs.
-// pacing.presentation_dt_seconds, logged side by side specifically to
+// pacing.dt, logged side by side specifically to
 // check this) tracked each other almost exactly throughout that phase, so
 // this was a plain threshold problem, not a timing/jitter bug. The SAME
 // capture's real-swing phase logged 13 separate triggers (speeds ~1.5 up
@@ -921,7 +924,7 @@ struct TickReentrancyGuard {
 };
 }  // namespace
 
-void tick(const dusk::game_clock::MainLoopPacer& pacing) {
+void tick(const dusk::game_clock::FrameTiming& pacing) {
     static bool s_tickInProgress = false;
     TickReentrancyGuard reentrancyGuard(s_tickInProgress);
     if (reentrancyGuard.alreadyRunning()) {
@@ -1311,7 +1314,7 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
     const float menuChordTriggerForGate = kMenuChordDisabled ? 0.f : rightTrigger;
     updateVrMenuGamepadState(leftStick.x, leftStick.y, rightAHeld, rightBHeld,
                               menuChordHeldForGate, menuChordTriggerForGate,
-                              pacing.presentation_dt_seconds);
+                              pacing.dt);
     // Tells menuGamepadFrameGuard (top of tick()) a real update ran this
     // frame, so its destructor must NOT also neutralize -- see that
     // guard's own comment for the systemic press/release-spam bug this
@@ -1395,7 +1398,7 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
         s_leftSwingButtonHoldRemaining = kSwingButtonHoldSec;
     } else {
         s_leftSwingButtonHoldRemaining =
-            std::max(0.0, s_leftSwingButtonHoldRemaining - static_cast<double>(pacing.presentation_dt_seconds));
+            std::max(0.0, s_leftSwingButtonHoldRemaining - static_cast<double>(pacing.dt));
     }
     const bool leftSwingButtonHeld = s_leftSwingButtonHoldRemaining > 0.0;
 
@@ -1445,7 +1448,7 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
         s_rightThrustHoldRemaining = 0.0;  // restart the release phase even if a
                                             // previous pulse's hold was still running
     } else {
-        const double dtSec = static_cast<double>(pacing.presentation_dt_seconds);
+        const double dtSec = static_cast<double>(pacing.dt);
         if (s_rightThrustForceReleaseRemaining > 0.0) {
             s_rightThrustForceReleaseRemaining = std::max(0.0, s_rightThrustForceReleaseRemaining - dtSec);
             if (s_rightThrustForceReleaseRemaining <= 0.0) {
@@ -1484,7 +1487,7 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
         s_rodYankStickHoldRemaining = kRodYankStickHoldSec;
     } else {
         s_rodYankStickHoldRemaining =
-            std::max(0.0, s_rodYankStickHoldRemaining - static_cast<double>(pacing.presentation_dt_seconds));
+            std::max(0.0, s_rodYankStickHoldRemaining - static_cast<double>(pacing.dt));
     }
     const bool rodYankForceStickDown = s_rodYankStickHoldRemaining > 0.0;
 
@@ -1563,7 +1566,7 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
             padStatus.substickY = static_cast<s8>(std::clamp(rightStick.y, -1.f, 1.f) * 127.f);
         }
     } else {
-        dusk::vr::updateSmoothTurn(rightStick.x, pacing.presentation_dt_seconds);
+        dusk::vr::updateSmoothTurn(rightStick.x, pacing.dt);
 
         // Real physical gamepad's C-stick (2026-08-19, explicit user
         // request: "make the c stick function, c left and c right, rotate
@@ -1587,7 +1590,7 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
         // hardware feeds d_a_mg_rod.cpp's rod_substick_x/y from this same
         // getSubStickX() call), so it shouldn't also spin the camera.
         const float realCStickX = mDoCPd_c::getSubStickX(PAD_1);
-        dusk::vr::updateSmoothTurn(realCStickX, pacing.presentation_dt_seconds);
+        dusk::vr::updateSmoothTurn(realCStickX, pacing.dt);
     }
 
     // Scripted-camera facing assist (2026-08-19 request, Third Person VR
@@ -1758,7 +1761,7 @@ void tick(const dusk::game_clock::MainLoopPacer& pacing) {
                     dusk::vr::snapScriptedCameraYaw(
                         cM_s2rad(static_cast<s16>(targetYawS - currentYawS)));
                 } else if (s_zTargetTrackState == ZTargetTrack::Tracking) {
-                    s_zTargetTrackElapsedSec += pacing.presentation_dt_seconds;
+                    s_zTargetTrackElapsedSec += pacing.dt;
 
                     const float deltaDeg = std::abs(cM_s2rad(static_cast<s16>(
                         targetYawS - s_zTargetLastTargetYawS))) * (180.f / 3.14159265358979323846f);

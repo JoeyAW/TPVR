@@ -15,6 +15,10 @@
 #include "dusk/vr/vr_debug_log.hpp"  // dusk::vr::duskVrLog/duskVrSnprintf -- portable OutputDebugStringA/_snprintf_s stand-ins
 #endif
 
+#if TARGET_PC
+#include "dusk/interp/material.h"
+#endif
+
 static daGrdWater_HIO_c l_HIO;
 
 static daGrdWater_c::modeFunc l_mode_func[5] = {
@@ -346,6 +350,9 @@ int daGrdWater_c::Draw() {
     if (material->getTexGenBlock()->getTexMtx(0) != NULL) {
         J3DTexMtxInfo* mtxInfo = &material->getTexGenBlock()->getTexMtx(0)->getTexMtxInfo();
         if (mtxInfo != NULL) {
+#if TARGET_PC
+            dusk::interp::material::set_view_projection(mtxInfo, 1.0f, 1.0f, -0.01f, 0.0f);
+#else
             Mtx afStack_50;
             // ROOT-CAUSED this session (VR water rendering solid black):
             // see dComIfGd_getReflectionFovAspect()'s comment.
@@ -353,31 +360,12 @@ int daGrdWater_c::Draw() {
             dComIfGd_getReflectionFovAspect(&waterFovy, &waterAspect);
             C_MTXLightPerspective(afStack_50, waterFovy, waterAspect,
                                   1.0f, 1.0f, -0.01f, 0.0f);
-            #if WIDESCREEN_SUPPORT
+#if WIDESCREEN_SUPPORT
             mDoGph_gInf_c::setWideZoomLightProjection(afStack_50);
-            #endif
-            mtxInfo->setEffectMtx(afStack_50);
-            modelData2->simpleCalcMaterial(0, (MtxP)j3dDefaultMtx);
-#ifdef TARGET_PC
-            {
-                static bool loggedVR2 = false;
-                static bool loggedFlat2 = false;
-                bool inVR = dusk::vr::isRenderingToHeadset();
-                bool* flag = inVR ? &loggedVR2 : &loggedFlat2;
-                if (!*flag) {
-                    *flag = true;
-                    char msg[300];
-                    dusk::vr::duskVrSnprintf(msg, sizeof(msg),
-                                "[dusk::grdwater] VR=%d fovy=%.2f aspect=%.3f effectMtx row0=(%.4f,%.4f,%.4f,%.4f) "
-                                "row1=(%.4f,%.4f,%.4f,%.4f) row2=(%.4f,%.4f,%.4f,%.4f)\n",
-                                inVR ? 1 : 0, waterFovy, waterAspect,
-                                afStack_50[0][0], afStack_50[0][1], afStack_50[0][2], afStack_50[0][3],
-                                afStack_50[1][0], afStack_50[1][1], afStack_50[1][2], afStack_50[1][3],
-                                afStack_50[2][0], afStack_50[2][1], afStack_50[2][2], afStack_50[2][3]);
-                    dusk::vr::duskVrLog(msg);
-                }
-            }
 #endif
+            mtxInfo->setEffectMtx(afStack_50);
+#endif
+            modelData2->simpleCalcMaterial(0, (MtxP)j3dDefaultMtx);
         }
     }
     mDoExt_modelUpdateDL(mModel2);

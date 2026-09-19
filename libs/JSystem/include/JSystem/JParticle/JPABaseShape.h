@@ -4,13 +4,12 @@
 #include <gx.h>
 
 #if TARGET_PC
-#include <mtx.h>
-
 struct ParticleDrawCtx {
     bool batch;     // off = immediate mode
     bool useTexMtx; // UVs transformed by texMtx
     bool useClr0;   // prm color in GX_VA_CLR0
     bool useClr1;   // env color in GX_VA_CLR1
+    float age;
     Mtx texMtx;
     GXColor clr0;
     GXColor clr1;
@@ -232,11 +231,5 @@ void JPARegistPrmAlphaEnv(JPA_DRAW_PARTICLE_ARGS);
 
 #undef JPA_DRAW_PARTICLE_ARGS
 
-#if TARGET_PC
-void JPAInterpBillboard(JPAEmitterWorkData*, JPABaseParticle*);
-void JPAInterpRotBillboard(JPAEmitterWorkData*, JPABaseParticle*);
-void JPAInterpDirection(JPAEmitterWorkData*, JPABaseParticle*);
-void JPAInterpRotDirection(JPAEmitterWorkData*, JPABaseParticle*);
-#endif
 
 #endif /* JPABASESHAPE_H */

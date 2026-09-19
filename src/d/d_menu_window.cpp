@@ -26,8 +26,8 @@
 #include "f_op/f_op_overlap_mng.h"
 #include "m_Do/m_Do_controller_pad.h"
 
-#ifdef TARGET_PC
-#include "dusk/frame_interpolation.h"
+#if TARGET_PC
+#include "dusk/interp/frame_interpolation.h"
 #include "dusk/vr/vr_main.hpp"
 #endif
 
@@ -167,7 +167,13 @@ public:
 #endif
     }
 
-    void setCaptureFlag() { mFlag = 1; }
+    void setCaptureFlag() {
+        mFlag = 1;
+    #ifdef TARGET_PC
+        dusk::interp::request_presentation_sync();
+    #endif
+    }
+
     bool checkDraw() { return mFlag; }
     u8 getAlpha() { return mAlpha; }
     u8 getTopFlag() { return mTopFlag; }
@@ -1136,10 +1142,6 @@ void dMw_c::dMw_ring_create(u8 i_origin) {
     }
 
     mpCapture->setCaptureFlag();
-
-#ifdef TARGET_PC
-    dusk::frame_interp::request_presentation_sync();
-#endif
 }
 
 bool dMw_c::dMw_ring_delete() {
@@ -1631,10 +1633,18 @@ int dMw_c::_create() {
     field_0x144 = 3;
 
     dMeter2Info_setWindowStatus(0);
+
+    IF_DUSK(base.draw_interp_frame = true);
+
     return cPhs_COMPLEATE_e;
 }
 
 int dMw_c::_execute() {
+#if TARGET_PC
+    if (mpMenuRing != NULL) {
+        mpMenuRing->advanceSelectItem();
+    }
+#endif
     if (field_0x151 != 0) {
         field_0x151--;
     }

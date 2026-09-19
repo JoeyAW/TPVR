@@ -20,11 +20,29 @@ extern "C" {
 #ifdef __cplusplus
 #define MOD_EXTERN_C extern "C"
 #else
-#define MOD_EXTERN_C
+#define MOD_EXTERN_C extern
+#endif
+
+#ifdef __cplusplus
+#define MOD_DECLARE_SERVICE(                                                                      \
+    service_type, variable, service_id_value, major_value, minor_value)                           \
+    MOD_EXTERN_C const service_type* variable;                                                    \
+    template <>                                                                                   \
+    struct mods::ServiceTraits<service_type> {                                                    \
+        static constexpr const char* id = service_id_value;                                       \
+        static constexpr uint16_t major_version = major_value;                                    \
+        static constexpr uint16_t minor_version = minor_value;                                    \
+    }
+#else
+#define MOD_DECLARE_SERVICE(                                                                      \
+    service_type, variable, service_id_value, major_value, minor_value)                           \
+    MOD_EXTERN_C const service_type* variable
 #endif
 
 #define MOD_ABI_VERSION 1u
 #define MOD_ERROR_MESSAGE_SIZE 512u
+
+#define DUSKLIGHT_SERVICE_ID_PREFIX "dev.twilitrealm.dusklight."
 
 typedef struct ModContext ModContext;
 

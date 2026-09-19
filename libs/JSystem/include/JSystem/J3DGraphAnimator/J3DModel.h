@@ -79,7 +79,8 @@ public:
     virtual ~J3DModel() {}
 
 #if TARGET_PC
-    static void interp_callback(bool isSimFrame, void* pUserWork);
+    void calc_presentation_base_mtx();
+    void prepare_presentation_view();
 #endif
 
     J3DModelData* getModelData() { return mModelData; }
@@ -107,6 +108,7 @@ public:
     Vec* getBaseScale() { return &mBaseScale; }
 #if TARGET_PC
     void setAnmMtx(int jointNo, Mtx m);
+    void forgetMtx();
 #else
     void setAnmMtx(int jointNo, Mtx m) {
         mMtxBuffer->setAnmMtx(jointNo, m);
@@ -133,6 +135,9 @@ public:
     /* 0xD0 */ J3DVtxColorCalc* mVtxColorCalc;
     /* 0xD4 */ J3DUnkCalc1* mUnkCalc1;
     /* 0xD8 */ J3DUnkCalc2* mUnkCalc2;
+#if TARGET_PC
+    Mtx mPresentationBase;
+#endif
 };
 
 #endif /* J3DMODEL_H */

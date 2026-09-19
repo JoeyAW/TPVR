@@ -113,6 +113,29 @@ function(_mod_add_webgpu_headers target_name)
     endif ()
 endfunction()
 
+function(_mod_add_fmt target_name)
+    if (NOT TARGET fmt::fmt-header-only)
+        find_package(fmt 11 CONFIG QUIET GLOBAL)
+    endif ()
+
+    if (NOT TARGET fmt::fmt-header-only)
+        include(FetchContent)
+        message(STATUS "Mod SDK: fetching fmt")
+        # Keep the fallback version in sync with extern/aurora/extern/CMakeLists.txt.
+        FetchContent_Declare(fmt
+                URL https://github.com/fmtlib/fmt/archive/refs/tags/12.1.0.tar.gz
+                URL_HASH SHA256=ea7de4299689e12b6dddd392f9896f08fb0777ac7168897a244a6d6085043fea
+                DOWNLOAD_EXTRACT_TIMESTAMP FALSE
+                EXCLUDE_FROM_ALL)
+        FetchContent_MakeAvailable(fmt)
+    endif ()
+
+    if (NOT TARGET fmt::fmt-header-only)
+        message(FATAL_ERROR "add_mod: FEATURES fmt could not provide fmt::fmt-header-only")
+    endif ()
+    target_link_libraries(${target_name} PRIVATE fmt::fmt-header-only)
+endfunction()
+
 function(add_mod target_name)
     cmake_parse_arguments(ARG "BUNDLE" "MOD_JSON;RES_DIR;OVERLAY_DIR;TEXTURES_DIR;OUTPUT_DIR"
             "SOURCES;RUNTIME_LIBRARIES;FEATURES" ${ARGN})
@@ -127,7 +150,7 @@ function(add_mod target_name)
         message(FATAL_ERROR "add_mod: MOD_JSON does not exist: ${_mod_json}")
     endif ()
 
-    set(_supported_features game webgpu)
+    set(_supported_features fmt game webgpu)
     set(_features "")
     foreach (_feature IN LISTS ARG_FEATURES)
         list(FIND _supported_features "${_feature}" _feature_index)
@@ -162,10 +185,27 @@ function(add_mod target_name)
                 WINDOWS_EXPORT_ALL_SYMBOLS OFF)
         target_compile_features(${target_name} PRIVATE cxx_std_20)
         target_link_libraries(${target_name} PRIVATE dusklight_mod_api)
+
+        if (APPLE)
+            set(_mod_exports "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/ModExports.exp")
+            target_link_options(${target_name} PRIVATE
+                    -Xlinker -exported_symbols_list -Xlinker "${_mod_exports}")
+            set_property(TARGET ${target_name} APPEND PROPERTY LINK_DEPENDS "${_mod_exports}")
+        elseif (UNIX)
+            set(_mod_exports "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/ModExports.ver")
+            target_link_options(${target_name} PRIVATE
+                    "-Wl,--version-script=${_mod_exports}"
+                    -Wl,--no-undefined-version)
+            set_property(TARGET ${target_name} APPEND PROPERTY LINK_DEPENDS "${_mod_exports}")
+        endif ()
+
         foreach (_feature IN LISTS _features)
             target_link_libraries(${target_name} PRIVATE dusklight_mod_feature_${_feature})
             if (_feature STREQUAL "webgpu")
                 _mod_add_webgpu_headers(${target_name})
+            endif ()
+            if (_feature STREQUAL "fmt")
+                _mod_add_fmt(${target_name})
             endif ()
             if (_feature STREQUAL "game" OR _feature STREQUAL "webgpu")
                 set(_needs_host_link TRUE)
@@ -256,8 +296,6 @@ function(add_mod target_name)
                 endif ()
                 target_link_libraries(${target_name} PRIVATE "${_game_lib}")
             endif ()
-            set_target_properties(${target_name} PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
-            target_compile_definitions(${target_name} PRIVATE _ITERATOR_DEBUG_LEVEL=0)
         endif ()
     endif ()
     if (ARG_RUNTIME_LIBRARIES AND NOT _has_lib)
@@ -276,6 +314,7 @@ function(add_mod target_name)
     set(_package_inputs "${_mod_json}")
     set(_extra_cmds "")
     set(_lib_copy_cmd "")
+    set(_lib_strip_cmd "")
     set(_target_depend "")
     if (_has_lib)
         list(APPEND _zip_args lib)
@@ -283,6 +322,10 @@ function(add_mod target_name)
                 COMMAND ${CMAKE_COMMAND} -E make_directory "${_stage}/lib/${_lib_platform}"
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "$<TARGET_FILE:${target_name}>" "${_stage}/lib/${_lib_platform}/${_lib_name}")
+        if (UNIX AND NOT APPLE)
+            set(_lib_strip_cmd COMMAND "${CMAKE_STRIP}" --strip-unneeded
+                    "${_stage}/lib/${_lib_platform}/${_lib_name}")
+        endif ()
         set(_target_depend ${target_name})
     endif ()
     string(TOLOWER "${_lib_name}" _lib_name_key)
@@ -359,6 +402,7 @@ function(add_mod target_name)
             COMMAND ${CMAKE_COMMAND} -E rm -rf "${_stage}"
             COMMAND ${CMAKE_COMMAND} -E make_directory "${_stage}" "${_output_dir}"
             ${_lib_copy_cmd}
+            ${_lib_strip_cmd}
             COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_mod_json}" "${_stage}/mod.json"
             ${_extra_cmds}
             COMMAND ${CMAKE_COMMAND} -E chdir "${_stage}" ${CMAKE_COMMAND} -E tar cvf "${_out}" --format=zip ${_zip_args}

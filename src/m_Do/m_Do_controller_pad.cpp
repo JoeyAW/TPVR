@@ -10,7 +10,6 @@
 #include "f_ap/f_ap_game.h"
 #include "m_Do/m_Do_Reset.h"
 #include "m_Do/m_Do_main.h"
-#include "tracy/Tracy.hpp"
 
 #if TARGET_PC
 #include "dusk/menu_pointer.h"
@@ -21,6 +20,7 @@
 // dusk::ui::sync_virtual_input() (touch-screen controls) while VR is active
 // -- see mDoCPd_c::read()'s comment for why.
 extern "C" bool g_duskVRSessionActive;
+#include <tracy/Tracy.hpp>
 #endif
 
 DUSK_GAME_DATA JUTGamePad* mDoCPd_c::m_gamePad[4];

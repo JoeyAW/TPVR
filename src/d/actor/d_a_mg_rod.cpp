@@ -26,10 +26,12 @@
 #include <cstring>
 
 #if TARGET_PC
-#include "dusk/frame_interpolation.h"
+#include "dusk/interp/frame_interpolation.h"
+#include "dusk/mods/item.hpp"
 #include "dusk/settings.h"
 #include "dusk/version.hpp"
 #include "dusk/vr/vr_main.hpp"
+#include "mods/items.h"
 #endif
 
 class dmg_rod_HIO_c : public JORReflexible {
@@ -183,12 +185,12 @@ static int Worm_nodeCallBack(J3DJoint* i_joint, int param_1) {
 }
 
 #if TARGET_PC
-static void dmg_rod_interp_callback(bool isSimFrame, void* pUserWork) {
+static void dmg_rod_interp_callback(void* pUserWork) {
     dmg_rod_class* i_this = (dmg_rod_class*)pUserWork;
     if (!i_this->mLineInterpPrevValid || !i_this->mLineInterpCurrValid) {
         return;
     }
-    const f32 alpha = dusk::frame_interp::get_interpolation_step();
+    const f32 alpha = dusk::interp::get_interpolation_step();
     const int count = i_this->kind == MG_ROD_KIND_LURE ? MG_ROD_LURE_LINE_LEN : MG_ROD_UKI_LINE_LEN;
     cXyz* dst = i_this->linemat.getPos(0);
     for (int i = 0; i < count; i++) {
@@ -259,14 +261,14 @@ static int dmg_rod_Draw(dmg_rod_class* i_this) {
         // Skipped entirely in VR -- no smoothing is needed since the
         // position is already fresh every real frame; the un-interpolated
         // linemat.update() call just above this block stands as-is.
-        if (dusk::frame_interp::is_enabled() && !dusk::vr::isRenderingToHeadset()) {
+        if (dusk::interp::is_enabled() && !dusk::vr::isRenderingToHeadset()) {
             if (i_this->mLineInterpCurrValid) {
                 memcpy(i_this->mLineInterpPrev, i_this->mLineInterpCurr, MG_ROD_LURE_LINE_LEN * sizeof(cXyz));
                 i_this->mLineInterpPrevValid = true;
             }
             memcpy(i_this->mLineInterpCurr, i_this->linemat.getPos(0), MG_ROD_LURE_LINE_LEN * sizeof(cXyz));
             i_this->mLineInterpCurrValid = true;
-            dusk::frame_interp::add_interpolation_callback(&dmg_rod_interp_callback, i_this);
+            dusk::interp::add_interpolation_callback(&dmg_rod_interp_callback, i_this);
         }
 #endif
 
@@ -312,14 +314,14 @@ static int dmg_rod_Draw(dmg_rod_class* i_this) {
         // Skipped entirely in VR -- no smoothing is needed since the
         // position is already fresh every real frame; the un-interpolated
         // linemat.update() call just above this block stands as-is.
-        if (dusk::frame_interp::is_enabled() && !dusk::vr::isRenderingToHeadset()) {
+        if (dusk::interp::is_enabled() && !dusk::vr::isRenderingToHeadset()) {
             if (i_this->mLineInterpCurrValid) {
                 memcpy(i_this->mLineInterpPrev, i_this->mLineInterpCurr, MG_ROD_UKI_LINE_LEN * sizeof(cXyz));
                 i_this->mLineInterpPrevValid = true;
             }
             memcpy(i_this->mLineInterpCurr, i_this->linemat.getPos(0), MG_ROD_UKI_LINE_LEN * sizeof(cXyz));
             i_this->mLineInterpCurrValid = true;
-            dusk::frame_interp::add_interpolation_callback(&dmg_rod_interp_callback, i_this);
+            dusk::interp::add_interpolation_callback(&dmg_rod_interp_callback, i_this);
         }
 #endif
 
@@ -3011,7 +3013,17 @@ static void lure_heart(dmg_rod_class* i_this) {
             if (obj_life != NULL) {
                 fopAcM_delete(obj_life);
                 fopAcM_onItem(obj_life, 0x80);
+#if TARGET_PC
+                const auto itemCheck = dusk::mods::item_check_commit(
+                    ITEM_CHECK_FISHING_HEART_PIECE, dItemNo_KAKERA_HEART_e, actor);
+                if (itemCheck.itemNo == dItemNo_KAKERA_HEART_e) {
+                    execItemGet(dItemNo_KAKERA_HEART_e, itemCheck.tag, actor);
+                } else if (itemCheck.itemNo == dItemNo_NONE_e) {
+                    dusk::mods::item_check_complete(itemCheck, actor);
+                }
+#else
                 execItemGet(dItemNo_KAKERA_HEART_e);
+#endif
                 u8 eventReg = dComIfGs_getEventReg(0xECFF);
                 eventReg |= (u8)0x40;
                 dComIfGs_setEventReg(0xECFF, eventReg);
@@ -4146,7 +4158,15 @@ static void uki_catch(dmg_rod_class* i_this) {
             } else if (mgfish->mCaughtType == MG_CATCH_BIN) {
                 i_this->msgflow.init(actor, 0x139A, 0, NULL);
                 dComIfGs_onEventBit(dSv_event_flag_c::saveBitLabels[468]);
+#if TARGET_PC
+                const auto itemCheck = dusk::mods::item_check_commit(
+                    ITEM_CHECK_FISHING_BOTTLE, dItemNo_EMPTY_BOTTLE_e, actor);
+                if (itemCheck.itemNo == dItemNo_EMPTY_BOTTLE_e) {
+                    dComIfGs_setEmptyBottle();
+                }
+#else
                 dComIfGs_setEmptyBottle();
+#endif
             } else if (mgfish->mCaughtType == MG_CATCH_KN) {
                 i_this->msgflow.init(actor, 0x139C, 0, NULL);
             } else if (mgfish->mCaughtType == MG_CATCH_ED) {
@@ -4223,6 +4243,18 @@ static void uki_catch(dmg_rod_class* i_this) {
                 if (mgfish->mCaughtType == MG_CATCH_LH) {
                     dComIfGp_setItemRupeeCount(10.0f + cM_rndF(40.9f));
                 }
+#if TARGET_PC
+                else if (mgfish->mCaughtType == MG_CATCH_BIN)
+                {
+                    const auto itemCheck = dusk::mods::item_check_commit(
+                        ITEM_CHECK_FISHING_BOTTLE, dItemNo_EMPTY_BOTTLE_e, actor);
+                    if (itemCheck.itemNo == dItemNo_EMPTY_BOTTLE_e ||
+                        itemCheck.itemNo == dItemNo_NONE_e)
+                    {
+                        dusk::mods::item_check_complete(itemCheck, actor);
+                    }
+                }
+#endif
             } else {
                 dComIfGs_addFishNum(fish_kind);
                 if (i_this->field_0x14c0 != 0) {
@@ -5930,8 +5962,8 @@ static int dmg_rod_Execute(dmg_rod_class* i_this) {
     #if TARGET_PC
     if (dusk::getSettings().game.buttonFishing) {
         if ((item_any_fishing_rod(dComIfGp_getSelectItem(0)) && mDoCPd_c::getHoldX(PAD_1)) ||
-            (item_any_fishing_rod(dComIfGp_getSelectItem(1)) && mDoCPd_c::getHoldY(PAD_1)))
-        {
+            (item_any_fishing_rod(dComIfGp_getSelectItem(1)) && mDoCPd_c::getHoldY(PAD_1)) ||
+            (i_this->action == ACTION_LURE_STANDBY && mDoCPd_c::getTrigB(PAD_1))) {
             i_this->rod_stick_y = -1.0f;
             i_this->rod_substick_y = -1.0f;
         }
@@ -6504,11 +6536,6 @@ static int dmg_rod_Create(fopAc_ac_c* i_this) {
             OS_REPORT("//////////////MG_ROD SET NON !!\n");
             return cPhs_ERROR_e;
         }
-
-#if TARGET_PC
-        rod->mLineInterpPrevValid = false;
-        rod->mLineInterpCurrValid = false;
-#endif
 
         OS_REPORT("//////////////MG_ROD SET 2 !!\n");
         if (!hio_set) {

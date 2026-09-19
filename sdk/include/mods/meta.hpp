@@ -13,21 +13,31 @@
  * modmeta records. Each IMPORT_SERVICE/EXPORT_SERVICE/DEFINE_HOOK use places one
  * constant-initialized record object in the metadata section.
  */
+#if defined(_MSVC_LANG) && !defined(__clang__)
+#define MOD_META_NO_ASAN
+#else
+#if defined(__has_attribute) && __has_attribute(no_sanitize)
+#define MOD_META_NO_ASAN __attribute__((no_sanitize("address")))
+#else
+#define MOD_META_NO_ASAN
+#endif
+#endif
+
 #if defined(_WIN32)
 #pragma section("modmeta$a", read, write)
 #pragma section("modmeta$d", read, write)
 #pragma section("modmeta$z", read, write)
 #if defined(__clang__)
-#define MOD_META_RECORD __declspec(allocate("modmeta$d")) __attribute__((used))
+#define MOD_META_RECORD __declspec(allocate("modmeta$d")) __attribute__((used)) MOD_META_NO_ASAN
 #else
 #define MOD_META_RECORD __declspec(allocate("modmeta$d"))
 #endif
 #elif defined(__APPLE__)
-#define MOD_META_RECORD __attribute__((section("__DATA,__modmeta"), used))
+#define MOD_META_RECORD __attribute__((section("__DATA,__modmeta"), used)) MOD_META_NO_ASAN
 #elif defined(__has_attribute) && __has_attribute(retain)
-#define MOD_META_RECORD __attribute__((section("modmeta"), used, retain))
+#define MOD_META_RECORD __attribute__((section("modmeta"), used, retain)) MOD_META_NO_ASAN
 #else
-#define MOD_META_RECORD __attribute__((section("modmeta"), used))
+#define MOD_META_RECORD __attribute__((section("modmeta"), used)) MOD_META_NO_ASAN
 #endif
 
 /* Section bounds for the mod_meta descriptor */
@@ -46,8 +56,8 @@ extern "C" const unsigned char mod_meta_bounds_end[] __asm("section$end$__DATA$_
 #define MOD_META_BOUNDS_BEGIN (mod_meta_bounds_begin)
 #define MOD_META_BOUNDS_END (mod_meta_bounds_end)
 #else
-extern "C" const unsigned char __start_modmeta[];
-extern "C" const unsigned char __stop_modmeta[];
+extern "C" __attribute__((visibility("hidden"))) const unsigned char __start_modmeta[];
+extern "C" __attribute__((visibility("hidden"))) const unsigned char __stop_modmeta[];
 #define MOD_META_BOUNDS_DEFN
 #define MOD_META_BOUNDS_BEGIN (__start_modmeta)
 #define MOD_META_BOUNDS_END (__stop_modmeta)
@@ -240,6 +250,48 @@ consteval auto make_hook_mem_names() {
     r.len = sizeof(r.chars);
     return r;
 }
+
+#if defined(__GNUC__) && !defined(__clang__) && defined(__ELF__)
+/* https://gcc.gnu.org/bugzilla/show_bug.cgi?id=41091 prevents inline static template members from
+ * sharing an explicit ELF section with ordinary variables. GCC can instead constant-evaluate a
+ * file-local record at each DEFINE_HOOK. */
+template <auto Target>
+void materialize_hook_mem(unsigned char* outPmf) {
+    const auto target = Target;
+    std::memcpy(outPmf, &target, sizeof(target));
+}
+
+template <auto Target, FixedString Disp>
+consteval auto make_local_hook_record() {
+    using F = decltype(Target);
+    if constexpr (std::is_member_function_pointer_v<F>) {
+        constexpr auto names = make_hook_mem_names<Target, Disp>();
+        static_assert(sizeof(F) <= MOD_META_HOOK_MEM_EXT_CAPACITY,
+            "unsupported pointer-to-member representation");
+        if constexpr (sizeof(F) > MOD_META_HOOK_MEM_CAPACITY) {
+            HookMemExtRecord<names.len> record = {
+                {sizeof(HookMemExtRecord<names.len>), MOD_META_HOOK_MEM_EXT, 0}, sizeof(F),
+                materialize_hook_mem<Target>, nullptr, {}};
+            for (size_t i = 0; i < names.len; ++i) {
+                record.names[i] = names.chars[i];
+            }
+            return record;
+        } else {
+            HookMemRecord<F, names.len> record = {
+                {sizeof(HookMemRecord<F, names.len>), MOD_META_HOOK_MEM, 0}, 0, {Target}, nullptr,
+                {}};
+            for (size_t i = 0; i < names.len; ++i) {
+                record.names[i] = names.chars[i];
+            }
+            return record;
+        }
+    } else {
+        static_assert(std::is_pointer_v<F> && std::is_function_v<std::remove_pointer_t<F>>,
+            "hook target must be a function or member function");
+        return HookFnRecord<F>{{sizeof(HookFnRecord<F>), MOD_META_HOOK_FN, 0}, 0, Target, nullptr};
+    }
+}
+#endif
 
 /*
  * MSVC constant-evaluates a compact pointer-to-member only when every other operand in the

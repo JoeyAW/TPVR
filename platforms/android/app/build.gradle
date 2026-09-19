@@ -28,6 +28,41 @@ ext.borealisAndroid = [
 
 apply from: new File(borealisDir, 'platforms/android/gradle/borealis-application.gradle')
 
+// Upstream 2.0 replaced the old shell-script JNI staging (stage-jni-
+// libs.sh) with borealis-application.gradle's own stageBorealisJniLibs
+// task above, which only knows about libmain.so/libc++_shared.so --
+// nothing about our VR mod's extra libopenxr_loader.so dependency.
+// dusklight-android.properties is OUR OWN file (see CMakeLists.txt's VR/
+// OpenXR fragment, "Dusklight VR: Android OpenXR loader staging
+// properties"), independent of borealis's, so this stays a no-op if VR
+// wasn't configured (e.g. DUSK_VR=OFF) rather than failing the build.
+def dusklightPropertiesFile = new File(duskRepoDir, 'build/android-arm64/dusklight-android.properties')
+if (dusklightPropertiesFile.isFile()) {
+    def dusklightProperties = new Properties()
+    dusklightPropertiesFile.withInputStream { dusklightProperties.load(it) }
+    def openxrLoaderPath = dusklightProperties.getProperty('dusklight.openxrLoader')
+    def openxrLoaderAbi = dusklightProperties.getProperty('dusklight.androidAbi')
+    if (openxrLoaderPath && openxrLoaderAbi) {
+        def openxrLoaderFile = file(openxrLoaderPath)
+        def stagedOpenxrDir = layout.buildDirectory.dir('generated/jniLibs/dusklight')
+        def stageOpenxrLoader = tasks.register('stageDusklightOpenxrLoader', Sync) {
+            from(openxrLoaderFile) {
+                rename { 'libopenxr_loader.so' }
+                into openxrLoaderAbi
+            }
+            into(stagedOpenxrDir)
+            doFirst {
+                if (!openxrLoaderFile.isFile()) {
+                    throw new GradleException(
+                        "OpenXR loader library is missing: ${openxrLoaderFile}. Build the CMake VR target first.")
+                }
+            }
+        }
+        android.sourceSets.main.jniLibs.srcDirs += [stagedOpenxrDir]
+        tasks.named('preBuild').configure { dependsOn(stageOpenxrLoader) }
+    }
+}
+
 dependencies {
     implementation fileTree(dir: 'libs', include: ['*.jar'])
 }

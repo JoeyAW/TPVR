@@ -956,9 +956,16 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                             "being in third person with an invisible avatar. Off by default."
             });
         // "Attach Body Rotation to Headset" (game.vrAttachBodyRotationToHead) is
-        // intentionally not exposed here -- still a real ConfigVar (defaults to
-        // true, editable directly in the config file) so the feature keeps
-        // working, just hidden from the regular settings UI.
+        // intentionally not exposed here -- still a real ConfigVar, editable
+        // directly in the config file, but now DEFAULTS TO FALSE (disabled).
+        // The underlying feature has a long history of movement-lockup bugs
+        // (rounds 1-10 in vr-mod-notes, "body ends up in front of me on
+        // rotation" -- never fully root-caused) culminating in a real "stuck,
+        // can't move" report even after the UI toggle to turn it off was
+        // removed from this screen; the code path itself was still forcing
+        // shape_angle.y to the headset's yaw regardless. Disabled at the
+        // ConfigVar default 2026-09-19 rather than left silently on. Do not
+        // re-enable without new evidence the underlying bug is actually fixed.
         config_bool_select(leftPane, rightPane, getSettings().game.vrShowBody,
             {
                 .key = "Experimental: Show Link's Body",

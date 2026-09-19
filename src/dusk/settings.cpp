@@ -90,7 +90,7 @@ UserSettings g_userSettings = {
         .vrDesktopMirror {"game.vrDesktopMirror", true},
         .vrShowBody {"game.vrShowBody", false},
         .vrThirdPerson {"game.vrThirdPerson", false},
-        .vrAttachBodyRotationToHead {"game.vrAttachBodyRotationToHead", true},
+        .vrAttachBodyRotationToHead {"game.vrAttachBodyRotationToHead", false},
         .vrExperimentalCutsceneFirstPerson {"game.vrExperimentalCutsceneFirstPerson", false},
         .vrSwapSwordShieldHands {"game.vrSwapSwordShieldHands", false},
         // Key string deliberately kept as the original "game.vrSwapGripMirrorAxis"

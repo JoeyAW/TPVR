@@ -24,6 +24,10 @@ public:
     f32 getFar() { return mFar; }
 
 private:
+    // Dusk VR: the real tests, split out so the public clip() overloads can
+    // wrap them with the VR eye-pass gate + a temporary cull counter.
+    int clipSphereImpl(f32 const (*)[4], Vec, f32) const;
+    int clipBoxImpl(f32 const (*)[4], Vec*, Vec*) const;
     /* 0x04 */ Vec _04;
     /* 0x10 */ Vec _10;
     /* 0x1C */ Vec _1C;

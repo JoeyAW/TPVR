@@ -92,7 +92,41 @@ struct Bootstrap {
     PFN_xrCreateVulkanInstanceKHR xrCreateVulkanInstanceKHR_ = nullptr;
     PFN_xrGetVulkanGraphicsDevice2KHR xrGetVulkanGraphicsDevice2KHR_ = nullptr;
     PFN_xrCreateVulkanDeviceKHR xrCreateVulkanDeviceKHR_ = nullptr;
+
+    // Optional Quest performance extensions (2026-09-20, perf item #3 --
+    // see vr-mod-notes). Both are enabled only if the runtime advertises
+    // them (enabling an unsupported extension makes xrCreateInstance
+    // fail outright), so each PFN is nullptr when unavailable and callers
+    // must check. Applied by dusk::vr::startup() right after session
+    // creation:
+    //  - XR_EXT_performance_settings: ask for SUSTAINED_HIGH CPU+GPU clock
+    //    levels instead of the runtime's default (Quest defaults lower).
+    //  - XR_KHR_android_thread_settings: tag the main / render-worker /
+    //    FIFO threads so the runtime schedules them on the big cores.
+    bool hasPerformanceSettings = false;
+    bool hasAndroidThreadSettings = false;
+    PFN_xrPerfSettingsSetPerformanceLevelEXT xrPerfSettingsSetPerformanceLevelEXT_ = nullptr;
+    PFN_xrSetAndroidApplicationThreadKHR xrSetAndroidApplicationThreadKHR_ = nullptr;
 };
+
+// True if the loader/runtime advertises the named instance extension.
+inline bool instanceExtensionAvailable(const char* name) {
+    uint32_t count = 0;
+    if (XR_FAILED(xrEnumerateInstanceExtensionProperties(nullptr, 0, &count, nullptr)) ||
+        count == 0) {
+        return false;
+    }
+    std::vector<XrExtensionProperties> props(count, XrExtensionProperties{XR_TYPE_EXTENSION_PROPERTIES});
+    if (XR_FAILED(xrEnumerateInstanceExtensionProperties(nullptr, count, &count, props.data()))) {
+        return false;
+    }
+    for (uint32_t i = 0; i < count; ++i) {
+        if (std::strcmp(props[i].extensionName, name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
 
 #else
 
@@ -176,10 +210,23 @@ inline Bootstrap initialize() {
 
     Bootstrap boot;
 
-    const char* requiredExtensions[] = {
+    std::vector<const char*> enabledExtensions = {
         XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME,
         XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME,
     };
+    // Optional perf extensions -- only requested when advertised (see the
+    // Bootstrap field comments). The loader is already initialized above,
+    // so enumeration is valid here.
+    boot.hasPerformanceSettings =
+        instanceExtensionAvailable(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
+    if (boot.hasPerformanceSettings) {
+        enabledExtensions.push_back(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
+    }
+    boot.hasAndroidThreadSettings =
+        instanceExtensionAvailable(XR_KHR_ANDROID_THREAD_SETTINGS_EXTENSION_NAME);
+    if (boot.hasAndroidThreadSettings) {
+        enabledExtensions.push_back(XR_KHR_ANDROID_THREAD_SETTINGS_EXTENSION_NAME);
+    }
 
     XrInstanceCreateInfoAndroidKHR androidInfo{XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR};
     androidInfo.applicationVM = vm;
@@ -187,9 +234,8 @@ inline Bootstrap initialize() {
 
     XrInstanceCreateInfo instanceInfo{XR_TYPE_INSTANCE_CREATE_INFO};
     instanceInfo.next = &androidInfo;
-    instanceInfo.enabledExtensionCount =
-        static_cast<uint32_t>(std::size(requiredExtensions));
-    instanceInfo.enabledExtensionNames = requiredExtensions;
+    instanceInfo.enabledExtensionCount = static_cast<uint32_t>(enabledExtensions.size());
+    instanceInfo.enabledExtensionNames = enabledExtensions.data();
     std::strncpy(instanceInfo.applicationInfo.applicationName, "Dusklight VR",
                  XR_MAX_APPLICATION_NAME_SIZE - 1);
     instanceInfo.applicationInfo.applicationVersion = 1;
@@ -225,6 +271,24 @@ inline Bootstrap initialize() {
                                reinterpret_cast<PFN_xrVoidFunction*>(
                                    &boot.xrCreateVulkanDeviceKHR_)),
         "xrGetInstanceProcAddr(xrCreateVulkanDeviceKHR)");
+
+    // Optional perf-extension entry points. Failure here is non-fatal: the
+    // extension was advertised, but if the PFN somehow doesn't resolve the
+    // corresponding "has" flag is cleared and startup() just skips it.
+    if (boot.hasPerformanceSettings &&
+        XR_FAILED(xrGetInstanceProcAddr(
+            boot.instance, "xrPerfSettingsSetPerformanceLevelEXT",
+            reinterpret_cast<PFN_xrVoidFunction*>(&boot.xrPerfSettingsSetPerformanceLevelEXT_)))) {
+        boot.hasPerformanceSettings = false;
+        boot.xrPerfSettingsSetPerformanceLevelEXT_ = nullptr;
+    }
+    if (boot.hasAndroidThreadSettings &&
+        XR_FAILED(xrGetInstanceProcAddr(
+            boot.instance, "xrSetAndroidApplicationThreadKHR",
+            reinterpret_cast<PFN_xrVoidFunction*>(&boot.xrSetAndroidApplicationThreadKHR_)))) {
+        boot.hasAndroidThreadSettings = false;
+        boot.xrSetAndroidApplicationThreadKHR_ = nullptr;
+    }
 
     checkResult(
         boot.xrGetVulkanGraphicsRequirements2KHR_(boot.instance, boot.systemId,

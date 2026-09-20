@@ -14169,3 +14169,281 @@ than inferring from a crash message -- two of the five fixes came straight
 from that. **Colors CONFIRMED correct in-headset on the final (opaque-fd)
 Quest build** -- user: "Colors are correct on quest." This closes the whole
 VR performance investigation on both platforms.
+
+### Quest/standalone cleanup pass — 2026-09-20 (all CONFIRMED in-headset, uncommitted)
+
+Standalone-only tidy-up requested by the user; PC behavior deliberately
+untouched on every item. Everything below is gated on `TARGET_ANDROID`/
+`__ANDROID__` — NOT `TARGET_PC`, which is defined on Android too.
+
+- **VR settings tab**: "VR Desktop Mirror" toggle and both brightness
+  sliders hidden on standalone (`VR_SETTINGS_STANDALONE` macro,
+  `dusk/ui/settings.cpp`). `vrDesktopMirror` itself stays registered and
+  defaults ON there — the mirror path also drives the Dusklight overlay's
+  scaling, it's just not user-facing.
+- **Internal resolution defaults to 1x on standalone** (Auto crashes the
+  game on map open there — crash itself NOT investigated). New
+  `kDefaultInternalResolutionScale` (`dusk/settings.h`) feeds both the
+  compiled default AND the first-launch "Dusklight" preset
+  (`dusk/ui/preset.cpp`), which had been hard-setting Auto and would have
+  put a fresh Quest install straight back on it. The slider still offers
+  Auto on Quest (not clamped — not asked for).
+- **App renamed/repackaged**: `com.joeyaw.tpvr`, label "TPVR", new
+  512x512 launcher icon (`platforms/android/app/src/main/res/mipmap/icon.png`).
+  `DuskActivity.java` moved to `java/com/joeyaw/tpvr/`; `SDL_SetAppMetadata`
+  in `m_Do_main.cpp` gated per platform. Borealis's own
+  `dev.encounter.borealis.*` JNI is independent of the app package —
+  nothing in C++ looks the activity up by name. Installs as a SEPARATE
+  app from the old `dev.twilitrealm.dusk`; saves live in each app's
+  private `files/USA/Card A/01-GZ2E-gczelda2.gci`
+  (`/data/data/<pkg>/files/`), NOT visible to SideQuest's file browser
+  (shell user can't read app-private dirs). Migration options: the
+  Files app via the "Dusklight Data"/"TPVR Data" documents-provider roots
+  (unverified that Horizon's Files app lists third-party providers), adb
+  `run-as` (debug builds only), or Settings > Data Folder > Change Data
+  Folder to an `/sdcard` path in both apps.
+- **"Twilit Realm presents" splash eyebrow removed again** (both
+  platforms) — upstream's "Rebrand (#1064)" reintroduced it in the 2.0
+  merge. `src/dusk/ui/prelaunch.cpp`, `<eyebrow>` element only; logo kept.
+
+**HUD minimap on Quest "zoomed in, no shadows, rainbow edges" — ROOT-CAUSED
+and FIXED, CONFIRMED in-headset.** Pre-existing (not from this session's
+changes), HUD minimap only. Real cause was a FIFO-thread ordering race,
+not anything in the map code: since 2.0 the GX stream is processed on
+the FIFO thread and `offscreen_uses_native_logical_size` is READ there
+(`logical_fb_size()`, at command-processing time). `beginEye()`
+(`vr_stereo_render.hpp`) set that flag from the main thread and THEN
+called `create_pass()`, which drains the FIFO — so anything still queued
+from the pre-eye-loop window (`captureMapCopy2D()`'s minimap render +
+`GXCopyTex`) got processed with the eye's flag already on. That scales
+the copy's source rect by logical/target: for a 216x216 map,
+216*(216/838, 216/448) = a 56x104 crop — exactly the tall narrow
+rectangle seen — and because src rect and dst size then differ,
+`encoding.cpp`'s resolve picks the LINEAR sampler for the R8 index
+conversion (`needsScaling`), which interpolates palette INDICES →
+rainbow fringes at every edge and the thick black "shadow" outline
+blended into garbage. PC only avoided it because its FIFO thread had
+already caught up by then; the Quest's hadn't. **Fix: `AuroraGXSync()`
+(GXFlush + drain) in `beginEye()` BEFORE
+`set_offscreen_uses_native_logical_size(true)`** — same class of fix as
+the menu-billboard `ensure_external_copy_texture()` heap corruption
+(2026-09-19). Diagnostic that found it: `[mapdiag]` logging of
+`AuroraGetRenderSize()`/texture size at creation vs render time — showed
+`window=838x448` on Quest (render size == logical size at 1x), removed
+after confirmation.
+
+**Also added, cosmetic parity only**: `map_render_scale()`
+(`d_map_path.cpp`) floors the map-texture upscale at 3x on standalone
+(PC renders it at 3-4x logical; at exactly 1x the outlines aren't
+halved and the 216x216 texture is magnified onto the HUD). The
+outline-width halving in `dDrawPath_c::rendering()` now keys off the
+same helper (identical value to the old `JUTVideo::getRenderHeight()/448`
+on PC — both come from `AuroraGetRenderSize()`). Was written mid-
+investigation as a guess; kept because the user confirmed the result
+looks right, but it was never the actual cause.
+
+**Reusable lesson**: any main-thread write to state that aurora's GX
+command processor reads (`set_offscreen_uses_native_logical_size`,
+`g_gxState` maps, protected-pass ids) must be ordered against the FIFO
+with `AuroraGXSync()` first — a race that's invisible on a fast PC shows
+up deterministically on the Quest. Also: rainbow/random-colour fringing
+on a palette (C8) texture = indices being interpolated somewhere; go
+looking for a linear resample of the index texture, not for memory
+corruption.
+
+**Not yet investigated**: "turning Mini-Map Shadows off hides the
+minimap" (reported before the FIFO fix — re-test first; may have been the
+same corruption), and the Auto-internal-resolution crash on map open.
+Aurora submodule footgun hit again this session: it was checked out on
+the fork's `main` instead of `aurora-vr`, breaking every VR build with
+missing `aurora::` symbols — `git checkout aurora-vr` in `extern/aurora`.
+
+### Quest perf items #1 and #3 landed (mesh/actor culling re-enabled per eye; XR perf-level + thread hints); #2 (FFR) found NOT viable on this renderer — built + installed on the Quest 2026-09-20, NOT yet tested in-headset
+
+The full 8-item non-resolution optimization list lives in memory
+(`dusklight_vr_quest_perf_ideas.md`) so it can be reprinted; this section
+covers what was done for items 1-3.
+
+**#1 — culling re-enabled inside real VR eye passes.** Investigation
+overturned section 9's premise: there is exactly ONE `J3DUClipper`
+instance in the whole game (`mDoLib_clipper::mClipper`), `beginEye()`
+already rebuilds its frustum per eye (section 2's symmetric-containing
+FOV), and every `clip()` caller (`d_a_bg.cpp`, `d_bg_parts.cpp`,
+`d_flower`/`d_grass.inc`, `f_op_actor_mng.cpp`'s per-actor cull) passes
+`j3dSys.getViewMtx()`, which `beginEye()` sets to that eye's view. So
+inside an eye pass culling was ALREADY correct; the "meshes vanish when
+Link faces away" symptom came from the legacy once-per-sim-tick
+`fapGm_Execute()` draw pass, where `j3dSys`' view matrix is the
+flatscreen chase camera (set by `camera_execute`, `d_camera.cpp` ~11534).
+Fix (`J3DUClipper.cpp`): the blanket `if (g_duskVRRenderingToHeadset)
+return 0;` on both `clip()` overloads became `duskVrSkipCulling()` =
+`g_duskVRRenderingToHeadset && !g_duskVREyePassOpen` — cull normally
+while an eye pass is open, never-cull only for the legacy pass. Same
+broad-flag-vs-`isEyePassOpen()` lesson as sections 8/20. Also in
+`beginEye()`: the clipper's far plane now matches flatscreen's
+(`dStage_stagInfo_GetCullPoint()` unless camera-attention bit 8, exactly
+what `interp/camera.cpp`/`d_camera.cpp` do) instead of `view->far_` —
+VR had been drawing actors well past the designed cull distance. BG room
+geometry unaffected by the far change (`daBg_c::draw()` calls
+`changeFar(1000000)` itself). New `#include "d/d_stage.h"` in
+`vr_stereo_render.hpp`. **Regression to watch for**: the section-9
+symptom (background objects popping out near the edge of view or when
+turning) — if it reappears, the per-eye frustum/`j3dSys` view assumption
+above is wrong for some caller; check which `clip()` call site by adding
+a one-shot log rather than re-disabling wholesale.
+
+**#3 — `XR_EXT_performance_settings` + `XR_KHR_android_thread_settings`.**
+`vr_xr_bootstrap.hpp` (Vulkan/Android branch): new
+`instanceExtensionAvailable()` (enumerates instance extensions);
+`initialize()` now builds a `std::vector` of extensions and appends each
+of the two only if advertised (enabling an unadvertised one fails
+`xrCreateInstance`), records `Bootstrap::hasPerformanceSettings`/
+`hasAndroidThreadSettings`, and resolves the two PFNs
+(`xrPerfSettingsSetPerformanceLevelEXT_`/`xrSetAndroidApplicationThreadKHR_`),
+clearing the flag if a PFN fails to resolve. `vr_main.cpp`'s `startup()`,
+right after `createXrSession()`, `#if DUSK_VR_XR_GRAPHICS_VULKAN`: sets
+SUSTAINED_HIGH for CPU and GPU domains, then tags threads — this thread
+(`gettid()`) as APPLICATION_MAIN, "Aurora render worker" as
+RENDERER_MAIN, "Aurora FIFO processor" as RENDERER_WORKER. Thread ids
+come from a small new registry in aurora (`aurora::thread::
+native_thread_id_for(name)`, `extern/aurora/lib/thread.hpp`/`.cpp`,
+recorded by `set_current()` at thread start via `gettid()`/
+`GetCurrentThreadId()`) — `std::thread::id`/`pthread_t` can't be turned
+into a kernel tid portably. A 0 tid (thread not started) is skipped. All
+outcomes logged as `[dusk::vr::startup] XR_EXT_performance_settings: ...`
+/ `XR_KHR_android_thread_settings: ... res=...` — **check these two lines
+in the first in-headset log**: a nonzero `res` means the runtime rejected
+the call. (Aurora already pins these threads via `Affinity::SharedCache`
+— not changed; if the runtime's hint and aurora's own pinning ever
+fight, that's where to look.) Aurora submodule is dirty with the
+thread-registry change (branch `aurora-vr`, uncommitted).
+
+**#2 — fixed foveated rendering: NOT VIABLE, not attempted.**
+`XR_FB_foveation` works by attaching a runtime-provided fragment density
+map to the render pass that draws INTO the swapchain image
+(`XR_FB_foveation_vulkan` hands out the FDM VkImages). The Quest path
+renders into aurora's own Dawn texture and `vkCmdBlitImage`s into the
+swapchain (2026-09-19 design), so an FDM on the swapchain image would
+affect nothing; and Dawn/WebGPU (the vendored `webgpu_cpp.h`) has no
+fragment-density/shading-rate support at all, so the FDM can't be
+attached to the real render pass either. Only routes: Dawn gaining FDM
+support upstream, or rendering the scene via raw Vulkan instead of Dawn
+(a rewrite). Parked. Non-FDM ways to spend fewer peripheral pixels
+without lowering the eye resolution don't exist short of a custom
+stencil/scissor mask, which wouldn't help a tiled GPU much anyway.
+
+**Build state**: PC (`windows-msvc-relwithdebinfo`) clean; Android
+(`android-arm64` + `gradlew :app:assembleDebug`) clean, APK installed on
+the connected Quest 3 via `adb install -r` (not launched). One wasted
+build round: a Python heredoc wrote literal newlines into four string
+literals in `vr_main.cpp` (CRLF file) — fixed via the Edit tool.
+
+**Next step**: launch on the Quest, confirm (a) the two `[dusk::vr::startup]`
+lines above report `res=0`, (b) no background pop-out/missing geometry
+(culling regression check — look around Ordon/Faron edges and turn the
+head fast), (c) whether the dips improved. If culling looks wrong but
+perf is better, gate #1's far-plane change and the culling re-enable
+separately to see which one is responsible before reverting both.
+
+**First in-headset launch (same day): one real crash from #1's far-plane
+change, fixed; #3's results decoded.**
+- **Crash**: SIGSEGV, main thread, fault addr `0x10`, ~6s after
+  `rendering-normally`. Symbolized (`llvm-addr2line` on the unstripped
+  `build/android-arm64/libmain.so`): `dStage_stagInfo_GetCullPoint` <-
+  `vr_render::beginEye` <- `tick`. `dComIfGp_getStageStagInfo()` is NULL
+  before any stage is loaded (title/boot) and `beginEye()` runs there,
+  unlike the flatscreen callers of the same lookup. Fixed with a null
+  guard that falls back to `view->far_`. Rebuilt/reinstalled; second
+  launch reached `rendering-normally` cleanly.
+- **#3 results**: `XR_EXT_performance_settings` SUSTAINED_HIGH accepted
+  for CPU and GPU (`cpu=0 gpu=0`). Thread hints: main `res=0`, render
+  worker `res=0`, FIFO processor `res=-1000003001`
+  (`XR_ERROR_ANDROID_THREAD_SETTINGS_FAILURE_KHR`). Meta's runtime only
+  honors `APPLICATION_MAIN`/`RENDERER_MAIN`; the `RENDERER_WORKER` tag
+  for the FIFO thread is rejected. Expected/harmless -- left as-is (the
+  log line will always show that one failure on Quest; don't chase it).
+
+### Quest dips ROOT-CAUSED with real phase timing (2026-09-20): the game is CPU-bound at ~17ms/frame and Meta's runtime pacing (xrBeginFrame) quantizes the misses — NOT culling, NOT clocks/threads, NOT xrSyncActions
+
+User tested items #1/#3 and reported no pop-in AND no gain ("it still dips
+really bad") — correctly. Re-added `[dusk::vr::perf]` instrumentation
+(`vr_main.cpp`: phase timing across `tick()`/`submitFrame()` + sub-laps +
+the `J3DUClipper` cull counters `g_duskVRCullTested/Rejected`) and
+captured several minutes in the dipping area. Still in the tree
+(`kPerfDipThresholdMs=22`, baseline every 600 frames) — remove when done.
+
+**What the data says, heavy area (Ordon-ish, 86 cull tests/frame):**
+- Steady-state main-thread cost ≈ **17ms/frame** > 13.9ms (72Hz budget):
+  `renderEnc` 10-12ms = preLoop (HUD+minimap capture) 1.7 + beginEye x2
+  2.3-2.8 + fpcM_DrawIterater x2 0.5 + cAPIGph_Painter x2 4.2 + endEye x2
+  2.5; then `sync` (aurora::gfx::synchronize, waiting for the FIFO/render
+  worker to finish the frame) 4-6ms; gap/submit ~0.5. So the FIFO+render
+  threads ALSO take ~16ms per frame — both sides of the pipeline are at
+  the limit.
+- The "dips" = every ~2nd-5th frame `setup` jumps 13-18ms with
+  waitFrame≈0/swapWait≈0 — the block is inside **`xrBeginFrame`** (Meta's
+  runtime paces a late app there, not only in xrWaitFrame), mostly on
+  frames that also ran a sim tick (the extra ~5ms of game logic pushes
+  the frame past the vsync). Frames alternate ~17ms / ~30ms. This is
+  quantization of being over budget, not a bug in the runtime call.
+- Culling IS active (8-52 of 86 tests rejected/frame) but the per-frame
+  cost barely depends on scene geometry (`painter` 3-5ms either way) —
+  #1 was correct to do but is not a lever here. #3 (clocks/threads)
+  accepted by the runtime, no measurable change.
+- Occasional separate dips: `swapWait` 6-12ms (xrWaitSwapchainImage —
+  GPU/compositor still holding the image) — the GPU side is also close to
+  the edge but is not the dominant pattern.
+
+**Two red herrings tried and REVERTED same session** (don't retry):
+moving `xrSyncActions` to after `xrEndFrame` (the block just moved to the
+next runtime call), and disabling the legacy per-sim-tick late-latch
+`xrLocateSpace` calls in `applyTrackedHandMtx()` (no effect). Both
+"findings" came from an instrumentation bug: the lap labeled "sync"
+started BEFORE `xrBeginFrame` (so it measured xrBeginFrame+xrSyncActions),
+and later builds overwrote that slot with a second measurement. Fixed:
+the perf line now prints `beginFrame=` and `syncActions=` separately.
+**Lesson**: when a "blocking call" appears to hop between call sites as
+you move things, suspect the timer layout before the runtime.
+
+**Where the frame time can actually come from (ranked)**:
+1. `beginEye` 2.3-2.8ms for TWO eyes — includes the `AuroraGXSync()` FIFO
+   drain added 2026-09-20 for the minimap fix, once per eye, plus
+   `create_pass`. Make `offscreen_uses_native_logical_size` a FIFO-stream
+   command (set when processed) instead of draining the FIFO from the main
+   thread twice a frame; also check what `endEye` (2.5ms/2 eyes) waits on.
+2. `sync` 4-6ms: profile the FIFO thread / render worker directly (per-
+   frame GX command count, time in `resolve_pass_into` pass splits —
+   item #4, the mid-eye `GXCopyTex` breaks, costs both the render worker
+   and the tiled GPU). Also item #7 (log level): the offscreen-pass
+   warning is logged ~3-4x/frame with double `fflush()` FROM the render
+   worker — cheap to test with `--log-level 3`.
+3. Item #6 (single traversal / stereo command replay): halves painter,
+   iter, begin/end and the GX volume — the big one, hardest.
+Target: shed ~4ms/frame (~25%) from both the main thread and the
+FIFO/render chain to hold 72Hz; less than that only reduces dip frequency.
+
+**State**: `vr_main.cpp` back to the pre-experiment behavior (sync at its
+original spot, late-latch on) with the corrected instrumentation; Android
+build installed on the Quest (not launched); PC not rebuilt since the
+instrumentation went in (vr_main.cpp is shared — rebuild before a PC test).
+
+### NEXT: single-pass stereo — scoped 2026-09-20, NOT started. Plan file: `VR_SINGLE_PASS_STEREO_PLAN.md` (repo root)
+
+The conclusion of the perf investigation above: only doing the scene
+traversal + GX recording ONCE for both eyes is big enough to hold 72Hz
+(main thread ~17ms -> ~11, FIFO/render chain ~16 -> ~9). Scoped against
+the real aurora code and written up in `VR_SINGLE_PASS_STEREO_PLAN.md` —
+read that file, not this paragraph, when starting. Key facts it rests on:
+GX bakes view×model into every matrix load (no replay with a different
+view); Dawn has no multiview but exposes `ClipDistances`; aurora already
+instances for lines/points and has a per-draw immediate block. Design:
+render once from the head-center view into ONE double-wide target,
+`instanceCount*=2`, vertex shader applies per-eye `T_eye = V_eye*V_c^-1`
++ per-eye asymmetric projection + side-by-side clip-space remap + clip
+distance to keep the halves apart; stereo params travel in-stream via a
+new GX opcode (which also removes `beginEye()`'s two FIFO drains). Old
+two-pass path stays behind a setting for A/B. The plan lists the known
+interactions (screen captures with a double-wide source, line/point
+instancing, viewport scaling) and a cheapest-first verification order.
+`[dusk::vr::perf]` instrumentation is still in `vr_main.cpp` for the
+before/after.

@@ -71,6 +71,7 @@ wgpu::Texture ensure_external_copy_texture(const void* dest, uint32_t width, uin
 
 #include "dusk/vr/vr_smooth_turn.hpp"  // dusk::vr::rotateYawXr/rotateYawQuat
 #include "d/d_com_inf_game.h"      // dComIfGd_getView()
+#include "d/d_stage.h"             // dStage_stagInfo_GetCullPoint() -- beginEye() cull far
 #include "f_op/f_op_view.h"        // view_class, lookat_class, Mtx44, Mtx
 #include "m_Do/m_Do_lib.h"         // mDoLib_clipper::setup()
 #include "m_Do/m_Do_mtx.h"         // mDoMtx_multVec() -- drawAimCrosshair()
@@ -470,7 +471,27 @@ inline aurora::gfx::ResolvedTargets beginEye(const EyeParams& eye) {
         constexpr float kRadToDeg = 57.29577951308232f;
         const float clipperFovyDeg = 2.f * std::atan(halfV) * kRadToDeg;
         const float clipperAspect = halfH / halfV;
-        mDoLib_clipper::setup(clipperFovyDeg, clipperAspect, view->near_, view->far_);
+        // Far plane: match the flatscreen actor-cull distance exactly
+        // (interp/camera.cpp + d_camera.cpp both use the stage's cull point
+        // unless camera-attention bit 8 asks for the full far plane), rather
+        // than view->far_ -- previously this passed view->far_, which made
+        // VR draw actors well beyond the distance the game was designed to
+        // cull them at on flatscreen (Quest perf item #1, 2026-09-20). The
+        // point is FOV-independent (a plain distance), so it's just as
+        // valid for a wide VR eye as for the flatscreen camera. BG room
+        // geometry is unaffected either way -- daBg_c::draw() overrides
+        // the far distance itself (changeFar(1000000)) before its own cull.
+        // NULL-guarded: beginEye() also runs before any stage is loaded
+        // (title screen / boot), where getStageStagInfo() is null -- the
+        // flatscreen callers only reach this once a stage exists. Confirmed
+        // by a real Quest SIGSEGV (fault addr 0x10 inside
+        // dStage_stagInfo_GetCullPoint, 2026-09-20) on the first launch of
+        // this change; falls back to view->far_ (the pre-change behavior).
+        stage_stag_info_class* stagInfo = dComIfGp_getStageStagInfo();
+        const float clipperFar = (stagInfo == nullptr || (dComIfGp_getCameraAttentionStatus(0) & 8))
+            ? view->far_
+            : (float)dStage_stagInfo_GetCullPoint(stagInfo);
+        mDoLib_clipper::setup(clipperFovyDeg, clipperAspect, view->near_, clipperFar);
         // Shared with getEyeSymmetricFov() -- see its comment above.
         g_eyeSymmetricFovyDeg = clipperFovyDeg;
         g_eyeSymmetricAspect = clipperAspect;

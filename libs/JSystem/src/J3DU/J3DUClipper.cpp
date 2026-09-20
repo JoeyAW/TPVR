@@ -6,6 +6,42 @@
 #include "global.h"
 
 extern "C" bool g_duskVRRenderingToHeadset;
+extern "C" bool g_duskVREyePassOpen;
+
+// VR culling gate (2026-09-20, Quest perf item #1 -- see vr-mod-notes).
+//
+// History: culling used to be disabled OUTRIGHT in VR (early-return on
+// g_duskVRRenderingToHeadset) because background meshes vanished when Link
+// faced away from them. The real reason that happened is that this
+// clipper is also exercised from the legacy once-per-sim-tick
+// fapGm_Execute() draw pass, where j3dSys.getViewMtx() still holds the
+// FLATSCREEN chase camera (set by camera_execute, d_camera.cpp) -- i.e.
+// Link's body-facing direction, not the headset's. Inside a real VR eye
+// pass the inputs are all correct: beginEye() (vr_stereo_render.hpp)
+// sets j3dSys' view matrix to that eye's own view AND rebuilds
+// mDoLib_clipper's frustum from that eye's real FOV (smallest symmetric
+// frustum containing the asymmetric one, so it can only ever be slightly
+// too permissive, never wrongly cull). So: cull normally while an eye pass
+// is open, and only fall back to "never cull" for the legacy pass. The
+// blanket disable was submitting every mesh in every loaded room twice per
+// frame -- a large, avoidable cost on the Quest.
+static inline bool duskVrSkipCulling() {
+    return g_duskVRRenderingToHeadset && !g_duskVREyePassOpen;
+}
+
+// TEMP DIAGNOSTIC (Quest perf item #1 verification, 2026-09-20 -- remove once
+// the culling win is confirmed or ruled out): counts clip() tests and
+// rejections while a VR eye pass is open. Read and reset once per frame by
+// vr_main.cpp's tick(), reported in its [dusk::vr::perf] line.
+extern "C" unsigned int g_duskVRCullTested = 0;
+extern "C" unsigned int g_duskVRCullRejected = 0;
+static inline int duskVrCountCull(int result) {
+    if (g_duskVRRenderingToHeadset && g_duskVREyePassOpen) {
+        ++g_duskVRCullTested;
+        if (result) ++g_duskVRCullRejected;
+    }
+    return result;
+}
 
 void J3DUClipper::init() {
     mNear = 1.0f;
@@ -32,7 +68,11 @@ void J3DUClipper::calcViewFrustum() {
 }
 
 int J3DUClipper::clip(f32 const (*param_0)[4], Vec param_1, f32 param_2) const {
-    if (g_duskVRRenderingToHeadset) {
+    return duskVrCountCull(clipSphereImpl(param_0, param_1, param_2));
+}
+
+int J3DUClipper::clipSphereImpl(f32 const (*param_0)[4], Vec param_1, f32 param_2) const {
+    if (duskVrSkipCulling()) {
         return 0;
     }
 
@@ -67,7 +107,11 @@ int J3DUClipper::clip(f32 const (*param_0)[4], Vec param_1, f32 param_2) const {
 
 
 int J3DUClipper::clip(f32 const (*param_1)[4], Vec* param_2, Vec* param_3) const {
-    if (g_duskVRRenderingToHeadset) {
+    return duskVrCountCull(clipBoxImpl(param_1, param_2, param_3));
+}
+
+int J3DUClipper::clipBoxImpl(f32 const (*param_1)[4], Vec* param_2, Vec* param_3) const {
+    if (duskVrSkipCulling()) {
         return 0;
     }
 

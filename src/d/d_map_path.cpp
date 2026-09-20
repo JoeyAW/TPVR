@@ -17,7 +17,6 @@
 #ifdef TARGET_PC
 #include "dusk/settings.h"
 #include "dusk/vr/vr_main.hpp"
-#include "dusk/logging.h"
 #include "dusk/hq_minimap.hpp"
 #include "m_Do/m_Do_graphic.h"
 #include <dolphin/gx/GXAurora.h>
@@ -38,11 +37,12 @@ u16 scaled_map_axis(u16 value, f32 scale) {
 // the two can't disagree about how oversampled the map texture is.
 //
 // Standalone VR (Quest): the game renders at the logical size (AuroraGetRenderSize() == 838x448,
-// confirmed via a real device log), so this scale is exactly 1 there -- the map texture is drawn at
-// its native 216x216 with full-width outlines, then magnified onto the HUD. That reads as an
-// oversized minimap with colour fringing along every edge (a magnified palette-index texture). PC
-// never hits this because its render size is 3-4x logical. Give standalone the same floor PC
-// effectively has so the map is oversampled and the outlines get halved the same way.
+// confirmed via a real device log), so this scale is exactly 1 there -- the map texture would be
+// drawn at its native 216x216 with full-width outlines (the GameCube look), whereas PC renders it
+// at 3-4x logical with the outlines halved. Give standalone the same floor PC effectively has so
+// the minimap is oversampled and looks the same on both. Cosmetic parity only -- the Quest
+// minimap's cropped/rainbow-edged corruption was a separate FIFO-ordering bug, fixed in
+// vr_stereo_render.hpp's beginEye() (see the AuroraGXSync() comment there).
 aurora::Vec2<f32> map_render_scale() {
     u32 renderWidth = 0;
     u32 renderHeight = 0;
@@ -417,15 +417,6 @@ void dRenderingMap_c::makeResTIMG(ResTIMG* p_image, u16 width, u16 height, u8* p
     const auto [rw, rh] = map_render_size_for(width, height);
     p_image->width = rw;
     p_image->height = rh;
-    // TEMP DIAGNOSTIC [mapdiag]: standalone minimap renders cropped/"zoomed in" with garbage edges.
-    // Logs the sizes the texture was CREATED with, to compare against render/copy time below.
-    {
-        u32 renderW = 0, renderH = 0;
-        AuroraGetRenderSize(&renderW, &renderH);
-        DuskLog.info("[mapdiag] makeResTIMG logical={}x{} -> tex={}x{} window={}x{} logicalFb={}x{} hudScale={}",
-            width, height, rw, rh, renderW, renderH, mDoGph_gInf_c::getWidthF(), mDoGph_gInf_c::getHeightF(),
-            dusk::getSettings().game.hudScale.getValue());
-    }
 #else
     p_image->width = width;
     p_image->height = height;
@@ -541,20 +532,6 @@ void dRenderingFDAmap_c::drawBack() const {
 void dRenderingFDAmap_c::preRenderingMap() {
 #ifdef TARGET_PC
     const auto [rw, rh] = map_render_size_for(mTexWidth, mTexHeight);
-    // TEMP DIAGNOSTIC [mapdiag]: log the render-time sizes whenever they differ from the last
-    // logged pair (catches a mid-session change vs. the creation-time makeResTIMG log above).
-    {
-        static u16 sLastW = 0, sLastH = 0, sLastTexW = 0, sLastTexH = 0;
-        if (rw != sLastW || rh != sLastH || mTexWidth != sLastTexW || mTexHeight != sLastTexH) {
-            sLastW = rw; sLastH = rh; sLastTexW = mTexWidth; sLastTexH = mTexHeight;
-            u32 renderW = 0, renderH = 0;
-            AuroraGetRenderSize(&renderW, &renderH);
-            DuskLog.info("[mapdiag] preRenderingMap logical={}x{} -> fb={}x{} window={}x{} logicalFb={}x{} "
-                         "eyePassOpen={} vrActive={}",
-                mTexWidth, mTexHeight, rw, rh, renderW, renderH, mDoGph_gInf_c::getWidthF(),
-                mDoGph_gInf_c::getHeightF(), dusk::vr::isEyePassOpen(), dusk::vr::isActive());
-        }
-    }
     GXCreateFrameBuffer(rw, rh);
     // Set logical viewport dimensions
     GXSetViewport(0.0f, 0.0f, mTexWidth, mTexHeight, 0.0f, 1.0f);

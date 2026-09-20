@@ -500,6 +500,20 @@ inline aurora::gfx::ResolvedTargets beginEye(const EyeParams& eye) {
     // makes the native-resolution viewport call scale up to fill the
     // actual eye target instead, matching what already happens correctly
     // for normal flatscreen rendering. See gfx.hpp's doc comment.
+    //
+    // ORDERING MATTERS (Quest minimap "zoomed in with rainbow edges" bug,
+    // 2026-09-20): since 2.0 the GX stream is processed on the FIFO thread,
+    // and this flag is read THERE (logical_fb_size(), at command-processing
+    // time), not here. create_pass() below drains the FIFO -- so anything
+    // still queued from the pre-eye-loop window (captureMapCopy2D()'s minimap
+    // render + GXCopyTex, captureHudBillboard()) would be processed with this
+    // eye's flag already on, scaling the minimap's own offscreen copy rect by
+    // logical/target (a 56x104 crop of a 216x216 map, linearly resampled --
+    // exactly what was seen). PC only got away with it because its FIFO
+    // thread had usually caught up by now; the Quest's hadn't. Flush + drain
+    // FIRST so everything queued before this eye is processed under the
+    // pre-eye (off) value, then flip the flag for this eye's own commands.
+    AuroraGXSync();
     aurora::gfx::set_offscreen_uses_native_logical_size(true);
     const bool ok = aurora::gfx::create_pass(eye.width, eye.height);
     assert(ok && "VR: create_pass failed — is another offscreen pass already open?");

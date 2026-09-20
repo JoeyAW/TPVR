@@ -2483,6 +2483,25 @@ void submitFrame() {
 
     g_session->endAccessAll();
 
+#if !DUSK_VR_XR_GRAPHICS_VULKAN
+    // GPU-DIRECT PATH, intermediate-texture variant (see Session::
+    // ensureIntermediateTexture()'s comment): readbackEyeCopy() above
+    // no-op'd for every eye, and endAccessAll() just handed the typed
+    // intermediate back from Dawn -- now do the ONE raw same-queue copy of
+    // the whole double-wide image into the real swapchain image. Must sit
+    // after endAccessAll() and before xrReleaseSwapchainImage(). Width is
+    // the FULL double-wide image, matching beginSwapchainAccessForFrame().
+    if (g_session->usesIntermediateSwapchainCopy()) {
+        for (const auto& eye : g_pendingSubmit.eyes) {
+            if (!eye.valid) {
+                continue;
+            }
+            g_session->finishIntermediateSwapchainCopy(eye.swapchainIndex, eye.eyeWidth * 2, eye.eyeHeight);
+            break;
+        }
+    }
+#endif
+
     XrSwapchainImageReleaseInfo releaseInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
     // TEMP DIAGNOSTIC (this session): see tick()'s matching comment above.
     if (XR_FAILED(xrReleaseSwapchainImage(g_session->swapchain(), &releaseInfo))) {

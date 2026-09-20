@@ -764,11 +764,15 @@ public:
             D3D12_RESOURCE_DESC realDesc = swapchainImages_[0].texture->GetDesc();
             if (static_cast<int64_t>(realDesc.Format) != chosenFormat) {
                 char msg[256];
+                // 2026-09-19: no longer disables the GPU-direct path -- the
+                // intermediate-texture variant (ensureIntermediateTexture())
+                // handles a typeless runtime resource; this flag now only
+                // records that DIRECT import would be impossible.
                 duskVrSnprintf(msg, sizeof(msg),
                             "[dusk::vr] createSwapchain: runtime's real swapchain resource "
                             "format (%lld) doesn't match the requested format (%lld) -- "
-                            "likely allocated typeless; disabling GPU-direct swapchain copy, "
-                            "falling back to CPU readback\n",
+                            "allocated typeless; direct Dawn import impossible, GPU-direct "
+                            "copy will go through the typed intermediate texture instead\n",
                             static_cast<long long>(realDesc.Format), static_cast<long long>(chosenFormat));
                 duskVrLog(msg);
                 swapchainResourceFormatUsable_ = false;
@@ -1080,7 +1084,167 @@ public:
     // submitFrame(), unchanged) closes this out via the existing
     // pendingMemory_/pendingTextures_ bookkeeping -- reused as-is, not
     // duplicated.
+    // INTERMEDIATE-TEXTURE VARIANT (2026-09-19) -- the path that actually
+    // runs in practice (see kDirectSwapchainImport). Root cause it works
+    // around: Virtual Desktop (and, per the OpenXR spec, any runtime is
+    // free to) allocates the swapchain's real ID3D12Resource as the
+    // TYPELESS member of the requested format family so it can expose
+    // both SRGB and non-SRGB views of one resource -- and Dawn's D3D12
+    // SharedTextureMemory import only accepts typed formats (confirmed
+    // against Dawn's own UtilsD3D.cpp format table: every _SRGB/_UNORM
+    // variant is listed, no _TYPELESS ones). So instead of importing the
+    // RUNTIME's resource, create OUR OWN typed one on the same device
+    // (xrDevice_ == Aurora's own ID3D12Device whenever sameDeviceAsAurora_,
+    // which is the only time this is ever reached), import THAT into Dawn
+    // (typed, so the import is valid), let the gamma-compute pass write
+    // into it exactly as it would have written into the swapchain texture,
+    // and once Dawn's EndAccess has run, copy it into the real swapchain
+    // image with one raw same-queue ID3D12 CopyTextureRegion
+    // (finishIntermediateSwapchainCopy()). D3D12 permits CopyTextureRegion
+    // between a typed format and its own typeless family member, so this
+    // works whether the runtime allocated typed OR typeless. Zero CPU
+    // touch, no separate device, no MapAsync -- the one extra GPU-side
+    // 39MB-ish copy per frame is negligible next to the multi-millisecond
+    // CPU stall it replaces.
+    //
+    // Dawn's D3D12 import requirements, read from its own
+    // SharedTextureMemoryD3D12.cpp rather than assumed: Texture2D, 1 mip,
+    // 1 array slice, 1 sample, and the resource MUST carry
+    // D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS (a hard validation
+    // error otherwise). That flag is also what makes the raw copy below
+    // barrier-free on the source side: simultaneous-access resources
+    // decay to COMMON at every ExecuteCommandLists boundary and get
+    // implicitly promoted to COPY_SOURCE for the read.
+    //
+    // Sync: same device AND same queue as Dawn (both handed to
+    // xrCreateSession), and the raw copy is only ever recorded/submitted
+    // from submitFrame() AFTER aurora::gfx::synchronize() has confirmed
+    // the render worker already called Submit() for this frame -- D3D12
+    // executes command lists on one queue in submission order, so our copy
+    // is ordered after Dawn's write with no fence handshake needed, and
+    // next frame's Dawn write (submitted later still) is ordered after our
+    // read of the same intermediate. One intermediate resource for the
+    // whole session is therefore sufficient.
+    void ensureIntermediateTexture(uint32_t width, uint32_t height) {
+        if (intermediateTexture_ || intermediateCreateFailed_) {
+            return;
+        }
+
+        D3D12_HEAP_PROPERTIES heapProps{};
+        heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        desc.Width = width;
+        desc.Height = height;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = 1;
+        // The swapchain's REAL requested format (typed), e.g.
+        // DXGI_FORMAT_B8G8R8A8_UNORM_SRGB -- same value the gamma-compute
+        // shader already packs bytes for, and the same family the runtime's
+        // (possibly typeless) resource belongs to, which is what makes the
+        // final CopyTextureRegion legal.
+        desc.Format = static_cast<DXGI_FORMAT>(swapchainDxgiFormat_);
+        desc.SampleDesc.Count = 1;
+        desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+
+        HRESULT hr = xrDevice_->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
+                                                          D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                          IID_PPV_ARGS(&intermediateResource_));
+        if (FAILED(hr) || !intermediateResource_) {
+            char msg[192];
+            duskVrSnprintf(msg, sizeof(msg),
+                           "[dusk::vr] ensureIntermediateTexture: CreateCommittedResource failed "
+                           "(hr=0x%08lx) -- disabling GPU-direct swapchain copy, falling back to "
+                           "CPU readback\n",
+                           static_cast<unsigned long>(hr));
+            duskVrLog(msg);
+            intermediateCreateFailed_ = true;
+            return;
+        }
+
+        // Aurora's uncaptured-error callback FATALs on any post-init Dawn
+        // validation error -- bracket the two Dawn calls below in an error
+        // scope so a rejected import degrades to the CPU path with a log
+        // line instead of aborting the whole game (the exact failure mode
+        // the typeless-format crash had before it was detected up front).
+        aurora::webgpu::g_device.PushErrorScope(wgpu::ErrorFilter::Validation);
+
+        dawn::native::d3d12::SharedTextureMemoryD3D12ResourceDescriptor d3dDesc;
+        d3dDesc.resource = intermediateResource_;
+
+        wgpu::SharedTextureMemoryDescriptor stmDesc{};
+        stmDesc.nextInChain = &d3dDesc;
+        intermediateMemory_ = aurora::webgpu::g_device.ImportSharedTextureMemory(&stmDesc);
+
+        wgpu::TextureDescriptor texDesc{};
+        texDesc.format = fromDxgiSwapchainFormat(swapchainDxgiFormat_);
+        texDesc.size = {width, height, 1};
+        // CopyDst is all encoderTaskCallback()'s CopyBufferToTexture needs.
+        // (RenderAttachment would additionally require ALLOW_RENDER_TARGET
+        // on the resource -- not asked for, not needed.)
+        texDesc.usage = wgpu::TextureUsage::CopyDst;
+        intermediateTexture_ = intermediateMemory_.CreateTexture(&texDesc);
+
+        bool scopeDone = false;
+        bool scopeFailed = false;
+        std::string scopeMessage;
+        const auto future = aurora::webgpu::g_device.PopErrorScope(
+            wgpu::CallbackMode::WaitAnyOnly,
+            [&](wgpu::PopErrorScopeStatus status, wgpu::ErrorType type, wgpu::StringView message) {
+                scopeDone = true;
+                if (status != wgpu::PopErrorScopeStatus::Success || type != wgpu::ErrorType::NoError) {
+                    scopeFailed = true;
+                    scopeMessage = std::string{std::string_view{message}};
+                }
+            });
+        aurora::webgpu::g_instance.WaitAny(future, 5000000000);
+
+        if (!scopeDone || scopeFailed || !intermediateTexture_) {
+            char msg[512];
+            duskVrSnprintf(msg, sizeof(msg),
+                           "[dusk::vr] ensureIntermediateTexture: Dawn rejected the intermediate "
+                           "texture import (%s) -- disabling GPU-direct swapchain copy, falling "
+                           "back to CPU readback\n",
+                           scopeDone ? scopeMessage.c_str() : "PopErrorScope timed out");
+            duskVrLog(msg);
+            intermediateTexture_ = nullptr;
+            intermediateMemory_ = nullptr;
+            intermediateResource_.Reset();
+            intermediateCreateFailed_ = true;
+            return;
+        }
+
+        intermediateWidth_ = width;
+        intermediateHeight_ = height;
+        char msg[256];
+        duskVrSnprintf(msg, sizeof(msg),
+                       "[dusk::vr] ensureIntermediateTexture: %ux%u dxgiFormat=%lld imported into "
+                       "Dawn -- GPU-direct swapchain copy via intermediate texture is ACTIVE "
+                       "(no CPU readback)\n",
+                       width, height, static_cast<long long>(swapchainDxgiFormat_));
+        duskVrLog(msg);
+    }
+
     void beginSwapchainAccessForFrame(uint32_t index, uint32_t width, uint32_t height) {
+        if (usesIntermediateSwapchainCopy()) {
+            ensureIntermediateTexture(width, height);
+            if (!intermediateTexture_) {
+                // Creation failed -- intermediateCreateFailed_ is now set,
+                // so usesGpuDirectSwapchainCopy() reads false for the rest
+                // of the session and tick()'s per-eye branch below this
+                // call falls through to encodeEyeCopy()/readbackEyeCopy().
+                return;
+            }
+            wgpu::SharedTextureMemoryBeginAccessDescriptor beginDesc{};
+            beginDesc.initialized = true;
+            intermediateMemory_.BeginAccess(intermediateTexture_, &beginDesc);
+            pendingMemory_.push_back(intermediateMemory_);
+            pendingTextures_.push_back(intermediateTexture_);
+            return;
+        }
+
         ensureSwapchainTexture(index, width, height);
 
         wgpu::SharedTextureMemoryBeginAccessDescriptor beginDesc{};
@@ -1131,6 +1295,83 @@ public:
         static_assert(sizeof(CpuCopyTaskPayload) <= aurora::gfx::InlineDrawPayloadSize,
                       "CpuCopyTaskPayload too large for inline encoder task payload");
         aurora::gfx::push_encoder_task(cpuCopyTaskId_, &payload, sizeof(payload));
+    }
+
+    // Second half of the intermediate-texture path (see
+    // ensureIntermediateTexture()'s comment): one raw same-queue
+    // CopyTextureRegion from the (already EndAccess'd -- endAccessAll()
+    // must run BEFORE this, so Dawn has formally handed the resource back)
+    // typed intermediate into the real swapchain image. Call ONCE per frame
+    // from submitFrame(), after aurora::gfx::synchronize() and
+    // endAccessAll(), with the full double-wide dimensions. Non-blocking:
+    // command allocators are ring-buffered and only waited on if the GPU
+    // is somehow still executing that slot's copy from two frames ago,
+    // same shape as readbackEyeCopy()'s own slot logic.
+    void finishIntermediateSwapchainCopy(uint32_t swapchainIndex, uint32_t width, uint32_t height) {
+        if (!intermediateTexture_) {
+            return; // creation failed earlier this session -- already logged
+        }
+        ensureCpuCopyCmdList(); // creates copyFence_ if the CPU path never did
+
+        const uint32_t slot = intermediateSlot_;
+        if (!intermediateCmdList_[slot]) {
+            xrDevice_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                               IID_PPV_ARGS(&intermediateCmdAlloc_[slot]));
+            xrDevice_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, intermediateCmdAlloc_[slot].Get(),
+                                          nullptr, IID_PPV_ARGS(&intermediateCmdList_[slot]));
+            intermediateCmdList_[slot]->Close();
+        }
+        if (copyFence_->GetCompletedValue() < intermediateSlotFenceValue_[slot]) {
+            HANDLE event = CreateEventEx(nullptr, nullptr, 0, EVENT_ALL_ACCESS);
+            copyFence_->SetEventOnCompletion(intermediateSlotFenceValue_[slot], event);
+            WaitForSingleObject(event, INFINITE);
+            CloseHandle(event);
+        }
+
+        ID3D12CommandAllocator* alloc = intermediateCmdAlloc_[slot].Get();
+        ID3D12GraphicsCommandList* list = intermediateCmdList_[slot].Get();
+        alloc->Reset();
+        list->Reset(alloc, nullptr);
+
+        ID3D12Resource* dstResource = swapchainImages_[swapchainIndex].texture;
+
+        // Destination: same COMMON -> COPY_DEST -> COMMON bracket the CPU
+        // path already uses on this exact resource. Source: no barrier --
+        // ALLOW_SIMULTANEOUS_ACCESS resources are implicitly promoted from
+        // COMMON to COPY_SOURCE and decay back after execution.
+        D3D12_RESOURCE_BARRIER toDest{};
+        toDest.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        toDest.Transition.pResource = dstResource;
+        toDest.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+        toDest.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+        toDest.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        list->ResourceBarrier(1, &toDest);
+
+        D3D12_TEXTURE_COPY_LOCATION dst{};
+        dst.pResource = dstResource;
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dst.SubresourceIndex = 0;
+
+        D3D12_TEXTURE_COPY_LOCATION src{};
+        src.pResource = intermediateResource_.Get();
+        src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        src.SubresourceIndex = 0;
+
+        D3D12_BOX srcBox{0, 0, 0, width, height, 1};
+        list->CopyTextureRegion(&dst, 0, 0, 0, &src, &srcBox);
+
+        D3D12_RESOURCE_BARRIER toCommon = toDest;
+        std::swap(toCommon.Transition.StateBefore, toCommon.Transition.StateAfter);
+        list->ResourceBarrier(1, &toCommon);
+
+        list->Close();
+        ID3D12CommandList* lists[] = {list};
+        xrQueue_->ExecuteCommandLists(1, lists);
+
+        ++copyFenceValue_;
+        xrQueue_->Signal(copyFence_.Get(), copyFenceValue_);
+        intermediateSlotFenceValue_[slot] = copyFenceValue_;
+        intermediateSlot_ = (slot + 1) % kIntermediateSlotCount;
     }
 #endif  // !DUSK_VR_XR_GRAPHICS_VULKAN
 
@@ -2251,7 +2492,13 @@ private:
                 srcBuf.layout.rowsPerImage = p.eyeHeight;
 
                 wgpu::TexelCopyTextureInfo dstTex{};
-                dstTex.texture = self->swapchainTextures_[p.swapchainIndex];
+                // Intermediate-texture variant (the path that runs in
+                // practice -- see ensureIntermediateTexture()'s comment):
+                // same copy, just into our own typed texture; the real
+                // swapchain image gets it via finishIntermediateSwapchainCopy().
+                dstTex.texture = self->usesIntermediateSwapchainCopy()
+                                     ? self->intermediateTexture_
+                                     : self->swapchainTextures_[p.swapchainIndex];
                 dstTex.mipLevel = 0;
                 dstTex.origin = {p.dstXOffset, 0, 0};
                 dstTex.aspect = wgpu::TextureAspect::All;
@@ -2464,8 +2711,37 @@ public:
     // swapchainResourceFormatUsable_ has been detected false -- see its
     // own comment.
     bool usesGpuDirectSwapchainCopy() const {
+#if DUSK_VR_XR_GRAPHICS_VULKAN
         return sameDeviceAsAurora_ && useGammaComputePath_ && swapchainResourceFormatUsable_;
+#else
+        if (!sameDeviceAsAurora_ || !useGammaComputePath_ || intermediateCreateFailed_) {
+            return false;
+        }
+        // Direct import of the runtime's own resource is only usable when
+        // it turned out typed AND that path is opted into; otherwise the
+        // intermediate-texture variant handles it (typed or typeless
+        // alike) -- see ensureIntermediateTexture()'s comment.
+        return true;
+#endif
     }
+
+#if !DUSK_VR_XR_GRAPHICS_VULKAN
+    // 2026-09-19: the intermediate-texture variant (ensureIntermediateTexture()/
+    // finishIntermediateSwapchainCopy()) is used for EVERY same-device
+    // session, not just the typeless-swapchain case that forced it into
+    // existence -- one code path that works regardless of how a given
+    // runtime allocates its swapchain resource, exercised on every rig,
+    // beats two paths of which one (direct import of the runtime's
+    // resource) has never actually been seen working on real hardware.
+    // Flip this to true to prefer the direct import whenever the runtime
+    // did allocate a typed resource; the intermediate path still catches
+    // the typeless case either way.
+    static constexpr bool kDirectSwapchainImport = false;
+
+    bool usesIntermediateSwapchainCopy() const {
+        return usesGpuDirectSwapchainCopy() && !(kDirectSwapchainImport && swapchainResourceFormatUsable_);
+    }
+#endif
 
 #if DUSK_VR_XR_GRAPHICS_VULKAN
     // Vulkan/Android counterpart of sameDeviceAsAurora_/usesGpuDirectSwapchainCopy()
@@ -2633,6 +2909,29 @@ private:
     // by swapchainIndex, same as swapchainImages_ itself.
     std::vector<wgpu::SharedTextureMemory> swapchainMemory_;
     std::vector<wgpu::Texture> swapchainTextures_;
+
+    // Intermediate-texture variant of the GPU-direct path -- see
+    // ensureIntermediateTexture()'s comment. One typed, ALLOW_SIMULTANEOUS_
+    // ACCESS resource on Aurora's own device for the whole session,
+    // imported into Dawn once; finishIntermediateSwapchainCopy() copies it
+    // into whichever real swapchain image was acquired each frame.
+    Microsoft::WRL::ComPtr<ID3D12Resource> intermediateResource_;
+    wgpu::SharedTextureMemory intermediateMemory_;
+    wgpu::Texture intermediateTexture_;
+    uint32_t intermediateWidth_ = 0;
+    uint32_t intermediateHeight_ = 0;
+    // One-way: set if the resource/import could not be created, after
+    // which usesGpuDirectSwapchainCopy() reads false for the session.
+    bool intermediateCreateFailed_ = false;
+    // Ring of command allocators/lists for the raw copy (same reasoning as
+    // CpuCopyBuffers::slotCmdAlloc -- an allocator can't be Reset() while
+    // the GPU may still be executing its last list; 2 slots + the shared
+    // copyFence_ let each frame's copy submit without blocking).
+    static constexpr uint32_t kIntermediateSlotCount = 2;
+    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> intermediateCmdAlloc_[kIntermediateSlotCount];
+    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> intermediateCmdList_[kIntermediateSlotCount];
+    uint64_t intermediateSlotFenceValue_[kIntermediateSlotCount] = {0, 0};
+    uint32_t intermediateSlot_ = 0;
 #endif
 
 #if DUSK_VR_XR_GRAPHICS_VULKAN

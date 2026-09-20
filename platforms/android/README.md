@@ -83,7 +83,7 @@ acceleration disabled, launch it with `-gpu host`.
 You can pass command-line args through the activity intent:
 
 ```bash
-adb shell am start -n dev.twilitrealm.dusk/.DuskActivity \
+adb shell am start -n com.joeyaw.tpvr/.DuskActivity \
   --es borealis_args "--backend vulkan"
 ```
 

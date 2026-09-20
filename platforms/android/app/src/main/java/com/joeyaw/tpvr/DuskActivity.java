@@ -1,4 +1,4 @@
-package dev.twilitrealm.dusk;
+package com.joeyaw.tpvr;
 
 import android.content.Intent;
 import android.os.Bundle;

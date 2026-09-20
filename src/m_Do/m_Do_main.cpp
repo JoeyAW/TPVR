@@ -855,7 +855,13 @@ int game_main(int argc, char* argv[]) {
     }
 
     // Set SDL metadata for audio mixers and macOS "About" menu
+#if TARGET_ANDROID
+    // Standalone (Quest) build ships under its own name/package -- keep this in sync with
+    // platforms/android/app/build.gradle's applicationId and res/values/strings.xml's app_name.
+    SDL_SetAppMetadata("TPVR", BOREALIS_APP_VERSION, "com.joeyaw.tpvr");
+#else
     SDL_SetAppMetadata("Dusklight", BOREALIS_APP_VERSION, "dev.twilitrealm.dusk");
+#endif
 
     {
         const auto userPathString = dusk::ConfigPath.u8string();

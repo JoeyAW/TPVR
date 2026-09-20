@@ -14044,3 +14044,128 @@ multi-session debugging effort against real hardware, not a bounded
 exact same unsolved crash. User was given this assessment directly and
 asked how to proceed before any code was touched; check this section's
 own future follow-ups for what was decided.
+
+### VR performance ROOT CAUSE FIXED ON BOTH PLATFORMS -- CPU-readback round trip eliminated (PC 72649a8e0e, Quest 0b429191d5 + aurora 4904e30) -- 2026-09-19
+
+Closes the "VR performance investigation, 2026-09-16" thread above. Both
+fixes were built, measured with real in-headset timing, and committed the
+same day. All `[dusk::vr::perf]` instrumentation was removed once each
+platform was confirmed (per this project's normal practice); the numbers
+below are from those captures.
+
+**PC / D3D12 (CONFIRMED in-headset, Virtual Desktop, AMD RX 5700 XT).**
+The same-device GPU-direct path already engaged post-2.0 (upstream's
+aurora enables `allow_unsafe_apis` at the instance level, which is what
+finally made Dawn report `SharedTextureMemoryD3D12Resource`), but fell back
+because Virtual Desktop allocates the swapchain's real `ID3D12Resource` as
+`DXGI_FORMAT_B8G8R8A8_TYPELESS` (0x5a) and Dawn's D3D12 import accepts only
+typed formats (verified against Dawn's own `UtilsD3D.cpp` format table).
+**Fix**: stop importing the runtime's resource at all. `Session::
+ensureIntermediateTexture()` creates OUR OWN typed intermediate
+`ID3D12Resource` (`D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS` -- Dawn's
+hard import requirement, read from `SharedTextureMemoryD3D12.cpp`) on
+Aurora's device, imports that into Dawn, the existing gamma-compute
+`CopyBufferToTexture` targets it, and after `endAccessAll()`
+`finishIntermediateSwapchainCopy()` issues one raw same-queue
+`CopyTextureRegion` into the (typed or typeless) swapchain image --
+typed->same-family-typeless copies are legal D3D12. Ring-buffered command
+lists, no CPU wait. `kDirectSwapchainImport = false`: the intermediate path
+is used for EVERY same-device session so there is exactly one tested path
+regardless of what a runtime allocates. **Measured**: `submitFrameInternal`
+7-10.5ms -> 0.9-3.0ms/frame; zero readback. User was pinned at 72fps only
+because Virtual Desktop's "VR Frame Rate" was 72Hz (their setting, not a
+game limiter). SteamVR/Meta Link untested but nothing in the path is
+runtime-specific.
+
+**Quest 3 / Vulkan (path CONFIRMED ACTIVE via log; user: "It runs so much
+better now").** Not one fix -- five, each found by measuring, not guessing:
+
+1. **The lost Dawn feature request.** The aurora-side code requesting the
+   Vulkan shared-texture/fence features never survived the 2.0 merge; only
+   a permanently-false flag did. Restored in `gpu.cpp`, now requesting
+   `SharedTextureMemoryOpaqueFD` (+ `VkDedicatedAllocation`) and BOTH fence
+   types. The adapter reports **`SharedFenceSyncFD=true,
+   SharedFenceVkSemaphoreOpaqueFD=false`** -- so the previous session's
+   OpaqueFD-only code could never have worked reliably; its "the feature
+   flips between launches" theory was wrong (Dawn's `PhysicalDeviceVk.cpp`
+   shows these are deterministic extension queries). Dawn PREFERS SyncFD
+   whenever enabled (`SharedTextureMemoryVk.cpp` EndAccessImpl). Flag
+   renamed `g_vulkanSharedImageExportSupported`.
+2. **fd double-close (the fdsan crash).** Dawn's `SharedFence::ExportInfo`
+   returns Dawn's OWN fd (`mHandle.Get()`) and Dawn closes it in its
+   destructor; `vkImportSemaphoreFdKHR` takes ownership of the fd it's
+   given. Now `dup()`ed before import (and `close()`d if import fails).
+   Both fence types handled; a SyncFD of -1 means "already signaled".
+3. **The old path CPU-blocked every frame anyway** (`vkWaitForFences`
+   right after a submit that itself waited on Dawn's whole frame). Now
+   2-slot double-buffered (`SharedImageSlot`): each slot has its own image
+   + command buffer + fence + semaphore; a slot's fence is only waited on
+   when it comes around again two frames later.
+4. **Hidden stall #1 -- the invisible Android window.** Timing inside the
+   render worker's end-of-frame callback showed `GetCurrentTexture()` on
+   the Activity surface (never visible while the OpenXR session owns the
+   display) blocking **6-15ms/frame** on its buffer queue, and every
+   `synchronize()` caller waited behind it. New
+   `aurora::gfx::set_surface_present_suppressed()` skips acquire+present
+   for the VR session's lifetime (set in `startup()`, cleared on
+   EXITING/LOSS_PENDING). `synchronize` 8-15ms -> 2-3.5ms.
+5. **Hidden stall #2 -- `vkCmdCopyImage` on Adreno.** Per-call timing of
+   the 3-command copy buffer: `reset=150us begin=6 barrier1=2 copy=6.7-7.1ms
+   barrier2=2 end=10`. **`vkCmdCopyImage` into the runtime's gralloc-backed
+   swapchain image costs ~7ms of CPU time just to RECORD**, and neither a
+   linear (`CPU_READ_RARELY`) AHB layout nor a matching-format import
+   changed it (both tested). `vkCmdBlitImage` (same extents, nearest)
+   records in **11us** -- but a blit format-CONVERTS, and with the
+   AHardwareBuffer's mandatory UNORM format vs the runtime's sRGB swapchain
+   it sRGB-encoded already-encoded bytes -> **washed-out colors in the
+   headset** (user-reported, same look as the old PC gamma bug). An AHB
+   cannot legally be imported as its sRGB sibling
+   (VUID-VkMemoryAllocateInfo-pNext-02387, checked against the spec text:
+   format must be exactly what `vkGetAndroidHardwareBufferPropertiesANDROID`
+   reports). **Final design: no AHardwareBuffer at all.**
+   `ensureSharedImageResources()` creates a normal optimally-tiled VkImage
+   on the XR device **in the swapchain's own VkFormat** with exportable
+   memory (`VK_KHR_external_memory_fd`, now enabled in
+   `vr_xr_bootstrap.hpp` -> `supportsExternalMemoryFd`), exports the opaque
+   fd, and imports it into Dawn via `SharedTextureMemoryOpaqueFDDescriptor`
+   (same `VkImageCreateInfo` verbatim, `VkExternalMemoryImageCreateInfo`
+   in the chain, `TRANSFER_DST` usage -- Dawn's requirements per its
+   source; Dawn dup()s the fd so we close ours). Identical source/dest
+   formats make the blit a byte-exact identity (sRGB decode-on-read and
+   encode-on-write cancel) at the cheap record cost. Slots log
+   `vkFormat=43` (R8G8B8A8_SRGB) on the Quest.
+
+**Net Quest result**: `submitFrameInternal` 19-24ms -> ~2-3ms; whole
+frame ~25ms -> ~8ms, i.e. from ~40fps to the 72Hz cap with headroom. The
+remaining `setup` spikes (6-9ms, intermittent) are `xrWaitSwapchainImage`
+pacing us at the cap -- expected.
+
+**Also fixed along the way**:
+- **VR menu billboard heap corruption** (SIGABRT "Pointer tag ... truncated"
+  in `free()` under `absl::flat_hash_map::resize` <-
+  `aurora::gx::ensure_external_copy_texture()` <-
+  `vr_render::ensureAndCopyMenuBillboardTexture()`, symbolized from a real
+  Quest tombstone with `llvm-addr2line`). Since 2.0, GX commands run on the
+  "Aurora FIFO processor" thread, which owns `g_gxState` -- this main-thread
+  call was mutating its `copyTextures`/`copyTextureCache` maps concurrently
+  with `copy_tex()` on that thread. Fix: `AuroraGXSync()` (GXFlush + FIFO
+  drain) immediately before the insert (`vr_stereo_render.hpp`). It fired on
+  every launch that showed a menu; PC had just been getting lucky.
+- Swapchain now declares `XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT` -- every
+  submit path copies INTO the swapchain image, and on Vulkan that was
+  undefined behavior without the usage bit (runtimes over-provision, which
+  is why it worked). Not the cause of the 7ms copy (tested), just correct.
+
+**Reusable lessons**: (a) "record time" is a real place for a stall to
+hide -- per-call `steady_clock` timing around individual `vkCmd*` calls is
+cheap and was the only thing that found #5; (b) when a driver-level
+operation is inexplicably slow, try the sibling operation
+(`vkCmdBlitImage` vs `vkCmdCopyImage`) before theorizing about layouts;
+(c) a fix that changes pixel *format semantics* (blit vs copy) needs an
+eyes-on color check even when the perf numbers look perfect -- the washed-
+out build was numerically flawless; (d) read Dawn's/the spec's actual
+source for ownership and validity rules (fd ownership, VUID-02387) rather
+than inferring from a crash message -- two of the five fixes came straight
+from that. **Colors CONFIRMED correct in-headset on the final (opaque-fd)
+Quest build** -- user: "Colors are correct on quest." This closes the whole
+VR performance investigation on both platforms.

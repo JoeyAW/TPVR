@@ -48,7 +48,8 @@ void applyPresetDusk() {
     s.game.sunsSong.setValue(true);
     s.game.bloomMode.setValue(BloomMode::Dusk);
     s.game.depthOfFieldMode.setValue(DepthOfFieldMode::Dusk);
-    s.game.internalResolutionScale.setValue(0);
+    // Auto (0) on PC; 1x on standalone VR, where Auto crashes on map open.
+    s.game.internalResolutionScale.setValue(kDefaultInternalResolutionScale);
     s.game.shadowResolutionMultiplier.setValue(4);
     s.game.enableGyroAim.setValue(true);
     s.game.autoSave.setValue(true);

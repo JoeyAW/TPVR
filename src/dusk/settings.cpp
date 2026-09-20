@@ -80,7 +80,7 @@ UserSettings g_userSettings = {
         .disableWaterRefraction {"game.disableWaterRefraction", false},
         .enableTextureReplacements {"game.enableTextureReplacements", true},
         .enableFrameInterpolation {"game.enableFrameInterpolation", FrameInterpMode::Off},
-        .internalResolutionScale {"game.internalResolutionScale", 0},
+        .internalResolutionScale {"game.internalResolutionScale", kDefaultInternalResolutionScale},
         .shadowResolutionMultiplier {"game.shadowResolutionMultiplier", 1},
         .resampler {"game.resampler", Resampler::Bilinear},
         .enableMapBackground {"game.enableMapBackground", true},

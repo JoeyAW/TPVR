@@ -10,6 +10,17 @@ namespace dusk {
 using config::ConfigVar;
 using config::ActionBindConfigVar;
 
+// Default internal resolution scale (0 = Auto). On standalone VR (Quest) Auto crashes the game
+// when the map is opened, so it defaults to a fixed 1x there instead. Shared by the compiled
+// default and the first-launch "Dusklight" preset so a fresh Quest install never lands on Auto.
+// Keyed on TARGET_ANDROID rather than TARGET_PC, since TARGET_PC is defined on every non-console
+// build, Android included.
+#if defined(TARGET_ANDROID) || defined(__ANDROID__)
+inline constexpr int kDefaultInternalResolutionScale = 1;
+#else
+inline constexpr int kDefaultInternalResolutionScale = 0;
+#endif
+
 enum class BloomMode : int {
     Off = 0,
     Classic = 1,

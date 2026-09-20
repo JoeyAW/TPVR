@@ -49,6 +49,15 @@
 #define TOUCH_CONTROLS_AVAILABLE false
 #endif
 
+// Standalone VR (Quest) has no desktop window and no PC VR runtime, so the VR tab hides the
+// desktop-mirror toggle and the runtime-specific brightness sliders there. Keyed on
+// TARGET_ANDROID rather than TARGET_PC, since TARGET_PC is defined on every non-console build.
+#if defined(TARGET_ANDROID) || defined(__ANDROID__)
+#define VR_SETTINGS_STANDALONE true
+#else
+#define VR_SETTINGS_STANDALONE false
+#endif
+
 namespace dusk::ui {
 namespace {
 
@@ -923,6 +932,10 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
         auto& leftPane = add_child<Pane>(content, Pane::Type::Controlled);
         auto& rightPane = add_child<Pane>(content, Pane::Type::Uncontrolled);
 
+#if !VR_SETTINGS_STANDALONE
+        // Standalone (Quest) has no desktop window to mirror to. The setting itself stays
+        // registered and defaults ON there -- the mirror path also drives the Dusklight overlay's
+        // scaling -- it's just not user-facing.
         leftPane.add_section("Display");
         config_bool_select(leftPane, rightPane, getSettings().game.vrDesktopMirror,
             {
@@ -931,6 +944,7 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                             "instead of leaving it blank. Reuses the game's existing present "
                             "pass, so this has no meaningful performance cost."
             });
+#endif
 
         leftPane.add_section("Comfort");
         config_bool_select(leftPane, rightPane, getSettings().game.vrPositionalTracking,
@@ -1001,6 +1015,10 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                             "is the one that uses it. Off by default."
             });
 
+#if !VR_SETTINGS_STANDALONE
+        // Standalone renders through the native Quest runtime -- no SteamVR / Virtual Desktop /
+        // Meta Link compositor in the loop, and its gamma is already correct, so neither
+        // compensation slider applies there.
         leftPane.add_section("Brightness");
         config_percent_select(leftPane, rightPane, getSettings().game.vrGammaCompensation,
             "VR Brightness Compensation",
@@ -1016,6 +1034,7 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
             "compositor handles color differently than other VR runtimes. Only applies "
             "while running through SteamVR.",
             30, 220, 5);
+#endif
     });
 
     add_tab("Input", [this](Rml::Element* content) {

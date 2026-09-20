@@ -305,16 +305,6 @@ struct PendingFrameSubmit {
 };
 PendingFrameSubmit g_pendingSubmit;
 
-// Perf instrumentation (see plan/investigation notes): coarse wall-clock
-// waypoints spanning the FULL xrWaitFrame-succeeds-to-xrEndFrame window --
-// the same span a Virtual Desktop-style overlay's "Game" time measures --
-// broken into phases, since the piecewise readbackEyeCopy()/synchronize()
-// timers already added don't cover tick()'s own setup/render/encode work
-// or the gap between tick() returning and submitFrame() being called
-// (m_Do_main.cpp's other per-frame work + aurora_end_frame()'s Submit()).
-std::chrono::steady_clock::time_point g_tFrameStart{};
-std::chrono::steady_clock::time_point g_tAfterAcquire{};
-std::chrono::steady_clock::time_point g_tTickEnd{};
 
 // FIXED this session: these now come from real xrCreateActionSpace calls
 // (vr_xr_bootstrap.hpp's createHandActionSet()/attachAndCreateHandSpaces(),
@@ -735,38 +725,38 @@ bool startup() {
 #endif
         g_ownedSession->setSameDeviceAsAurora(reusedAuroraDevice);
 #if DUSK_VR_XR_GRAPHICS_VULKAN
-        // AHardwareBuffer GPU-direct swapchain-copy path (see Session::
-        // usesAhbGpuDirect_'s comment) -- requires BOTH sides to
-        // independently support the interop: Dawn's own adapter
-        // (aurora::webgpu::g_sharedTextureMemoryAHardwareBufferSupported,
+        // Shared-image GPU-direct swapchain-copy path (see Session::
+        // ensureSharedImageResources()'s comment) -- requires BOTH sides to
+        // independently support opaque-fd memory sharing: Dawn's own
+        // adapter (aurora::webgpu::g_vulkanSharedImageExportSupported,
         // requested at Dawn device-creation time in gpu.cpp) and the
-        // XR-side device's actually-enabled Vulkan extension
-        // (gfx.supportsAndroidHardwareBuffer, from createXrGraphicsDevice()
+        // XR-side device's actually-enabled VK_KHR_external_memory_fd
+        // (gfx.supportsExternalMemoryFd, from createXrGraphicsDevice()
         // above). Same "both sides must independently support it, don't
         // assume" shape as the D3D12 path's adaptersMatch+
         // g_sharedTextureMemoryD3D12Supported pair.
-        const bool ahbSupported =
-            aurora::webgpu::g_sharedTextureMemoryAHardwareBufferSupported && gfx.supportsAndroidHardwareBuffer;
-        g_ownedSession->setUsesAhbGpuDirect(ahbSupported);
+        const bool sharedImageSupported =
+            aurora::webgpu::g_vulkanSharedImageExportSupported && gfx.supportsExternalMemoryFd;
+        g_ownedSession->setUsesSharedImageGpuDirect(sharedImageSupported);
         {
             char msg[256];
             duskVrSnprintf(msg, sizeof(msg),
-                        "[dusk::vr::startup] AHardwareBuffer GPU-direct swapchain path: "
+                        "[dusk::vr::startup] shared-image GPU-direct swapchain path: "
                         "dawnSupported=%d xrDeviceSupported=%d -> %s\n",
-                        aurora::webgpu::g_sharedTextureMemoryAHardwareBufferSupported,
-                        gfx.supportsAndroidHardwareBuffer, ahbSupported ? "ENABLED" : "disabled (falling back to CPU readback)");
+                        aurora::webgpu::g_vulkanSharedImageExportSupported,
+                        gfx.supportsExternalMemoryFd, sharedImageSupported ? "ENABLED" : "disabled (falling back to CPU readback)");
             duskVrLog(msg);
         }
-        // Async semaphore-gated handoff for the AHB path above (2026-09-18,
-        // see Session::finishAhbGpuCopy()'s own comment) -- independent
-        // gate from ahbSupported itself: even if the AHB path is disabled
+        // Async semaphore-gated handoff for the shared-image path above
+        // (see Session::finishSharedImageGpuCopy()'s own comment) -- independent
+        // gate from sharedImageSupported itself: even if that path is disabled
         // entirely, this flag is harmless to set (never consulted unless
-        // usesAhbGpuDirect() is also true).
+        // usesSharedImageGpuDirect() is also true).
         g_ownedSession->setSupportsExternalSemaphoreFd(gfx.supportsExternalSemaphoreFd);
         {
             char msg[160];
             duskVrSnprintf(msg, sizeof(msg),
-                        "[dusk::vr::startup] AHardwareBuffer async semaphore handoff: "
+                        "[dusk::vr::startup] shared-image async semaphore handoff: "
                         "xrDeviceSupportsExternalSemaphoreFd=%d\n",
                         gfx.supportsExternalSemaphoreFd);
             duskVrLog(msg);
@@ -882,6 +872,18 @@ bool startup() {
         // fails (logs internally); VR still works without it, just without
         // menu access.
         ensureVrMenuGamepadAttached();
+
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+        // Standalone Android/Quest: the Activity's own window is never
+        // visible while the OpenXR session owns the display, but aurora's
+        // render worker still acquired+presented it every frame -- and
+        // GetCurrentTexture() on that surface blocked 6-15ms/frame waiting
+        // on its buffer queue (measured on a real Quest 3, 2026-09-19),
+        // stalling every synchronize() caller behind it. Skip it for the
+        // session's lifetime; re-enabled where the session tears down.
+        aurora::gfx::set_surface_present_suppressed(true);
+        duskVrLog("[dusk::vr::startup] window-surface present suppressed for the VR session (Android)\n");
+#endif
 
         return true;
     } catch (const std::exception& e) {
@@ -1080,6 +1082,9 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
                 // STOPPING, the resumable case -- see vr_menu_gamepad.hpp's
                 // detachVrMenuGamepad() comment).
                 detachVrMenuGamepad();
+                // Let the (now possibly visible again) window present
+                // normally -- see startup()'s matching suppression.
+                aurora::gfx::set_surface_present_suppressed(false);
                 g_session = nullptr;
                 g_sessionRunning = false;
                 g_duskVRSessionActive = false;
@@ -1104,7 +1109,6 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         duskVrLog("[dusk::vr::tick] FAILED: xrWaitFrame\n");
         return;
     }
-    g_tFrameStart = std::chrono::steady_clock::now();
     g_session->setFrameState(frameState);
     // Live-adjustable universal VR gamma compensation (see vr_xr_submit.hpp's
     // kSteamVrGammaCompensationExponent comment, 2026-08-16) -- read here
@@ -2059,8 +2063,8 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     // createSwapchain(eyeWidth * 2, eyeHeight, ...) call actually allocated.
     // beginSwapchainAccessForFrame() now has a real implementation on BOTH
     // branches (D3D12: wraps the real swapchain texture directly, see
-    // sameDeviceAsAurora_'s comment; Vulkan: wraps an AHardwareBuffer
-    // staging texture instead, see usesAhbGpuDirect_'s/ensureAhbResources()'s
+    // sameDeviceAsAurora_'s comment; Vulkan: wraps an exported-memory
+    // staging image instead, see usesSharedImageGpuDirect_'s/ensureSharedImageResources()'s
     // comment for why Dawn can't touch the real swapchain image on this
     // platform) -- same function name on both, different gating flag per
     // branch since the two GPU-direct mechanisms are independently
@@ -2072,14 +2076,13 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
             configViews[0].recommendedImageRectHeight);
     }
 #else
-    if (g_session->usesAhbGpuDirect()) {
+    if (g_session->usesSharedImageGpuDirect()) {
         g_session->beginSwapchainAccessForFrame(
             swapchainIndex, configViews[0].recommendedImageRectWidth * 2,
             configViews[0].recommendedImageRectHeight);
     }
 #endif
 
-    g_tAfterAcquire = std::chrono::steady_clock::now();
 
     // CONFIRMED this session (m_Do_main.cpp): tick() is called from INSIDE
     // that file's own aurora_begin_frame()/aurora_end_frame() pair (around
@@ -2310,8 +2313,8 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         // encodeSwapchainCopy() now has a real implementation on both
         // branches (see beginSwapchainAccessForFrame()'s call site above
         // for the same reasoning) -- D3D12 writes straight into the real
-        // swapchain texture; Vulkan writes into an AHardwareBuffer staging
-        // texture instead (see usesAhbGpuDirect_'s comment).
+        // swapchain texture; Vulkan writes into an exported-memory staging
+        // image instead (see usesSharedImageGpuDirect_'s comment).
 #if !DUSK_VR_XR_GRAPHICS_VULKAN
         if (g_session->usesGpuDirectSwapchainCopy()) {
             g_session->encodeSwapchainCopy(
@@ -2319,7 +2322,7 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
                 eye * eyeParams.width, aurora::gfx::color_format());
         } else
 #else
-        if (g_session->usesAhbGpuDirect()) {
+        if (g_session->usesSharedImageGpuDirect()) {
             g_session->encodeSwapchainCopy(
                 targets.colorTexture, eye, swapchainIndex, eyeParams.width, eyeParams.height,
                 eye * eyeParams.width, aurora::gfx::color_format());
@@ -2401,7 +2404,6 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     g_pendingSubmit.base = base;
     g_pendingSubmit.viewCount = viewCount;
     g_hasPendingFrameSubmit = true;
-    g_tTickEnd = std::chrono::steady_clock::now();
 }
 
 // NEW this session: the other half of what used to be tick()'s tail end,
@@ -2424,7 +2426,6 @@ void submitFrame() {
         return;
     }
     g_hasPendingFrameSubmit = false;
-    const auto tSubmitStart = std::chrono::steady_clock::now();
 
     // ROOT-CAUSED this session: aurora_end_frame() only ENQUEUES this
     // frame's work onto Aurora's render worker thread (render_worker::
@@ -2462,7 +2463,7 @@ void submitFrame() {
     }
 
 #if DUSK_VR_XR_GRAPHICS_VULKAN
-    // AHARDWAREBUFFER GPU-DIRECT PATH (see Session::usesAhbGpuDirect_'s
+    // SHARED-IMAGE GPU-DIRECT PATH (see Session::usesSharedImageGpuDirect_'s
     // comment): readbackEyeCopy() above already no-op'd for every eye on
     // this path (see its own early-return) -- do the ONE real, whole-frame
     // GPU-side copy here instead, using whichever eye this frame actually
@@ -2470,12 +2471,12 @@ void submitFrame() {
     // width passed must be the FULL double-wide image, not one eye's
     // half, matching exactly what beginSwapchainAccessForFrame() was
     // called with earlier in tick()).
-    if (g_session->usesAhbGpuDirect()) {
+    if (g_session->usesSharedImageGpuDirect()) {
         for (const auto& eye : g_pendingSubmit.eyes) {
             if (!eye.valid) {
                 continue;
             }
-            g_session->finishAhbGpuCopy(eye.swapchainIndex, eye.eyeWidth * 2, eye.eyeHeight);
+            g_session->finishSharedImageGpuCopy(eye.swapchainIndex, eye.eyeWidth * 2, eye.eyeHeight);
             break;
         }
     }
@@ -2521,31 +2522,6 @@ void submitFrame() {
     endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
     endInfo.layerCount = 1;
     endInfo.layers = layers;
-
-    // Throttled coarse phase breakdown of the FULL xrWaitFrame-succeeds-to-
-    // xrEndFrame window -- see g_tFrameStart's comment. Logged right before
-    // xrEndFrame so "total" matches what a Virtual Desktop-style overlay's
-    // "Game" timer measures as closely as possible.
-    {
-        const auto tSubmitEnd = std::chrono::steady_clock::now();
-        static uint64_t frameCallCount = 0;
-        constexpr uint64_t kFrameLogInterval = 90;
-        if ((++frameCallCount % kFrameLogInterval) == 0) {
-            const auto us = [](auto d) {
-                return std::chrono::duration_cast<std::chrono::microseconds>(d).count();
-            };
-            char msg[256];
-            duskVrSnprintf(msg, sizeof(msg),
-                           "[dusk::vr::perf] frame setup=%lldus renderEncode=%lldus "
-                           "gapToSubmit=%lldus submitFrameInternal=%lldus total=%lldus\n",
-                           static_cast<long long>(us(g_tAfterAcquire - g_tFrameStart)),
-                           static_cast<long long>(us(g_tTickEnd - g_tAfterAcquire)),
-                           static_cast<long long>(us(tSubmitStart - g_tTickEnd)),
-                           static_cast<long long>(us(tSubmitEnd - tSubmitStart)),
-                           static_cast<long long>(us(tSubmitEnd - g_tFrameStart)));
-            duskVrLog(msg);
-        }
-    }
 
     if (XR_FAILED(xrEndFrame(g_session->session(), &endInfo))) {
         duskVrLog("[dusk::vr::submitFrame] FAILED: xrEndFrame\n");

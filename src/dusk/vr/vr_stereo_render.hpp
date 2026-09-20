@@ -1179,6 +1179,21 @@ inline void ensureAndCopyMenuBillboardTexture() {
     }
     g_menuBillboardAspectHeightOverWidth = static_cast<float>(height) / static_cast<float>(width);
 
+    // THREAD-SAFETY FIX (2026-09-19, found via a real Quest 3 tombstone --
+    // SIGABRT "Pointer tag ... truncated" in free() under
+    // absl::flat_hash_map::resize, called from ensure_external_copy_texture,
+    // called from here): since upstream 2.0, GX commands are processed on a
+    // dedicated "Aurora FIFO processor" thread, which OWNS g_gxState --
+    // including the copyTextures/copyTextureCache maps this call inserts
+    // into (copy_tex() writes the same maps from that thread). Calling it
+    // straight from the main thread races the FIFO thread's own map
+    // mutations, corrupting the table. AuroraGXSync() (GXFlush + fifo
+    // drain) parks the FIFO thread with nothing left to process, and no GX
+    // command is issued between the drain and this call, so the mutation
+    // below is the only one touching g_gxState until the next GX write.
+    // Only reached while a menu is visible, so the drain's lost overlap is
+    // paid only then.
+    AuroraGXSync();
     wgpu::Texture dst =
         aurora::gx::ensure_external_copy_texture(g_menuBillboardTexKey, width, height, GX_TF_RGBA8);
 

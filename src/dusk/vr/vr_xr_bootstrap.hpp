@@ -317,21 +317,28 @@ struct XrGraphicsDevice {
     // unbranched code.
     VkQueue commandQueue = VK_NULL_HANDLE;
     // True when VK_ANDROID_external_memory_android_hardware_buffer (plus
-    // its real dependencies) was actually enabled on `device` below -- the
-    // XR-session-side precondition for dusk::vr::Session's AHardwareBuffer
-    // GPU-direct swapchain-copy path (vr_xr_submit.hpp). The OTHER
-    // precondition, aurora::webgpu::g_sharedTextureMemoryAHardwareBufferSupported,
-    // is Dawn's own adapter-side support for the SAME extension family --
-    // vr_main.cpp's startup() requires BOTH before enabling the path, same
-    // "both sides must independently support it" pattern as the D3D12
-    // GPU-direct path's adaptersMatch+g_sharedTextureMemoryD3D12Supported
-    // check.
+    // its real dependencies) was actually enabled on `device` below. No
+    // longer gates anything as of 2026-09-19 (the AHardwareBuffer-based
+    // GPU-direct path was replaced by the opaque-fd one below -- see
+    // vr_xr_submit.hpp's ensureSharedImageResources() HISTORY note); kept
+    // as information only.
     bool supportsAndroidHardwareBuffer = false;
+    // True when VK_KHR_external_memory_fd was actually enabled on `device`
+    // -- the XR-session-side precondition for dusk::vr::Session's
+    // shared-image GPU-direct swapchain-copy path (vr_xr_submit.hpp's
+    // ensureSharedImageResources(): a VkImage with exportable memory that
+    // Dawn imports as an opaque fd). The OTHER precondition,
+    // aurora::webgpu::g_vulkanSharedImageExportSupported, is Dawn's own
+    // adapter-side support -- vr_main.cpp's startup() requires BOTH before
+    // enabling the path, same "both sides must independently support it"
+    // pattern as the D3D12 GPU-direct path's adaptersMatch+
+    // g_sharedTextureMemoryD3D12Supported check.
+    bool supportsExternalMemoryFd = false;
     // True when VK_KHR_external_semaphore_fd was actually enabled on
     // `device` -- the XR-session-side precondition for the async
-    // semaphore-gated handoff in dusk::vr::Session's AHardwareBuffer path
-    // (vr_xr_submit.hpp's finishAhbGpuCopy()). Same "detect, don't assume"
-    // pattern as supportsAndroidHardwareBuffer above.
+    // semaphore-gated handoff in dusk::vr::Session's shared-image path
+    // (vr_xr_submit.hpp's finishSharedImageGpuCopy()). Same "detect, don't
+    // assume" pattern as supportsExternalMemoryFd above.
     bool supportsExternalSemaphoreFd = false;
 };
 
@@ -414,7 +421,7 @@ inline XrGraphicsDevice createXrGraphicsDevice(const Bootstrap& boot) {
     // D3D12 GPU-direct path (aurora::webgpu::g_sharedTextureMemoryD3D12Supported).
     // gfx.supportsAndroidHardwareBuffer records whether this actually
     // succeeded; vr_main.cpp's startup() ALSO requires Dawn's own adapter
-    // to report aurora::webgpu::g_sharedTextureMemoryAHardwareBufferSupported
+    // to report aurora::webgpu::g_vulkanSharedImageExportSupported
     // before enabling the path -- both sides independently need it, same
     // shape as the D3D12 path's adaptersMatch+g_sharedTextureMemoryD3D12Supported
     // pair.
@@ -459,10 +466,17 @@ inline XrGraphicsDevice createXrGraphicsDevice(const Bootstrap& boot) {
             VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME);
         gfx.supportsAndroidHardwareBuffer = true;
     }
+    // Opaque-fd memory export (2026-09-19, the shared-image GPU-direct path
+    // -- see XrGraphicsDevice::supportsExternalMemoryFd). Its base
+    // VK_KHR_external_memory is already in kAhbDependencies above.
+    if (hasDeviceExtension(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME)) {
+        enabledDeviceExtensions.push_back(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
+        gfx.supportsExternalMemoryFd = true;
+    }
 
     // Async semaphore-gated handoff (2026-09-18, replaces the AHB path's
     // original CPU-blocking OnSubmittedWorkDone() poll -- see
-    // dusk::vr::Session::finishAhbGpuCopy()'s own comment): needs
+    // dusk::vr::Session::finishSharedImageGpuCopy()'s own comment): needs
     // VK_KHR_external_semaphore_fd (+ its VK_KHR_external_semaphore base,
     // almost certainly core-promoted on Quest 3's API version, same
     // "don't assume" reasoning as kAhbDependencies above) so the XR-side

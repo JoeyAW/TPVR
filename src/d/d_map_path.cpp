@@ -53,7 +53,12 @@ aurora::Vec2<f32> map_render_scale() {
     f32 irScaleX = renderWidth > 0 ? static_cast<f32>(renderWidth) / logicalWidth : 1.0f;
     f32 irScaleY = renderHeight > 0 ? static_cast<f32>(renderHeight) / logicalHeight : 1.0f;
 #if defined(TARGET_ANDROID) || defined(__ANDROID__)
-    constexpr f32 kStandaloneMinMapScale = 3.0f;
+    // Was 3.0 (9x the pixels of the native 216x216). Measured with aurora's
+    // GPU profiler on the Quest 3 (2026-09-20): the 648x648 map render cost
+    // ~4ms of GPU per render -- more than a fifth of the whole frame budget
+    // for a small HUD element. 1.5x keeps the outline-halving branch below
+    // active (scale > 1) at a quarter of the pixels.
+    constexpr f32 kStandaloneMinMapScale = 1.5f;
     irScaleX = std::max(irScaleX, kStandaloneMinMapScale);
     irScaleY = std::max(irScaleY, kStandaloneMinMapScale);
 #endif

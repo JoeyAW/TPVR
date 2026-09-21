@@ -1015,6 +1015,22 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                             "is the one that uses it. Off by default."
             });
 
+        leftPane.add_section("Performance");
+        config_bool_select(leftPane, rightPane, getSettings().game.vrSinglePassStereo,
+            {
+                .key = "Single-Pass Stereo (experimental)",
+                .helpText = "Draws both eyes in one rendering pass instead of two. Roughly halves "
+                            "the CPU work per frame, which is what the standalone headset needs to "
+                            "hold a steady framerate. Turn off if you see anything wrong in one eye."
+            });
+        config_percent_select(leftPane, rightPane, getSettings().game.vrRenderScale,
+            "VR Render Resolution",
+            "Renders each eye at this fraction of the headset's recommended resolution; "
+            "the headset scales it back up. Lowering it is the most direct way to get "
+            "more GPU headroom on the standalone headset -- 90% cuts the pixel count "
+            "by a fifth. Takes effect the next time the game starts.",
+            50, 100, 5);
+
 #if !VR_SETTINGS_STANDALONE
         // Standalone renders through the native Quest runtime -- no SteamVR / Virtual Desktop /
         // Meta Link compositor in the loop, and its gamma is already correct, so neither

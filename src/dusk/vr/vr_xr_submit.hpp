@@ -33,6 +33,7 @@
 // adapterMatchesXrRequirement() (bottom of file) are similarly D3D12/DXGI-
 // specific and unused outside this file -- also D3D12-only below.
 
+#include "../../../extern/aurora/lib/webgpu/gpu_prof.hpp"  // aurora::webgpu::gpu_prof::Zone (GPU timing of the hand-off)
 #include <openxr/openxr.h>
 #include <algorithm>
 #include <chrono>
@@ -1426,6 +1427,12 @@ public:
     struct SharedImageSlot {
         wgpu::SharedTextureMemory memory;
         wgpu::Texture texture;
+        // View of `texture` in aurora's scene color format (RGBA8Unorm on an
+        // R8G8B8A8_SRGB image, i.e. a raw-bytes reinterpretation) so the eye
+        // pass can render straight into the shared image with the same
+        // pipelines -- see sharedImageRenderTarget(). Null if the view
+        // couldn't be made; callers then fall back to the copy hand-off.
+        wgpu::TextureView renderView;
         VkImage xrImage = VK_NULL_HANDLE;
         VkDeviceMemory xrMemory = VK_NULL_HANDLE;
         VkCommandBuffer cmdBuf = VK_NULL_HANDLE;
@@ -1489,7 +1496,22 @@ public:
         // opaque-fd sharing contract requires identical creation
         // parameters on both sides, and Dawn requires the chain to hold
         // exactly one VkExternalMemoryImageCreateInfo with OPAQUE_FD.
+        // MUTABLE_FORMAT alone makes Adreno drop UBWC framebuffer compression
+        // (measured: the eye pass rendering into this image cost ~12ms vs
+        // ~10ms into a pooled texture). Declaring the exact view-format set
+        // via VkImageFormatListCreateInfo (VK_KHR_image_format_list, core in
+        // 1.2) is what lets the driver keep compression for a mutable image.
+        const VkFormat swapchainVkFormat = static_cast<VkFormat>(swapchainDxgiFormat_);
+        const VkFormat unormVkFormat = swapchainVkFormat == VK_FORMAT_R8G8B8A8_SRGB   ? VK_FORMAT_R8G8B8A8_UNORM
+                                       : swapchainVkFormat == VK_FORMAT_B8G8R8A8_SRGB ? VK_FORMAT_B8G8R8A8_UNORM
+                                                                                      : swapchainVkFormat;
+        const VkFormat viewFormats[2] = {swapchainVkFormat, unormVkFormat};
+        VkImageFormatListCreateInfo formatList{VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO};
+        formatList.viewFormatCount = unormVkFormat != swapchainVkFormat ? 2u : 1u;
+        formatList.pViewFormats = viewFormats;
+
         VkExternalMemoryImageCreateInfo extMemImageInfo{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
+        extMemImageInfo.pNext = &formatList;
         extMemImageInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
 
         VkImageCreateInfo imageCI{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
@@ -1505,7 +1527,14 @@ public:
         imageCI.tiling = VK_IMAGE_TILING_OPTIMAL;
         // TRANSFER_DST: Dawn's CopyBufferToTexture writes (Dawn validates
         // this bit is present). TRANSFER_SRC: the XR-side blit reads.
-        imageCI.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        // COLOR_ATTACHMENT + SAMPLED, and MUTABLE_FORMAT: the direct-render
+        // path (sharedImageRenderTarget()) draws the eye pass into an
+        // RGBA8Unorm view of this sRGB-format image and in-pass GXCopyTex
+        // captures sample it. Dawn creates its own VkImage from this same
+        // create info for the imported memory, so the bits must be here.
+        imageCI.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+        imageCI.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
         imageCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         imageCI.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         if (vkCreateImage(xrDevice_, &imageCI, nullptr, &s.xrImage) != VK_SUCCESS) {
@@ -1598,11 +1627,26 @@ public:
             stmDesc.nextInChain = &fdDesc;
             s.memory = aurora::webgpu::g_device.ImportSharedTextureMemory(&stmDesc);
 
+            // Direct-render path: the eye pass renders into this texture
+            // through a view in aurora's scene format (see renderView).
+            const wgpu::TextureFormat sceneFormat = aurora::gfx::color_format();
+            const bool needsViewFormat = sceneFormat != dawnFormat;
             wgpu::TextureDescriptor texDesc{};
             texDesc.format = dawnFormat;
             texDesc.size = {width, height, 1};
-            texDesc.usage = wgpu::TextureUsage::CopyDst;
+            texDesc.usage = wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::CopySrc |
+                            wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding;
+            texDesc.viewFormatCount = needsViewFormat ? 1 : 0;
+            texDesc.viewFormats = needsViewFormat ? &sceneFormat : nullptr;
             s.texture = s.memory.CreateTexture(&texDesc);
+            if (s.texture) {
+                wgpu::TextureViewDescriptor viewDesc{};
+                viewDesc.format = sceneFormat;
+                viewDesc.dimension = wgpu::TextureViewDimension::e2D;
+                viewDesc.mipLevelCount = 1;
+                viewDesc.arrayLayerCount = 1;
+                s.renderView = s.texture.CreateView(&viewDesc);
+            }
         }
         // Dawn dup()s the fd on import (verified in its SharedTextureMemoryVk.cpp)
         // -- ours is still ours to close, success or failure.
@@ -1667,6 +1711,8 @@ public:
     // write into the same slot's texture this frame, different halves.
     void beginSwapchainAccessForFrame(uint32_t /*index*/, uint32_t width, uint32_t height) {
         const uint32_t slotIndex = sharedNextSlot_;
+        sharedWidth_ = width;
+        sharedHeight_ = height;
         ensureSharedImageResources(slotIndex, width, height);
         SharedImageSlot& s = sharedSlots_[slotIndex];
         if (!s.texture) {
@@ -2347,6 +2393,19 @@ private:
         const wgpu::Texture& srcTexture = self->pendingCopySrc_[p.eyeIndex];
 
         wgpu::CommandEncoder mutableCmd = cmd; // several calls below are non-const on CommandEncoder
+        // GPU profiler zone (aurora gpu_prof, log mode on Android): the whole
+        // hand-off -- gamma compute + buffer->texture copy -- as one zone.
+        const aurora::webgpu::gpu_prof::Zone gpuZone{cmd, "VR swapchain handoff"};
+
+        // TRIED AND REVERTED (Quest perf, 2026-09-20): replacing the identity
+        // gamma compute + buffer->texture copy below with one
+        // CopyTextureToTexture(eye snapshot -> shared swapchain image) --
+        // RGBA8Unorm/RGBA8UnormSrgb are copy-compatible, so it's the same
+        // bytes. Measured WORSE on the CPU: worker Queue::Submit 3.3 -> 6.0ms,
+        // the main thread's synchronize() wait 5 -> 13ms (Dawn evidently does
+        // more than a plain vkCmdCopyImage for a copy into an imported
+        // SharedTextureMemory texture). GPU effect unmeasurable under the
+        // thermal throttling seen in the same run. Don't retry as-is.
 
         if (self->useGammaComputePath_) {
             // GPU gamma-compensation path (see kGammaComputeShaderSource's
@@ -2668,6 +2727,11 @@ public:
     }
 
 #if !DUSK_VR_XR_GRAPHICS_VULKAN
+    // D3D12: no shared-image render target (the intermediate/swapchain
+    // textures aren't set up as render attachments); tick() keeps the copy.
+    bool sharedImageRenderTarget(aurora::gfx::ExternalPassTarget* /*out*/) const { return false; }
+#endif
+#if !DUSK_VR_XR_GRAPHICS_VULKAN
     // 2026-09-19: the intermediate-texture variant (ensureIntermediateTexture()/
     // finishIntermediateSwapchainCopy()) is used for EVERY same-device
     // session, not just the typeless-swapchain case that forced it into
@@ -2707,6 +2771,32 @@ public:
     // path for the rest of the session, same shape as the D3D12 branch's
     // intermediateCreateFailed_.
     bool usesSharedImageGpuDirect() const { return usesSharedImageGpuDirect_ && useGammaComputePath_ && !sharedImageCreateFailed_; }
+
+    // Direct-render path (Quest perf, 2026-09-20): this frame's shared
+    // swapchain image as a render target for aurora::gfx::create_pass_external().
+    // Valid after beginSwapchainAccessForFrame() has BeginAccess'd the
+    // slot, only when the swapchain needs no gamma/channel work (gamma
+    // exponent 1.0, RGBA-ordered format) -- the render writes the eye's
+    // bytes straight into the image, exactly what the identity hand-off
+    // (gamma compute + copy, measured at ~4ms of GPU per frame) produced.
+    // A frame rendered this way needs NO encodeSwapchainCopy(); the XR-side
+    // blit in finishSharedImageGpuCopy() runs as usual.
+    bool sharedImageRenderTarget(aurora::gfx::ExternalPassTarget* out) const {
+        if (!usesSharedImageGpuDirect() || !sharedFrameSlotValid_ || swapchainIsBgra_ ||
+            effectiveGammaExponent() != 1.0f) {
+            return false;
+        }
+        const SharedImageSlot& s = sharedSlots_[sharedFrameSlot_];
+        if (!s.texture || !s.renderView) {
+            return false;
+        }
+        out->texture = s.texture;
+        out->view = s.renderView;
+        out->format = aurora::gfx::color_format();
+        out->width = sharedWidth_;
+        out->height = sharedHeight_;
+        return true;
+    }
 
     // Set once at startup (vr_main.cpp's startup(), from
     // vr_xr::XrGraphicsDevice::supportsExternalSemaphoreFd) -- whether the
@@ -2901,6 +2991,8 @@ private:
     uint32_t sharedNextSlot_ = 0;
     uint32_t sharedFrameSlot_ = 0;
     bool sharedFrameSlotValid_ = false;
+    uint32_t sharedWidth_ = 0;  // full double-wide size the shared images were created with
+    uint32_t sharedHeight_ = 0;
     bool sharedImageCreateFailed_ = false;
     VkCommandPool sharedCopyCmdPool_ = VK_NULL_HANDLE;
 #else

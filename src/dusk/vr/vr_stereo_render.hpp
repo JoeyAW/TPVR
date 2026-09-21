@@ -630,6 +630,182 @@ inline aurora::gfx::ResolvedTargets endEye() {
 }
 
 // ---------------------------------------------------------------------------
+// Single-pass stereo (VR_SINGLE_PASS_STEREO_PLAN.md, 2026-09-20)
+//
+// The two-pass path above (beginEye()/endEye() once per eye) does the whole
+// scene traversal, painter, FIFO interpretation and command recording twice
+// per frame -- measured as the reason the Quest can't hold 72Hz (main thread
+// ~17ms, FIFO/render chain ~16ms, both over the 13.9ms budget). This path
+// instead renders the scene ONCE from the head-center view into one
+// double-wide offscreen target (exactly the swapchain's own layout), with
+// aurora's GX_AURORA_SET_STEREO opcode making every draw instanced x2: the
+// vertex shader applies a per-eye view correction T_eye = V_eye * V_c^-1
+// and each eye's own asymmetric projection, then remaps clip x into that
+// eye's half. All CPU-side view-dependent math (culling, particle
+// billboards, env-map texgen, the HUD/menu billboards, the aim dot) runs
+// against V_c; the per-eye difference is IPD/2 at scene scale -- standard
+// single-pass-stereo practice.
+//
+// Both paths coexist behind game.vrSinglePassStereo so the proven two-pass
+// path stays available for A/B until this one is confirmed in-headset.
+// ---------------------------------------------------------------------------
+
+struct StereoParams {
+    std::array<XrPosef, 2> eyePose;   // XrView.pose, left then right
+    std::array<XrFovf, 2>  eyeFov;    // XrView.fov
+    uint32_t eyeWidth;                // one eye's recommended image size
+    uint32_t eyeHeight;
+    XrPosef  hmdPose;                 // head-center (VIEW space) pose, same tracking space
+    cXyz     eyeAnchor;               // see EyeParams::eyeAnchor
+    float    smoothTurnYawRad = 0.f;
+};
+
+// Symmetric FOV of the head-center projection (union of both eyes' FOVs),
+// exposed the same way getEyeSymmetricFov() is for the two-pass path.
+inline XrFovf unionFov(const XrFovf& a, const XrFovf& b) {
+    return XrFovf{
+        std::min(a.angleLeft, b.angleLeft),
+        std::max(a.angleRight, b.angleRight),
+        std::max(a.angleUp, b.angleUp),
+        std::min(a.angleDown, b.angleDown),
+    };
+}
+
+// `external`: render straight into a caller-owned target (the XR swapchain's
+// shared image on the Quest -- Session::sharedImageRenderTarget()) instead
+// of a pooled offscreen texture. endStereoPass() must then get the same
+// target: the pass is resolved without a snapshot and the returned
+// ResolvedTargets simply refer to it. Measured reason (aurora GPU profiler,
+// 2026-09-20): the pooled-texture route cost a 0.6ms snapshot copy plus a
+// ~4ms identity gamma-compute + copy hand-off per frame on the Quest 3.
+inline aurora::gfx::ResolvedTargets beginStereoPass(const StereoParams& sp,
+                                                    const aurora::gfx::ExternalPassTarget* external = nullptr) {
+    view_class* view = dComIfGd_getView();
+    assert(view != nullptr && "VR: no active view_class -- called outside gameplay?");
+
+    // Head-center view V_c: eyePoseToViewMtx() with the head pose as both
+    // the pose and the reference position (zero offset), so the camera sits
+    // exactly at the anchor with the head's orientation. This is what the
+    // whole scene is traversed, culled and recorded against.
+    eyePoseToViewMtx(view->viewMtx, sp.hmdPose, sp.hmdPose.position, sp.eyeAnchor,
+                      kEyePosScale, sp.smoothTurnYawRad);
+    j3dSys.setViewMtx(view->viewMtx);
+    MTXInverse(view->viewMtx, view->invViewMtx);
+
+    // Per-eye correction T_eye = V_eye * V_c^-1 (Mtx = 3x4 affine, so the
+    // product is exact) and per-eye 6-parameter projections, all shipped
+    // to the FIFO in-stream. On the Quest the two view poses share the
+    // head's orientation, so T is a pure ±IPD/2 translation along view X;
+    // kept general (canted displays) since the cost is identical.
+    // Verification step 2 of the plan: with this on, both halves render the
+    // LEFT eye (identity correction, left projection) -- they must come out
+    // pixel-identical to each other and to the two-pass path's left eye.
+    // Isolates the instancing/remap/clip-distance/viewport/copy machinery
+    // from the per-eye math. Compile-time on purpose: a debug aid, not a
+    // setting.
+    constexpr bool kStereoDebugMono = false;
+
+    float projVec[2][6];
+    Mtx   eyeT[2];
+    for (int eye = 0; eye < 2; ++eye) {
+        Mtx eyeView;
+        const int srcEye = kStereoDebugMono ? 0 : eye;
+        eyePoseToViewMtx(eyeView, sp.eyePose[srcEye], sp.hmdPose.position, sp.eyeAnchor,
+                          kEyePosScale, sp.smoothTurnYawRad);
+        MTXConcat(eyeView, view->invViewMtx, eyeT[eye]);
+        if (kStereoDebugMono) {
+            MTXIdentity(eyeT[eye]);
+        }
+
+        Mtx44 eyeProj;
+        eyeFovToProjMtx(eyeProj, sp.eyeFov[srcEye], view->near_, view->far_);
+        // Same cells GXSetProjection() reads for a perspective matrix.
+        projVec[eye][0] = eyeProj[0][0];
+        projVec[eye][1] = eyeProj[0][2];
+        projVec[eye][2] = eyeProj[1][1];
+        projVec[eye][3] = eyeProj[1][2];
+        projVec[eye][4] = eyeProj[2][2];
+        projVec[eye][5] = eyeProj[2][3];
+    }
+
+    // view->projMtx is what CPU-side code sees (and what the game's own
+    // GXSetProjection calls re-send each draw list) -- in stereo the shader
+    // ignores it for perspective draws, so give it the neutral head-center
+    // projection: the union of both eyes' FOVs.
+    const XrFovf centerFov = unionFov(sp.eyeFov[0], sp.eyeFov[1]);
+    eyeFovToProjMtx(view->projMtx, centerFov, view->near_, view->far_);
+
+    // Actor-cull frustum: same construction as beginEye() (smallest
+    // symmetric frustum containing the asymmetric FOV), over the union FOV
+    // since the culling view is V_c. The eyes sit IPD/2 (~3 game units)
+    // off V_c, which at any cullable distance is far inside the margin the
+    // symmetric bound already adds.
+    {
+        const float halfH = std::max(std::fabs(std::tan(centerFov.angleLeft)), std::fabs(std::tan(centerFov.angleRight)));
+        const float halfV = std::max(std::fabs(std::tan(centerFov.angleDown)), std::fabs(std::tan(centerFov.angleUp)));
+        constexpr float kRadToDeg = 57.29577951308232f;
+        const float clipperFovyDeg = 2.f * std::atan(halfV) * kRadToDeg;
+        const float clipperAspect = halfH / halfV;
+        stage_stag_info_class* stagInfo = dComIfGp_getStageStagInfo();
+        const float clipperFar = (stagInfo == nullptr || (dComIfGp_getCameraAttentionStatus(0) & 8))
+            ? view->far_
+            : (float)dStage_stagInfo_GetCullPoint(stagInfo);
+        mDoLib_clipper::setup(clipperFovyDeg, clipperAspect, view->near_, clipperFar);
+        g_eyeSymmetricFovyDeg = clipperFovyDeg;
+        g_eyeSymmetricAspect = clipperAspect;
+    }
+
+    // Everything the FIFO thread needs rides the GX stream, in order: no
+    // AuroraGXSync() drain here (beginEye() needed two per frame purely to
+    // sequence the native-logical-size flag against queued commands --
+    // the in-stream opcode sequences itself). create_pass() still drains
+    // once, which is what processes these before the pass opens.
+    GXFlush();
+    GXSetOffscreenNativeLogicalSize(GX_TRUE);
+    GXSetStereo(GX_TRUE, projVec[0], projVec[1], &eyeT[0][0][0], &eyeT[1][0][0]);
+
+    // One double-wide pass. The game's native-resolution GXSetViewport/
+    // GXSetScissor calls scale up to the full double-wide extent (see
+    // logical_fb_size()); the shader's half-remap does the rest.
+    const bool ok = external != nullptr ? aurora::gfx::create_pass_external(*external)
+                                        : aurora::gfx::create_pass(sp.eyeWidth * 2, sp.eyeHeight);
+    assert(ok && "VR: create_pass failed -- is another offscreen pass already open?");
+    (void)ok;
+
+    g_currentEyePassId = aurora::gfx::current_pass_id();
+    g_currentEyeColorView = aurora::gfx::current_pass_color_view();
+    aurora::gfx::set_protected_offscreen_pass(g_currentEyePassId);
+    return {};
+}
+
+inline aurora::gfx::ResolvedTargets endStereoPass(const aurora::gfx::ExternalPassTarget* external = nullptr) {
+    // Both switch off in-stream, after every scene command and before the
+    // drain inside resolve_pass_checked() -- same ordering endEye() had to
+    // get right by hand (its "must NOT clear the override before this
+    // call" note); here the stream order guarantees it.
+    GXSetStereo(GX_FALSE, nullptr, nullptr, nullptr, nullptr);
+    GXSetOffscreenNativeLogicalSize(GX_FALSE);
+
+    aurora::gfx::ResolvedTargets targets;
+    // External target: no snapshot (color = false) -- the result is the
+    // caller's own texture, filled in below.
+    const bool ok = aurora::gfx::resolve_pass_checked({.color = external == nullptr, .depth = false}, targets,
+                                                       g_currentEyePassId, g_currentEyeColorView);
+    aurora::gfx::clear_protected_offscreen_pass();
+    if (!ok) {
+        return {};
+    }
+    if (external != nullptr) {
+        targets.color = external->view;
+        targets.colorTexture = external->texture;
+        targets.colorFormat = external->format;
+        targets.width = external->width;
+        targets.height = external->height;
+    }
+    return targets;
+}
+
+// ---------------------------------------------------------------------------
 // Head-locked HUD billboard
 //
 // The flat 2D HUD (hearts, rupees, message boxes -- see m_Do_graphic.cpp's

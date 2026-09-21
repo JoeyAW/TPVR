@@ -14447,3 +14447,141 @@ interactions (screen captures with a double-wide source, line/point
 instancing, viewport scaling) and a cheapest-first verification order.
 `[dusk::vr::perf]` instrumentation is still in `vr_main.cpp` for the
 before/after.
+
+### Single-pass stereo IMPLEMENTED (2026-09-20, later same day) -- PC build clean, NOT yet run anywhere; off by default behind `game.vrSinglePassStereo`
+
+Built exactly as `VR_SINGLE_PASS_STEREO_PLAN.md` §2/§3 scope it (that file
+now carries a STATUS block listing every touched file). Things learned
+while implementing that the plan didn't have:
+
+- **Draw merging had to be taught about the instance count**:
+  `command_processor.cpp`'s `canMerge` required `instanceCount == 1`; in
+  stereo every plain draw is `instanceCount == 2`, which would have
+  silently disabled merging (and eaten the FIFO/render-worker win). Now
+  compares against `base_instance_count()` and the draw cache tracks the
+  stereo bit (`sDrawCache.stereo`), compared directly rather than through
+  `DirtyPipeline` because stereo can flip without any GX command (the pass
+  opening/closing, a nested capture pass).
+- **`stereo_active()` (gx.cpp) is `stereo.enabled && is_offscreen() &&
+  !is_nested_in_protected_offscreen()`** -- `begin_offscreen()` does
+  support nesting inside the protected pass (suspend/resume), and a nested
+  capture must render mono. New `gfx::is_nested_in_protected_offscreen()`.
+- **Range fog** (`GX_FOG_*` with `fogRangeEnabled`) indexes a per-pixel LUT
+  by target x; the LUT builder now repeats one eye's curve per half
+  (`FogRangeLutKey::stereo`). `copy_tex` (GXFrameBuffer.cpp) takes the
+  left eye's half of any in-pass capture.
+- **WGSL**: `@builtin(clip_distances)` is vertex-output-only, so the
+  fragment stage now takes a separate `FragmentInput` struct (same fields
+  minus that builtin) -- mono shaders changed in name only. `enable
+  clip_distances;` is emitted as the first line only when
+  `webgpu::g_clipDistancesSupported` (requested in gpu.cpp's feature loop);
+  otherwise a flat `stereo_eye` varying + `discard` on the wrong half.
+- **Both drains in `beginEye()` are gone on the new path**: the
+  native-logical-size flag rides the stream (`GX_AURORA_SET_OFFSCREEN_NATIVE_LOGICAL_SIZE`),
+  so its ordering against queued commands (the minimap bug of the same
+  day) is inherent. `create_pass()` still drains once.
+- **`view->projMtx` in stereo = union-FOV head-center projection** (the
+  shader ignores it for perspective draws; ortho draws use the stream's
+  own projection with identity correction so 2D overlays land identically
+  in both halves).
+- **Verification math (plan §5 step 1) done in a script**: `T_eye =
+  V_eye * V_c^-1` reproduces each eye's view to 1e-13 and is a pure
+  ±IPD/2 view-space X translation for same-orientation views; remap +
+  clip-distance signs keep each eye's ndc x inside its own half and clip
+  anything that would cross the seam. `kStereoDebugMono` in
+  `beginStereoPass()` is the §5 step-2 switch (both halves = left eye).
+- Item #4 landed alongside: `retry_captue_frame()` (m_Do_graphic.cpp
+  ~2851) is now gated on `g_env_light.is_blure` in VR, since the
+  underwater motion blur was its only VR consumer -- removes the per-frame
+  mid-eye-pass split on both the two-pass and single-pass paths.
+- Known cosmetic on the new path: the desktop mirror shows the whole
+  double-wide image (present-resample pass has no source sub-rect).
+- Nothing about the two-pass path changed except `PendingEyeReadback::
+  fullWidth` replacing the hardcoded `eyeWidth * 2` in `submitFrame()`.
+
+### Single-pass stereo CONFIRMED on both platforms + the Quest GPU-side work that followed (2026-09-20, later) -- all uncommitted
+
+**PC**: single-pass CONFIRMED in-headset ("buttery smooth, 120fps consistently
+in Castle Town", was dipping). **Quest 3**: confirmed working visually; the
+perf story turned out to be GPU-bound and needed a second round of work.
+Everything below is measured with instrumentation that is STILL IN THE
+TREE (see the end of this section).
+
+**How single-pass actually got implemented (differs from the plan)**:
+- Adreno 740 rejects Tint's `clip_distances` output outright
+  (`CreateGraphicsPipelines failed with VK_ERROR_UNKNOWN`, array size 1 or
+  8) and the `discard` fallback disables early-Z/LRZ (measured WORSE than
+  two-pass). Final design: the render worker **replays each stereo pass's
+  command list twice** with viewport/scissor mapped into each half and the
+  eye index in `DrawImmediateData::stereoEye` (was `_pad`); shader applies
+  `stereo_t[eye]`/`stereo_proj[eye]` only. No instancing, no clip, no
+  discard. `RenderPass::stereoReplay` is set by `gfx::mark_current_pass_stereo()`
+  from the GX draw path while `gx::stereo_active()`.
+- **Eyes confirmed correct in-headset** on the Quest with this design.
+
+**Measuring on the Quest -- the tools that made this tractable**:
+- Meta's runtime prints a per-second stats line: `adb logcat -s VrApi`:
+  `FPS=x/72, Stale=n, CPU4/GPU=lvl/lvl,<cpuMHz>/<gpuMHz>, App=<GPU ms>,
+  GPU%=, CPU%=, Temp=`. `App=` is the app's GPU frame time.
+- aurora's timestamp-query GPU profiler now has a **log mode on Android**
+  (`AURORA_GPU_PROF_LOG` in `lib/webgpu/gpu_prof.cpp`, TimestampQuery
+  requested in gpu.cpp under `__ANDROID__`): `[gpuprof] 120 frames, GPU
+  frame avg X ms: | <pass label WxH> ms x<per-frame count> ...` under logcat
+  tag `aurora::webgpu::gpu_prof`. Pass labels now carry their size
+  (encoding.cpp). This is what found every item below.
+- `[dusk::vr::perf]` grew a `worker(enc= finish= submit= wall= draws=
+  merged= passes= maxPassDraws=)` field (render-worker timing,
+  `gfx::worker_frame_stats()`), and encoding.cpp has a `[passdump]` that
+  lists one frame's passes every ~10s.
+- **The Quest GPU thermal-throttles within minutes** (640MHz cool -> 545MHz
+  at 52-53C); cross-run GPU comparisons must account for `gpuMHz`.
+- **The logcat ring buffer only holds ~25s**: capture continuously
+  (`adb logcat -v time -s dusklight_vr:I VrApi:I aurora::gfx:I
+  aurora::webgpu::gpu_prof:I > file &`) before an A/B.
+- **A/B protocol that works**: toggle the setting, CLOSE THE MENU, play 20s
+  in the same spot; the settings menu open = RmlUi passes + no scene
+  (`cull=0/0`), which contaminated two attempts.
+- Sleep test: 4ms of artificial main-thread time was fully absorbed by the
+  runtime's `xrWaitFrame` block -> the runtime overlaps CPU and GPU; frame
+  time is set by whether the GPU fits one 13.9ms period.
+
+**What the GPU profile showed and what was done (per frame, heavy spot)**:
+1. Minimap render: 843 draws at 648x648 (standalone forced 3x upscale) =
+   ~4ms GPU per render, every render frame. -> `kStandaloneMinMapScale`
+   3.0 -> 1.5 (d_map_path.cpp); VR re-renders it on every OTHER sim tick
+   (vr_main.cpp, `captureMapThisFrame`); HUD capture on sim-tick frames
+   only. 2.8ms -> 0.4ms avg. (Still 843 draws -> draw-call-bound, ~1.2ms
+   per render at 324x324.)
+2. The swapchain hand-off (identity gamma compute + buffer->texture copy)
+   = **~4ms GPU** + 0.6ms snapshot copy. -> **the eye pass now renders
+   directly into the shared swapchain VkImage**: `gfx::create_pass_external()`
+   + `RenderPass::externalTarget` (aurora), `Session::sharedImageRenderTarget()`
+   (vr_xr_submit.hpp: image created with COLOR_ATTACHMENT|SAMPLED,
+   MUTABLE_FORMAT + **VkImageFormatListCreateInfo {SRGB, UNORM}** -- without
+   the format list Adreno drops UBWC and the pass costs +2ms; Dawn texture
+   with viewFormats {RGBA8Unorm} and an RGBA8Unorm `renderView`),
+   `beginStereoPass(sp, external)` / `endStereoPass(external)` resolve
+   with `.color=false`. Only on the single-pass path, Vulkan shared-image
+   path, gamma 1.0, RGBA swapchain. `Pass Snapshot Color` gained CopySrc
+   (harmless leftover).
+   - TRIED AND REVERTED: `CopyTextureToTexture` snapshot -> shared image
+     (copy-compatible formats): worker Submit 3.3->6.0ms, sync 5->13ms.
+3. Offscreen passes now `StoreOp::Discard` their depth on the final
+   segment when nothing snapshots it (`finish_current_offscreen(finalSegment)`,
+   recording.cpp) -- a 23MB resolve per frame gone.
+4. `retry_captue_frame()` gated on `is_blure` (item #4) -- eye pass is one
+   segment (passes=3/frame in single-pass).
+5. GPU BOOST perf level: accepted, no clock change (thermal decides).
+
+**Result**: GPU frame ~18-19ms -> **~12.4ms** (rises to ~14 hot), fps 38-43
+-> 50-52 in the heaviest spot; CPU main thread ~11ms with ~4ms slack. 72Hz
+needs the GPU under ~13.9 with margin: on a cool headset (~640MHz) the
+same work is ~10.6ms; hot it misses. The only remaining lever of size is
+render resolution (user excluded it so far; ~0.9x would do it). FFR is
+impossible on Dawn; MSAA is 1; nothing is copied; 3 passes/frame.
+
+**Diagnostics still in the tree (remove/gate when done)**: `[dusk::vr::perf]`
++ worker stats (vr_main.cpp, aurora encoding.cpp/aurora.cpp/frame.cpp),
+`[passdump]` (encoding.cpp), gpu_prof log mode (gpu_prof.cpp, gpu.cpp),
+`VR swapchain handoff` zone (vr_xr_submit.hpp), `eye image size` startup
+log. The GPU BOOST experiment line in startup is still BOOST.

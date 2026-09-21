@@ -88,6 +88,12 @@ extern "C" uint32_t g_duskVRCurrentEyeIndex = 0;
 // two cases, only this can.
 extern "C" bool g_duskVREyePassOpen = false;
 
+// Per-eye image size actually rendered/submitted this session: the runtime's
+// recommended size scaled by game.vrRenderScale (see startup()). Every
+// per-frame size in tick()/submitFrame() derives from these two.
+static uint32_t g_eyeImageWidth = 0;
+static uint32_t g_eyeImageHeight = 0;
+
 namespace dusk::vr {
 
 namespace {
@@ -299,6 +305,13 @@ struct PendingEyeReadback {
     uint32_t eyeWidth = 0;
     uint32_t eyeHeight = 0;
     uint32_t dstXOffset = 0;
+    // Width of the whole swapchain image this entry's copy is part of --
+    // what submitFrame()'s once-per-frame whole-image copies (the D3D12
+    // intermediate copy, the Vulkan shared-image blit) are sized with.
+    // Two-pass: eyeWidth * 2 (one entry per eye half). Single-pass stereo:
+    // eyeWidth itself, since that entry already IS the whole double-wide
+    // image.
+    uint32_t fullWidth = 0;
 };
 struct PendingFrameSubmit {
     std::vector<PendingEyeReadback> eyes;
@@ -708,8 +721,12 @@ bool startup() {
         if (boot.hasPerformanceSettings && boot.xrPerfSettingsSetPerformanceLevelEXT_) {
             const XrResult cpuRes = boot.xrPerfSettingsSetPerformanceLevelEXT_(
                 session, XR_PERF_SETTINGS_DOMAIN_CPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT);
+            // EXPERIMENT 2026-09-20: BOOST for the GPU (was SUSTAINED_HIGH).
+            // Meta's VrApi stats line showed GPU level 4 @ 640MHz with the
+            // app GPU-bound (App=13.6ms, GPU%=0.85) -- checking whether the
+            // top level is reachable and what it buys.
             const XrResult gpuRes = boot.xrPerfSettingsSetPerformanceLevelEXT_(
-                session, XR_PERF_SETTINGS_DOMAIN_GPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT);
+                session, XR_PERF_SETTINGS_DOMAIN_GPU_EXT, XR_PERF_SETTINGS_LEVEL_BOOST_EXT);
             char msg[192];
             std::snprintf(msg, sizeof(msg),
                           "[dusk::vr::startup] XR_EXT_performance_settings: SUSTAINED_HIGH cpu=%d gpu=%d\n",
@@ -878,8 +895,32 @@ bool startup() {
         // Per-eye recommended size is assumed identical across both eyes here
         // (true for every real HMD OpenXR runtime reports today) -- using
         // configViews[0] for both.
-        const uint32_t eyeWidth = configViews[0].recommendedImageRectWidth;
-        const uint32_t eyeHeight = configViews[0].recommendedImageRectHeight;
+        // game.vrRenderScale: per-axis fraction of the recommended size,
+        // rounded down to a multiple of 8. Fixed for the session -- it sizes
+        // the swapchain here and every per-frame consumer (eye passes,
+        // shared images, composition layer rects) reads g_eyeImageWidth/
+        // Height instead of the runtime's recommended values.
+        {
+            const float scale = std::clamp(dusk::getSettings().game.vrRenderScale.getValue(), 0.5f, 1.0f);
+            const auto scaled = [scale](uint32_t v) {
+                const uint32_t s = static_cast<uint32_t>(static_cast<float>(v) * scale) & ~7u;
+                return std::max<uint32_t>(s, 64);
+            };
+            g_eyeImageWidth = scaled(configViews[0].recommendedImageRectWidth);
+            g_eyeImageHeight = scaled(configViews[0].recommendedImageRectHeight);
+        }
+        const uint32_t eyeWidth = g_eyeImageWidth;
+        const uint32_t eyeHeight = g_eyeImageHeight;
+        {
+            char msg[240];
+            duskVrSnprintf(msg, sizeof(msg),
+                "[dusk::vr::startup] eye image size: recommended %ux%u, max %ux%u, scale %.2f -> %ux%u "
+                "(swapchain %ux%u)\n",
+                configViews[0].recommendedImageRectWidth, configViews[0].recommendedImageRectHeight,
+                configViews[0].maxImageRectWidth, configViews[0].maxImageRectHeight,
+                dusk::getSettings().game.vrRenderScale.getValue(), eyeWidth, eyeHeight, eyeWidth * 2, eyeHeight);
+            duskVrLog(msg);
+        }
 
         // Real pixel format, cross-checked against Aurora's actual color target
         // instead of the previously-assumed RGBA8Unorm.
@@ -2206,15 +2247,11 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     // detected/enabled.
 #if !DUSK_VR_XR_GRAPHICS_VULKAN
     if (g_session->usesGpuDirectSwapchainCopy()) {
-        g_session->beginSwapchainAccessForFrame(
-            swapchainIndex, configViews[0].recommendedImageRectWidth * 2,
-            configViews[0].recommendedImageRectHeight);
+        g_session->beginSwapchainAccessForFrame(swapchainIndex, g_eyeImageWidth * 2, g_eyeImageHeight);
     }
 #else
     if (g_session->usesSharedImageGpuDirect()) {
-        g_session->beginSwapchainAccessForFrame(
-            swapchainIndex, configViews[0].recommendedImageRectWidth * 2,
-            configViews[0].recommendedImageRectHeight);
+        g_session->beginSwapchainAccessForFrame(swapchainIndex, g_eyeImageWidth * 2, g_eyeImageHeight);
     }
 #endif
 
@@ -2269,7 +2306,24 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     // rising to ~0.15-0.49ms when a menu/pause screen is open (more 2D
     // content to draw) -- see fpcM_DrawIterater()'s comment above for the
     // combined-cost assessment against a VR frame budget.
-    mDoGph_gInf_c::captureHudBillboard();
+    // Quest perf (2026-09-20, from the per-pass dump): these two captures
+    // are 143 + 843 draws (the minimap render alone is more draws than the
+    // whole 3D scene per eye) on every RENDER frame, yet everything they
+    // show only changes on a SIM tick (30Hz: hearts/rupees/map center/
+    // palette are all game-logic state). Re-capture only on frames that ran
+    // a sim tick; the captured textures persist (GXCopyTex cache keyed by
+    // destination) so the eyes keep sampling the last capture in between.
+    // ~60% of those draws gone at 72Hz, nothing visible changes.
+    const bool captureThisFrame = pacing.numSimTicks > 0;
+    if (captureThisFrame) {
+        mDoGph_gInf_c::captureHudBillboard();
+    }
+    // The minimap render is the single most expensive thing on the Quest's
+    // GPU after the scene itself (aurora GPU profiler, 2026-09-20: ~4ms per
+    // render at the old 3x size, 843 draws) and in VR it's a small element
+    // on the HUD billboard: re-render it on every OTHER sim tick (15Hz).
+    static uint32_t s_mapCaptureTicks = 0;
+    const bool captureMapThisFrame = captureThisFrame && ((s_mapCaptureTicks++ & 1u) == 0u);
 
     // ROOT-CAUSED this session: the minimap (and pause-screen map) render
     // their own source texture via a SEPARATE GXCreateFrameBuffer offscreen
@@ -2293,7 +2347,9 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     // isRenderingToHeadset() to the new, narrower isEyePassOpen() (false
     // here, true during mDoGph_Painter()'s later per-eye call) so it actually
     // runs now instead of skipping again.
-    mDoGph_gInf_c::captureMapCopy2D();
+    if (captureMapThisFrame) {
+        mDoGph_gInf_c::captureMapCopy2D();
+    }
 
     // VR menu billboard, Phase 2 plan step 4 (see vr_stereo_render.hpp's
     // own "VR menu billboard" section comment for the full mechanism):
@@ -2311,12 +2367,123 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     // WHICH texture and WHEN.
     aurora::gfx::ResolvedTargets mirrorEyeTargets;
 
+    // Single-pass stereo (VR_SINGLE_PASS_STEREO_PLAN.md, 2026-09-20): one
+    // traversal + painter into one double-wide pass, instanced per eye on
+    // the GPU -- see vr_render::beginStereoPass(). The per-eye loop below
+    // stays as the A/B reference until this is confirmed in-headset.
+    // Everything the loop does per eye happens once here; the per-eye
+    // CPU-side positions (aim dot, HUD/menu billboards) are computed
+    // against the head-center view and get their disparity from the
+    // shader's per-eye correction.
+    if (dusk::getSettings().game.vrSinglePassStereo && viewCount == 2) {
+        const uint32_t eyeWidth = g_eyeImageWidth;
+        const uint32_t eyeHeight = g_eyeImageHeight;
+        vr_render::StereoParams stereoParams{
+            {views[0].pose, views[1].pose},
+            {views[0].fov, views[1].fov},
+            eyeWidth,
+            eyeHeight,
+            hmdPose,
+            vrCameraEyeAnchor,
+            dusk::vr::getSmoothTurnYawRad(),
+        };
+
+        // Direct-render (Quest): draw straight into this frame's shared
+        // swapchain image -- see Session::sharedImageRenderTarget(). Off on
+        // PC (no shared image there) and whenever the hand-off needs real
+        // gamma/channel work; those keep the pooled target + copy below.
+        aurora::gfx::ExternalPassTarget directTarget;
+        const bool directRender = g_session->sharedImageRenderTarget(&directTarget);
+
+        g_duskVRCurrentEyeIndex = 0;
+        g_perfPreLoopMs = perfMs(g_perfMark, PerfClock::now());
+        PerfClock::time_point perfT0 = PerfClock::now();
+        vr_render::beginStereoPass(stereoParams, directRender ? &directTarget : nullptr);
+        g_duskVREyePassOpen = true;
+        PerfClock::time_point perfT1 = PerfClock::now();
+        g_perfEyeBeginMs += perfMs(perfT0, perfT1);
+
+        fpcM_DrawIterater((fpcM_DrawIteraterFunc)fpcM_Draw);
+        PerfClock::time_point perfT2 = PerfClock::now();
+        g_perfEyeIterMs += perfMs(perfT1, perfT2);
+        cAPIGph_Painter();
+        PerfClock::time_point perfT3 = PerfClock::now();
+        g_perfEyePainterMs += perfMs(perfT2, perfT3);
+
+        if (auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer())) {
+            if (link->getAimSightVisible()) {
+                vr_render::drawAimCrosshair(*link->getLineTopPosP());
+            }
+        }
+        if (menuVisible) {
+            if (!dusk::ui::is_prelaunch_open()) {
+                vr_render::drawMenuBillboardBackdrop(vr_render::g_menuBillboardAspectHeightOverWidth);
+            }
+            vr_render::drawMenuBillboard(&vr_render::g_menuBillboardTexObj,
+                                          vr_render::g_menuBillboardAspectHeightOverWidth);
+        }
+
+        PerfClock::time_point perfT4 = PerfClock::now();
+        aurora::gfx::ResolvedTargets targets = vr_render::endStereoPass(directRender ? &directTarget : nullptr);
+        g_duskVREyePassOpen = false;
+        g_perfEyeEndMs += perfMs(perfT4, PerfClock::now());
+
+        // The desktop mirror gets the whole double-wide image for now (both
+        // eyes side by side in the window) -- the present-resample pass has
+        // no source sub-rect yet.
+        if (targets.colorTexture) {
+            mirrorEyeTargets = targets;
+        }
+
+        for (uint32_t eye = 0; eye < viewCount; ++eye) {
+            projViews[eye].type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
+            projViews[eye].pose = views[eye].pose;
+            projViews[eye].fov = views[eye].fov;
+            projViews[eye].subImage.swapchain = g_session->swapchain();
+            projViews[eye].subImage.imageArrayIndex = 0;
+            projViews[eye].subImage.imageRect.offset = {static_cast<int32_t>(eye * eyeWidth), 0};
+            projViews[eye].subImage.imageRect.extent = {static_cast<int32_t>(eyeWidth),
+                                                        static_cast<int32_t>(eyeHeight)};
+            pendingEyes[eye] = PendingEyeReadback{}; // valid = false unless set below
+        }
+
+        if (targets.colorTexture && directRender) {
+            // Already in the shared image; only the XR-side blit remains
+            // (submitFrame()'s finishSharedImageGpuCopy(), keyed off a valid
+            // pending entry with the full width).
+            pendingEyes[0] = PendingEyeReadback{true, 0, swapchainIndex, eyeWidth * 2, eyeHeight, 0, eyeWidth * 2};
+        } else if (targets.colorTexture) {
+            // ONE whole-image copy: the rendered target already has the
+            // swapchain's double-wide layout, so this is the two-pass path's
+            // per-eye copy with the full width and no x offset. Every copy
+            // path (encodeSwapchainCopy on both backends, encodeEyeCopy, the
+            // gamma compute pass) is sized purely by the width/height/offset
+            // it's handed, keyed by eye slot 0.
+            const uint32_t fullWidth = eyeWidth * 2;
+#if !DUSK_VR_XR_GRAPHICS_VULKAN
+            if (g_session->usesGpuDirectSwapchainCopy()) {
+                g_session->encodeSwapchainCopy(targets.colorTexture, 0, swapchainIndex, fullWidth, eyeHeight, 0,
+                                               aurora::gfx::color_format());
+            } else
+#else
+            if (g_session->usesSharedImageGpuDirect()) {
+                g_session->encodeSwapchainCopy(targets.colorTexture, 0, swapchainIndex, fullWidth, eyeHeight, 0,
+                                               aurora::gfx::color_format());
+            } else
+#endif
+            {
+                g_session->encodeEyeCopy(targets.colorTexture, 0, swapchainIndex, fullWidth, eyeHeight, 0,
+                                         aurora::gfx::color_format());
+            }
+            pendingEyes[0] = PendingEyeReadback{true, 0, swapchainIndex, fullWidth, eyeHeight, 0, fullWidth};
+        }
+    } else
     for (uint32_t eye = 0; eye < viewCount; ++eye) {
         vr_render::EyeParams eyeParams{
             views[eye].pose,
             views[eye].fov,
-            configViews[eye].recommendedImageRectWidth,
-            configViews[eye].recommendedImageRectHeight,
+            g_eyeImageWidth,
+            g_eyeImageHeight,
             hmdPose.position,
             vrCameraEyeAnchor,
             dusk::vr::getSmoothTurnYawRad(),
@@ -2482,7 +2649,8 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         }
 
         pendingEyes[eye] = PendingEyeReadback{
-            true, eye, swapchainIndex, eyeParams.width, eyeParams.height, eye * eyeParams.width};
+            true, eye, swapchainIndex, eyeParams.width, eyeParams.height, eye * eyeParams.width,
+            eyeParams.width * 2};
 
         projViews[eye].type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
         projViews[eye].pose = views[eye].pose;
@@ -2626,7 +2794,7 @@ void submitFrame() {
             if (!eye.valid) {
                 continue;
             }
-            g_session->finishSharedImageGpuCopy(eye.swapchainIndex, eye.eyeWidth * 2, eye.eyeHeight);
+            g_session->finishSharedImageGpuCopy(eye.swapchainIndex, eye.fullWidth, eye.eyeHeight);
             break;
         }
     }
@@ -2647,7 +2815,7 @@ void submitFrame() {
             if (!eye.valid) {
                 continue;
             }
-            g_session->finishIntermediateSwapchainCopy(eye.swapchainIndex, eye.eyeWidth * 2, eye.eyeHeight);
+            g_session->finishIntermediateSwapchainCopy(eye.swapchainIndex, eye.fullWidth, eye.eyeHeight);
             break;
         }
     }
@@ -2695,16 +2863,19 @@ void submitFrame() {
         ++s_perfFrame;
         const bool dip = totalMs > kPerfDipThresholdMs;
         if (dip || (s_perfFrame % kPerfBaselineInterval) == 0) {
-            char msg[400];
+            const aurora::gfx::WorkerFrameStats ws = aurora::gfx::worker_frame_stats();
+            char msg[500];
             duskVrSnprintf(msg, sizeof(msg),
                 "[dusk::vr::perf] %s total=%.1f setup=%.1f(waitFrame=%.1f swapWait=%.1f "
                 "beginFrame=%.1f syncActions=%.1f hmd=%.1f ctrl=%.1f mid=%.1f/%.1f/%.1f) "
                 "renderEnc=%.1f(preLoop=%.1f begin=%.1f iter=%.1f painter=%.1f end=%.1f) "
-                "gap=%.1f sync=%.1f submit=%.1f sim=%d cull=%u/%u\n",
+                "gap=%.1f sync=%.1f submit=%.1f sim=%d cull=%u/%u "
+                "worker(enc=%.1f finish=%.1f submit=%.1f wall=%.1f draws=%u merged=%u passes=%u maxPassDraws=%u)\n",
                 dip ? "DIP" : "base", totalMs, setupMs, g_perfWaitFrameMs, g_perfSwapWaitMs,
                 g_perfMid[5], g_perfMid[1], g_perfMid[6], g_perfMid[0], g_perfMid[2], g_perfMid[3], g_perfMid[4],
                 renderEncMs, g_perfPreLoopMs, g_perfEyeBeginMs, g_perfEyeIterMs, g_perfEyePainterMs,
-                g_perfEyeEndMs, gapMs, syncMs, submitMs, g_perfNumSimTicks, cullRejected, cullTested);
+                g_perfEyeEndMs, gapMs, syncMs, submitMs, g_perfNumSimTicks, cullRejected, cullTested,
+                ws.encodeMs, ws.finishMs, ws.submitMs, ws.wallMs, ws.drawCalls, ws.mergedDrawCalls, ws.renderPasses, ws.maxPassDraws);
             duskVrLog(msg);
         }
     }

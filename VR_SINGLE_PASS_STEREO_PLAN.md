@@ -1,5 +1,35 @@
 # VR single-pass stereo — scoping + implementation plan (handoff, 2026-09-20)
 
+**STATUS 2026-09-20 (evening): CONFIRMED on PC (120fps Castle Town) and on
+Quest (eyes correct). Final Quest design differs from §2: viewport-replay at
+the render worker, NOT instancing + clip distances (Adreno rejects Tint's
+clip_distances; discard kills early-Z). The Quest then needed GPU-side work
+(direct render into the shared swapchain image, minimap, depth discard) --
+see vr-mod-notes "Single-pass stereo CONFIRMED on both platforms". Quest is
+now GPU-bound at ~12.4ms/frame (hot headset), fps ~50; remaining lever is
+resolution.** Original status block follows.
+
+**STATUS 2026-09-20 (later the same day): IMPLEMENTED, PC build clean, NOT
+yet run on either platform.** Behind `game.vrSinglePassStereo` (Settings >
+VR > Performance, default OFF). What landed, where:
+- aurora: `GX_AURORA_SET_STEREO` / `GX_AURORA_SET_OFFSCREEN_NATIVE_LOGICAL_SIZE`
+  (`GXAurora.h/.cpp`, decoded in `command_processor.cpp`), `GXState::stereo`
+  + `ShaderConfig::stereo` (`gx.hpp`, pipeline config version 13 -> 14),
+  `stereo_active()`/`base_instance_count()` (`gx.cpp`; off inside nested
+  passes via `gfx::is_nested_in_protected_offscreen()`), instanceCount x2 +
+  merge-compatible (`command_processor.cpp`), stereo uniform block after
+  `proj` (`shader_info.cpp`), shader variants for all 3 vertex paths with
+  clip distance or discard fallback (`shader.cpp`, `FragmentInput` split
+  from `VertexOutput`), `ClipDistances` feature request (`gpu.cpp`),
+  stereo-aware range-fog LUT, `copy_tex` takes the left half.
+- dusklight: `vr_render::beginStereoPass()/endStereoPass()`
+  (`vr_stereo_render.hpp`, with a compile-time `kStereoDebugMono` for §5
+  step 2), single-pass branch in `tick()` + `PendingEyeReadback::fullWidth`
+  (`vr_main.cpp`), the setting, and `retry_captue_frame()` gated on
+  `g_env_light.is_blure` in VR (`m_Do_graphic.cpp`, item #4).
+- Known cosmetic: desktop mirror shows the whole double-wide image.
+Next: §5 steps 2-4 in-headset.
+
 Written to be executed in a fresh session. Read `vr-mod-notes` (the skill)
 section "Quest dips ROOT-CAUSED with real phase timing (2026-09-20)" first
 for the measurements this plan is built on; this file is the plan, not the

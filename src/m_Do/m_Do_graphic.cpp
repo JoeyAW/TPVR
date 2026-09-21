@@ -2848,7 +2848,21 @@ int mDoGph_Painter() {
                 // specifically (a geometrically-precise reflection) shouldn't
                 // apply the same way to a full-screen blur, which doesn't
                 // need spatial accuracy. Not yet tested in-headset.
-                retry_captue_frame(&camera_p->view, view_port, dComIfGp_getCameraZoomForcus(camera_id));
+                //
+                // VR (2026-09-20, Quest perf item #4): the underwater motion
+                // blur (motionBlure(), gated on g_env_light.is_blure) is the
+                // ONLY remaining VR consumer of this capture, so only pay for
+                // it when that effect is actually on. Every GXCopyTex inside
+                // the eye pass is a render-pass split + resolve on the tiled
+                // Quest GPU and a resolve_pass_into() substitution on the
+                // render worker, several times a frame for nothing. With
+                // single-pass stereo the capture also takes the left eye's
+                // half only (aurora's copy_tex halves it) -- the blur then
+                // shows left-eye content in both eyes, which for a full-
+                // screen blur is fine.
+                if (!dusk::vr::isRenderingToHeadset() || g_env_light.is_blure) {
+                    retry_captue_frame(&camera_p->view, view_port, dComIfGp_getCameraZoomForcus(camera_id));
+                }
 
                 #if DEBUG
                 // "Frame Buffer capture 2nd time (Rendering)"

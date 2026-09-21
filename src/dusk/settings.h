@@ -269,6 +269,19 @@ struct UserSettings {
         // set_present_source_mirror()) -- no extra render pass, no CPU
         // readback, near-zero cost.
         ConfigVar<bool> vrDesktopMirror;
+        // Renders both VR eyes in ONE scene pass (instanced per eye into a
+        // double-wide target, see vr_render::beginStereoPass()) instead of
+        // traversing and recording the whole scene twice per frame. The
+        // Quest 3 framerate fix (VR_SINGLE_PASS_STEREO_PLAN.md); off by
+        // default until confirmed in-headset so the proven two-pass path
+        // stays one toggle away for A/B.
+        ConfigVar<bool> vrSinglePassStereo;
+        // Per-axis scale applied to the runtime's recommended eye image size
+        // (0.5..1.0). The standalone headset is GPU-bound on pixel count
+        // (2026-09-20 profiling); the runtime upscales the smaller image.
+        // Read once at VR startup (sizes the swapchain), so it takes effect
+        // on the next launch.
+        ConfigVar<float> vrRenderScale;
         // Hides Link's whole body model in VR (any outfit/armor -- gates
         // the modelDraw(mpLinkModel, ...) call itself, not per-outfit
         // material indices, so it works uniformly regardless of which

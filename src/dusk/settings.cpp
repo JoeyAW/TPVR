@@ -21,7 +21,7 @@ UserSettings g_userSettings = {
         .rememberWindowSize {"video.rememberWindowSize", false},
         .lastWindowWidth {"video.lastWindowWidth", 0},
         .lastWindowHeight {"video.lastWindowHeight", 0},
-        .uiScale {"video.uiScale", 100},
+        .uiScale {"video.uiScale", kDefaultUiScalePercent},
     },
 
     .audio = {
@@ -90,6 +90,15 @@ UserSettings g_userSettings = {
         .vrDesktopMirror {"game.vrDesktopMirror", true},
         .vrSinglePassStereo {"game.vrSinglePassStereo", false},
         .vrRenderScale {"game.vrRenderScale", 1.0f},
+        .vrSpaceWarp {"game.vrSpaceWarp", false},
+        .vrSpaceWarpDebugNegateMv {"game.vrSpaceWarpDebugNegateMv", false},
+        .vrSpaceWarpDebugFlipMvY {"game.vrSpaceWarpDebugFlipMvY", false},
+        .vrSpaceWarpDebugZeroMv {"game.vrSpaceWarpDebugZeroMv", false},
+        .vrSpaceWarpDebugFlatDepth {"game.vrSpaceWarpDebugFlatDepth", false},
+        .vrSpaceWarpDebugIdentityDelta {"game.vrSpaceWarpDebugIdentityDelta", false},
+        .vrSpaceWarpDebugFlipImage {"game.vrSpaceWarpDebugFlipImage", false},
+        .vrSpaceWarpDebugReversedDepth {"game.vrSpaceWarpDebugReversedDepth", false},
+        .vrSpaceWarpDebugRawProbe {"game.vrSpaceWarpDebugRawProbe", false},
         .vrShowBody {"game.vrShowBody", false},
         .vrThirdPerson {"game.vrThirdPerson", false},
         .vrAttachBodyRotationToHead {"game.vrAttachBodyRotationToHead", false},
@@ -390,6 +399,15 @@ void registerSettings() {
     Register(g_userSettings.game.vrDesktopMirror);
     Register(g_userSettings.game.vrSinglePassStereo);
     Register(g_userSettings.game.vrRenderScale);
+    Register(g_userSettings.game.vrSpaceWarp);
+    Register(g_userSettings.game.vrSpaceWarpDebugNegateMv);
+    Register(g_userSettings.game.vrSpaceWarpDebugFlipMvY);
+    Register(g_userSettings.game.vrSpaceWarpDebugZeroMv);
+    Register(g_userSettings.game.vrSpaceWarpDebugFlatDepth);
+    Register(g_userSettings.game.vrSpaceWarpDebugIdentityDelta);
+    Register(g_userSettings.game.vrSpaceWarpDebugFlipImage);
+    Register(g_userSettings.game.vrSpaceWarpDebugReversedDepth);
+    Register(g_userSettings.game.vrSpaceWarpDebugRawProbe);
     Register(g_userSettings.game.vrShowBody);
     Register(g_userSettings.game.vrThirdPerson);
     Register(g_userSettings.game.vrAttachBodyRotationToHead);

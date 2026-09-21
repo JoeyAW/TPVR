@@ -14585,3 +14585,218 @@ impossible on Dawn; MSAA is 1; nothing is copied; 3 passes/frame.
 `[passdump]` (encoding.cpp), gpu_prof log mode (gpu_prof.cpp, gpu.cpp),
 `VR swapchain handoff` zone (vr_xr_submit.hpp), `eye image size` startup
 log. The GPU BOOST experiment line in startup is still BOOST.
+
+### Quest next steps agreed with the user (2026-09-20, end of session) -- NOT started
+
+Built but untested (headset battery died): **`game.vrRenderScale`**
+(Settings > VR > Performance > "VR Render Resolution", 50-100%, default
+100%, applied at VR startup: `g_eyeImageWidth/Height` in vr_main.cpp size
+the swapchain, shared images, eye passes and layer rects). PC build clean,
+Quest APK built at 17:17 but NOT installed (adb lost the device).
+
+Plan, in the user's order:
+1. User tests **90% + single-pass on**, same heavy spot; read GPU frame
+   (`[gpuprof]`), `VrApi` `App=`/`gpuMHz`/`Temp` (let the headset cool
+   first -- it was at the 545MHz thermal floor all afternoon; 640MHz cool).
+   Optional diagnostic: a 50% run tells fill-bound (GPU halves) vs
+   vertex/draw-bound (GPU barely moves) -- decides which further work
+   makes sense.
+2. **Then AppSW (XR_FB_space_warp)** -- user approved implementing it but
+   ONLY after the 90% results. Design: app renders at 36fps, runtime
+   synthesizes to 72 (GPU budget ~27ms, room to RAISE resolution). Needs:
+   depth submitted per eye (we have it; currently StoreOp::Discard'd --
+   keep it for this), a motion-vector swapchain filled by a full-screen
+   **camera-only reprojection pass** (depth + previous view-projection;
+   no per-object motion -- the GX stream has no stable draw identities).
+   Known artifact class: ghosting/judder on self-moving things (Link,
+   NPCs, enemies, projectiles); world/HUD/menu billboards are exact.
+   +~14ms latency. Must be a toggle.
+3. **Compositor sharpening** (`XR_FB_composition_layer_settings`) --
+   user wants this LAST and only if 90% looks bad. Not added.
+4. Other candidates noted, unranked until the 50% diagnostic: dynamic
+   resolution via smaller layer imageRects; CPU perf level lower to cut
+   SoC heat and keep the GPU clock up; draw-call merging in the DL
+   optimizer; native-endian vertex arrays (aurora VS byte-swaps per
+   attribute); FSR-style spatial upscale pass (only if sharpening
+   disappoints); MSAA 2x for grain once there is GPU room.
+Off the table: FFR (no FDM in Dawn), temporal upscalers (need per-object
+motion vectors).
+
+### 90% render scale tested: "didn't help much" (2026-09-20)
+
+Installed and tested on the Quest 3 with single-pass on. User: "Didn't
+help much. Performance varies wildly depending on the area but I believe
+it's better after a reboot and now that it isn't throttling." So render
+scale is NOT a big lever at 90% (consistent with the earlier suspicion
+that the heavy areas are partly draw-call/vertex-bound, not pure fill) --
+the 50% fill-vs-vertex diagnostic run from the plan was never done. The
+thermal state dominates run-to-run comparisons; keep letting it cool.
+Setting kept (Settings > VR > Performance > "VR Render Resolution").
+
+### Application SpaceWarp (XR_FB_space_warp) IMPLEMENTED as a toggle -- built + installed on the Quest 2026-09-20, NOT yet tested in-headset
+
+Per user request ("look into asw... make it a toggleable option"), done
+right after the 90% result above. `game.vrSpaceWarp` (default off),
+Settings > VR > Performance > "Application SpaceWarp (experimental)",
+shown only on standalone (`VR_SETTINGS_STANDALONE`). Live-toggleable.
+
+**How AppSW works, verified against the spec + Meta's XrSpaceWarp
+sample (fetched, not assumed)**: the app chains an
+`XrCompositionLayerSpaceWarpInfoFB` (motion-vector sub-image, depth
+sub-image, `appSpaceDeltaPose`, minDepth/maxDepth, nearZ/farZ in
+METERS) onto each projection view; the runtime synthesizes every other
+display frame and paces the app at half rate itself. The app does NOT
+skip frames -- Meta's sample renders every frame and toggles purely by
+chaining/not chaining the struct (its "hold trigger = 72fps, release =
+36fps" mode). Motion vectors: `CurrNDC - PrevNDC`, RGB channels, RGBA16F
+recommended, NDC x right / y up, z given GL-style; recommended MV
+image size comes from `XrSystemSpaceWarpPropertiesFB` chained onto
+`xrGetSystemProperties` (typically much smaller than the eye image).
+
+**Design (all Quest/Vulkan-only, `#if DUSK_VR_XR_GRAPHICS_VULKAN`)**:
+- `vr_xr_bootstrap.hpp`: enables `XR_FB_space_warp` if advertised
+  (`Bootstrap::hasSpaceWarp`).
+- `vr_main.cpp` startup: queries the recommended MV size,
+  `Session::setSpaceWarpSupport()`. Logs
+  `[dusk::vr::startup] XR_FB_space_warp: available (... WxH per eye)`.
+- `vr_stereo_render.hpp`: `endStereoPass(external, wantDepth)` --
+  resolves the eye pass with `.depth = true` when space warp is on,
+  giving aurora's R32Float depth snapshot (a full-screen copy pass +
+  the depth store that the 2026-09-20 Discard optimization otherwise
+  skips -- that's the unavoidable cost of AppSW).
+- `vr_xr_submit.hpp` SPACE WARP section: two extra swapchains
+  (`R16G16B16A16_SFLOAT` for MVs; depth = first of D32_SFLOAT /
+  D24_UNORM_S8_UINT / D16_UNORM / D32_SFLOAT_S8_UINT the runtime
+  enumerates), double-wide at the MV size, created lazily the first
+  frame the setting is on. Per shared slot (same 2-slot ring as the
+  color image): an `ExportedImage` for MVs (RGBA16F) and one for depth
+  rendered AS COLOR (R32Float / R32Uint / R16Uint matching the depth
+  format's byte layout), a device-local staging buffer, a uniform
+  buffer. The MV pass is an encoder task (`spaceWarpTaskCallback`, a
+  full-screen render pass with two color attachments) that
+  point-samples the depth snapshot, reconstructs eye-space position
+  through the eye's asymmetric projection, reprojects through
+  `P_prev * V_prev * inv(V_cur)` (per eye, `SpaceWarpUniforms`,
+  column-major), writes the NDC delta + FORWARD depth (1 - reversedZ,
+  so nearZ/farZ are passed unswapped). XR side, appended to the color
+  slot's own command buffer/submit/fence: MV blit (identical formats),
+  depth via image->buffer->depth-aspect copies (Vulkan forbids
+  color<->depth image copies; buffer copies are byte-identical), final
+  layouts COLOR_ATTACHMENT_OPTIMAL / DEPTH_STENCIL_ATTACHMENT_OPTIMAL.
+  Dawn EndAccess fences for all three images are imported as
+  semaphores the one submit waits on (`importDawnEndFence()`,
+  `endDawnAccess()` -- factored out of the color path).
+- `createExportedImage()` -- the exported-VkImage + Dawn-import code was
+  factored out of `ensureSharedImageResources()` verbatim (the color
+  slot now calls it and copies the handles); behavior identical by
+  construction (same create info, flags, format list, usage).
+- `vr_main.cpp` per frame: `spaceWarpNewFrame()` (also cleans up a
+  frame that never reached submit) -> `spaceWarpAcquireFrame()` +
+  `spaceWarpBeginAccess()` right after the color swapchain access ->
+  after `endStereoPass`, `spaceWarpEncodeFrame()` builds the uniforms
+  (exactly beginStereoPass's per-eye view/projection; history of the
+  previous rendered frame per eye; a >5m anchor jump = cut -> zero MVs)
+  and the app-space delta pose (app space in game world = (anchor/100,
+  Ry(smoothTurnYaw)); delta = inv(prev)*cur, the sample's construction)
+  -> `submitFrame()`: `finishSharedImageGpuCopy()` (now records the
+  extra copies), `spaceWarpReleaseFrame()`, then chains
+  `spaceWarpInfo[eye]` onto the projection views only when
+  `spaceWarpLayerInfo()` confirms the copies landed.
+- Requires single-pass stereo (the one double-wide depth snapshot) and
+  the shared-image GPU-direct path; any failure disables it for the
+  session with a `[dusk::vr] space warp: ... -- disabling` log line.
+  Tick logs state changes: `space warp: ON` / `off` / `requested but
+  unavailable`.
+
+**Unverified assumptions to check first if it looks wrong**:
+1. NDC y-up sign of the MVs (chosen to match GL-era Unity/Unreal/the
+   sample; Vulkan-native NDC is y-down). Symptom if wrong: vertical
+   motion warps the wrong way. One-line flip of `ndcY - prevNdc.y`.
+2. z channel convention (GL-style [-1,1]); probably unused by the
+   runtime.
+3. Whether the runtime accepts TRANSFER_DST usage on the MV/depth
+   swapchains (it did for color).
+4. Whether `snapshot_depth_supported()` is true on Adreno -- if not,
+   `[dusk::vr] space warp: eye pass produced no depth snapshot` logs
+   once and nothing is chained.
+5. Cost: the depth store + snapshot + MV pass + copies must be well
+   under the ~14ms the halved rate frees up. Measure with the gpuprof
+   log; the encoder task has a "VR space warp MV" zone.
+
+**What to look for in-headset**: `VrApi` logcat `FPS=36/72` while ON
+(the runtime's pacing), smooth world motion, and the expected artifacts
+on self-moving things (Link's own body/hands, NPCs, enemies,
+projectiles) -- those get camera motion only. Head rotation is still
+handled by the compositor's normal reprojection. If the image is
+scrambled/black rather than merely ghosting, suspect the MV pass
+(depth binding/format) or the depth-format buffer hop, in that order;
+`adb logcat -s dusklight_vr` for the space-warp lines.
+
+### AppSW first in-headset test + PARKED (2026-09-20, same evening) -- read this before resuming
+
+**Two fixes to get it engaging at all**: (1) Dawn refuses to import an
+opaque-fd image without `VK_IMAGE_USAGE_TRANSFER_DST_BIT`
+("vkImageCreateInfo.usage did not have VK_IMAGE_USAGE_TRANSFER_DST_BIT",
+real log) -- added to the MV/depth `ExportedImageDesc`s; (2) the
+logcat ring buffer is tiny by default -- `adb logcat -G 64M` (persists
+until reboot) or the startup lines are gone in ~25s. After that:
+`[dusk::vr::tick] space warp: ON`, both slots' images imported, runtime
+paced at `FPS=36/72` (VrApi log), App GPU ~12-14ms. The half-rate pacing
+part works.
+
+**Result: "absolutely terrible" -- everything jitters/warps on head
+movement, hands stretch, near objects jitter while walking, far objects
+fine.** Isolated with the live debug toggles (added for this):
+`zero motion vectors` fixed the walking warps but not head-move jitter;
+`zero MV + flat depth` removed all jitter, leaving plain 36fps judder.
+So BOTH the depth and the MV field the runtime received were wrong.
+
+**Root cause found by a readback (`spaceWarpDebugRecordReadback()`,
+logs `[dusk::vr] space warp READBACK #n` with MV/depth at 6 texels)**:
+the depth the MV pass samples is EXACTLY 0 (= reversed-Z far/clear
+value) at every probe, including ground/wall texels a couple of meters
+away -- i.e. `ResolvedTargets::depth` from `endStereoPass(..., wantDepth
+= true)` is an all-zero texture. That single fact explains everything:
+depth submitted as far-plane everywhere (so the runtime's depth-based
+head-translation reprojection is garbage), and the MVs degenerate to
+rotation-at-infinity (no parallax) so walking flow is wrong too. Nothing
+about the sign/y/delta-pose conventions was ever actually tested -- the
+data feeding them was empty. **Do not re-litigate the conventions
+first; fix the empty depth snapshot first.**
+
+**Where to look**: aurora's snapshot path reads correctly on paper
+(`resolve_pass` sets `snapshotDepthDst` before `end_offscreen()`, so
+`finish_current_offscreen` keeps `StoreOp::Store`; `render()` runs
+`tex_copy_conv::snapshot_depth(copySourceDepthView -> R32Float)` right
+after the pass; the encoder task is ordered after that). Unverified
+candidates: the stereo-replay pass with an EXTERNAL color target -- is
+its `depthStencilView`/`copySourceDepthView` really the depth that was
+drawn into, and is `discardable`/`has_consumer()` right for it; whether
+`snapshot_depth`'s `texture_depth_2d` textureLoad works on Adreno for
+this pooled Depth32Float (the depth_peek path uses the same idea -- is
+it known to work on the Quest?); whether the snapshot ran at all (try
+the pooled, non-external target path -- `directRender=false` -- as an
+A/B; or read the snapshot's dims/raw value via the `raw probe` flag 64,
+built but never captured because the user stopped here). A RenderDoc
+capture on the Quest (Meta's RenderDoc build) would settle it in one go.
+
+**State left in the tree (all uncommitted)**: whole AppSW path intact
+and compiled; `kSpaceWarpEnabled = false` in `vr_main.cpp`'s tick()
+hard-disables it; ALL settings-tab entries removed (the `vrSpaceWarp*`
+ConfigVars still exist, inert, including 7 `vrSpaceWarpDebug*` A/B
+flags: negate / flipY / zeroMv / flatDepth / flipImage / reversedDepth /
+rawProbe, wired into `SpaceWarpUniforms::nearFar[2]` as bit flags);
+the readback diagnostic is still in (`swDebugReadback_`, 6 frames after
+each flag change). Remove the debug flags + readback once the depth
+snapshot is fixed and conventions confirmed. On-device config may still
+hold `game.vrSpaceWarp: true` from testing -- harmless with the hard
+disable.
+
+### UI closer + 200% text on standalone (2026-09-20, end of session) -- built + installed, not separately confirmed
+
+Per user request: `kHudDistanceMeters` 2.0 -> 1.7 and
+`kMenuBillboardDistanceMeters` 1.2 -> 0.9 (`vr_stereo_render.hpp`,
+~1ft closer each; widths unchanged, so both panels also look bigger --
+offered to shrink widths if unwanted). `video.uiScale` compiled default
+is `kDefaultUiScalePercent` (`settings.h`): 200 on standalone, 100 on
+PC. User's device config already had 200. Session ended here ("done").

@@ -319,6 +319,17 @@ struct PendingFrameSubmit {
     XrFrameState frameState{XR_TYPE_FRAME_STATE};
     XrSpace base = XR_NULL_HANDLE;
     uint32_t viewCount = 0;
+    // Space warp (XR_FB_space_warp): true when tick() pushed a
+    // motion-vector pass this frame; submitFrame() then chains
+    // spaceWarpInfo[eye] onto projViews[eye] once the XR-side copies are
+    // confirmed recorded. Fixed-size (not a vector) so the chained
+    // pointers are stable.
+    bool spaceWarp = false;
+    XrCompositionLayerSpaceWarpInfoFB spaceWarpInfo[2] = {{XR_TYPE_COMPOSITION_LAYER_SPACE_WARP_INFO_FB},
+                                                          {XR_TYPE_COMPOSITION_LAYER_SPACE_WARP_INFO_FB}};
+    XrPosef spaceWarpDeltaPose{{0.f, 0.f, 0.f, 1.f}, {0.f, 0.f, 0.f}};
+    float spaceWarpNearZ = 0.f;
+    float spaceWarpFarZ = 0.f;
 };
 PendingFrameSubmit g_pendingSubmit;
 
@@ -634,6 +645,14 @@ bool startup() {
     XrSystemProperties sysProps{XR_TYPE_SYSTEM_PROPERTIES};
     try {
         vr_xr::Bootstrap boot = vr_xr::initialize();
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+        // XR_FB_space_warp: the runtime's recommended motion-vector image
+        // size rides on the system properties query (chained struct).
+        XrSystemSpaceWarpPropertiesFB spaceWarpProps{XR_TYPE_SYSTEM_SPACE_WARP_PROPERTIES_FB};
+        if (boot.hasSpaceWarp) {
+            sysProps.next = &spaceWarpProps;
+        }
+#endif
         xrGetSystemProperties(boot.instance, boot.systemId, &sysProps);
 
         vr_xr::XrGraphicsDevice gfx;
@@ -845,6 +864,21 @@ bool startup() {
                         "[dusk::vr::startup] shared-image async semaphore handoff: "
                         "xrDeviceSupportsExternalSemaphoreFd=%d\n",
                         gfx.supportsExternalSemaphoreFd);
+            duskVrLog(msg);
+        }
+        // Space warp rides the shared-image hand-off above (its MV/depth
+        // images are more ExportedImages on the same submit); swapchains
+        // and per-slot resources are created lazily the first frame the
+        // game.vrSpaceWarp setting is on.
+        g_ownedSession->setSpaceWarpSupport(boot.hasSpaceWarp, spaceWarpProps.recommendedMotionVectorImageRectWidth,
+                                            spaceWarpProps.recommendedMotionVectorImageRectHeight);
+        {
+            char msg[200];
+            duskVrSnprintf(msg, sizeof(msg),
+                        "[dusk::vr::startup] XR_FB_space_warp: %s (recommended motion-vector image %ux%u per eye)\n",
+                        boot.hasSpaceWarp ? "available" : "not advertised by this runtime",
+                        spaceWarpProps.recommendedMotionVectorImageRectWidth,
+                        spaceWarpProps.recommendedMotionVectorImageRectHeight);
             duskVrLog(msg);
         }
 #endif
@@ -1115,6 +1149,202 @@ constexpr int kPerfBaselineInterval = 600;
 inline double perfMs(PerfClock::time_point a, PerfClock::time_point b) {
     return std::chrono::duration<double, std::milli>(b - a).count();
 }
+
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+// ---------------------------------------------------------------------------
+// Space warp (XR_FB_space_warp) -- the game-side half. See Session's SPACE
+// WARP section (vr_xr_submit.hpp) for the GPU/XR plumbing; this computes the
+// per-eye reprojection constants the motion-vector pass needs and the
+// layer-level quantities (near/far in meters, app-space delta pose).
+// ---------------------------------------------------------------------------
+
+// Plain 4x4, row-major, column-vector convention (clip = M * v) -- the
+// convention aurora's shader applies once the uniform is uploaded
+// column-major (see SpaceWarpUniforms).
+struct SwMat4 {
+    float m[4][4];
+};
+static SwMat4 swMul(const SwMat4& a, const SwMat4& b) {
+    SwMat4 r{};
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            r.m[i][j] = a.m[i][0] * b.m[0][j] + a.m[i][1] * b.m[1][j] + a.m[i][2] * b.m[2][j] + a.m[i][3] * b.m[3][j];
+        }
+    }
+    return r;
+}
+static SwMat4 swFromMtx(const Mtx src) {  // 3x4 affine -> 4x4
+    SwMat4 r{};
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            r.m[i][j] = src[i][j];
+        }
+    }
+    r.m[3][3] = 1.f;
+    return r;
+}
+// The exact clip transform aurora builds from GXSetProjection's six
+// parameters for a perspective draw (shader_info.cpp's stereo block), with
+// the reversed-Z fixup: rows {p0,0,p1,0}, {0,p2,p3,0}, -{0,0,p4,p5}, {0,0,-1,0}.
+static SwMat4 swProjFromParams(const float p[6]) {
+    SwMat4 r{};
+    r.m[0][0] = p[0];
+    r.m[0][2] = p[1];
+    r.m[1][1] = p[2];
+    r.m[1][2] = p[3];
+    r.m[2][2] = -p[4];
+    r.m[2][3] = -p[5];
+    r.m[3][2] = -1.f;
+    return r;
+}
+
+// Previous rendered frame, per eye: what this frame's pixels get
+// reprojected through. Invalid on the first frame and after a cut.
+struct SwEyeHistory {
+    bool valid = false;
+    SwMat4 view{};   // V_eye (4x4 of the 3x4 eyePoseToViewMtx result)
+    float proj[6]{}; // GXSetProjection parameters
+};
+static SwEyeHistory g_swPrevEye[2];
+// The app space's pose in the game world (meters, world axes) last frame,
+// for XrCompositionLayerSpaceWarpInfoFB::appSpaceDeltaPose.
+static bool g_swPrevPoseValid = false;
+static cXyz g_swPrevAnchor;
+static float g_swPrevYaw = 0.f;
+// Anchor jump (game units) treated as a cut (load, warp, cutscene camera
+// change): motion vectors are zeroed for that frame instead of pointing at
+// wherever the previous camera was. 5m.
+static constexpr float kSwCutDistanceUnits = 500.f;
+
+// Layer-level values tick() computes for submitFrame() to chain.
+struct SwLayerExtras {
+    XrPosef appSpaceDeltaPose{};
+    float nearZ = 0.f;
+    float farZ = 0.f;
+};
+
+// Builds this frame's SpaceWarpUniforms from the same view/projection
+// inputs beginStereoPass() rendered with, pushes the MV pass, and rolls
+// the history. Returns false if nothing was encoded this frame.
+static bool spaceWarpEncodeFrame(const vr_render::StereoParams& sp, const aurora::gfx::ResolvedTargets& targets,
+                                 uint32_t eyeWidth, uint32_t eyeHeight, SwLayerExtras* extras) {
+    view_class* view = dComIfGd_getView();
+    if (view == nullptr || !targets.depth) {
+        static bool s_loggedNoDepth = false;
+        if (!s_loggedNoDepth && view != nullptr) {
+            s_loggedNoDepth = true;
+            duskVrLog("[dusk::vr] space warp: eye pass produced no depth snapshot (unsupported on this device?) "
+                      "-- no motion vectors this session\n");
+        }
+        return false;
+    }
+    const float nearZ = view->near_;
+    const float farZ = view->far_;
+
+    // A cut invalidates the history: the previous frame's camera has no
+    // relationship to this one, and reprojecting through it would hand the
+    // runtime enormous, wrong vectors for one frame.
+    if (g_swPrevPoseValid) {
+        const float dx = sp.eyeAnchor.x - g_swPrevAnchor.x;
+        const float dy = sp.eyeAnchor.y - g_swPrevAnchor.y;
+        const float dz = sp.eyeAnchor.z - g_swPrevAnchor.z;
+        if (dx * dx + dy * dy + dz * dz > kSwCutDistanceUnits * kSwCutDistanceUnits) {
+            g_swPrevEye[0].valid = g_swPrevEye[1].valid = false;
+            g_swPrevPoseValid = false;
+        }
+    }
+
+    SpaceWarpUniforms u{};
+    for (int eye = 0; eye < 2; ++eye) {
+        // Exactly beginStereoPass()'s per-eye view and projection.
+        Mtx eyeView;
+        vr_render::eyePoseToViewMtx(eyeView, sp.eyePose[eye], sp.hmdPose.position, sp.eyeAnchor,
+                                    vr_render::kEyePosScale, sp.smoothTurnYawRad);
+        Mtx44 eyeProj;
+        vr_render::eyeFovToProjMtx(eyeProj, sp.eyeFov[eye], nearZ, farZ);
+        const float proj[6] = {eyeProj[0][0], eyeProj[0][2], eyeProj[1][1],
+                               eyeProj[1][2], eyeProj[2][2], eyeProj[2][3]};
+
+        Mtx invEyeView;
+        MTXInverse(eyeView, invEyeView);
+        const SwMat4 curView = swFromMtx(eyeView);
+        const SwMat4 invCurView = swFromMtx(invEyeView);
+
+        const SwEyeHistory& prev = g_swPrevEye[eye];
+        // No history: reproject through this frame's own transform, i.e.
+        // motion vectors come out exactly zero.
+        const SwMat4 prevView = prev.valid ? prev.view : curView;
+        const SwMat4 prevProj = swProjFromParams(prev.valid ? prev.proj : proj);
+        const SwMat4 m = swMul(prevProj, swMul(prevView, invCurView));
+        for (int row = 0; row < 4; ++row) {
+            for (int col = 0; col < 4; ++col) {
+                u.prevFromCurView[eye][col * 4 + row] = m.m[row][col];  // column-major
+            }
+        }
+        u.invProj[eye][0] = proj[0];
+        u.invProj[eye][1] = proj[1];
+        u.invProj[eye][2] = proj[2];
+        u.invProj[eye][3] = proj[3];
+
+        g_swPrevEye[eye].valid = true;
+        g_swPrevEye[eye].view = curView;
+        std::memcpy(g_swPrevEye[eye].proj, proj, sizeof(proj));
+    }
+    u.nearFar[0] = nearZ;
+    u.nearFar[1] = farZ;
+    {
+        const auto& g = dusk::getSettings().game;
+        uint32_t flags = 0;
+        if (g.vrSpaceWarpDebugNegateMv.getValue()) flags |= 1u;
+        if (g.vrSpaceWarpDebugFlipMvY.getValue()) flags |= 2u;
+        if (g.vrSpaceWarpDebugZeroMv.getValue()) flags |= 4u;
+        if (g.vrSpaceWarpDebugFlatDepth.getValue()) flags |= 8u;
+        if (g.vrSpaceWarpDebugFlipImage.getValue()) flags |= 16u;
+        if (g.vrSpaceWarpDebugReversedDepth.getValue()) flags |= 32u;
+        if (g.vrSpaceWarpDebugRawProbe.getValue()) flags |= 64u;
+        u.nearFar[2] = static_cast<float>(flags);
+        static uint32_t s_loggedFlags = UINT32_MAX;
+        if (flags != s_loggedFlags) {
+            s_loggedFlags = flags;
+            g_session->spaceWarpDebugRearmReadback();
+            char msg[200];
+            duskVrSnprintf(msg, sizeof(msg),
+                           "[dusk::vr] space warp: debug flags=%u (1=negate 2=flipY 4=zeroMv 8=flatDepth 16=flipImage 32=reversedDepth) identityDelta=%d "
+                           "near=%.2f far=%.2f units\n",
+                           flags, g.vrSpaceWarpDebugIdentityDelta.getValue() ? 1 : 0, nearZ, farZ);
+            duskVrLog(msg);
+        }
+    }
+    u.sizes[0] = g_session->spaceWarpMvWidth();
+    u.sizes[1] = g_session->spaceWarpMvHeight();
+    u.sizes[2] = eyeWidth;
+    u.sizes[3] = eyeHeight;
+
+    // App space (the XR reference space) as posed in the game world, in
+    // meters: a tracked point p lands at anchor + Ry(yaw) * p * scale
+    // (eyePoseToViewMtx), so pose = (anchor / scale, Ry(yaw)). Delta =
+    // inv(prev) * cur, the same construction Meta's XrSpaceWarp sample uses.
+    const float yaw = sp.smoothTurnYawRad;
+    if (g_swPrevPoseValid && !dusk::getSettings().game.vrSpaceWarpDebugIdentityDelta.getValue()) {
+        const XrVector3f dWorld{(sp.eyeAnchor.x - g_swPrevAnchor.x) / vr_render::kEyePosScale,
+                                (sp.eyeAnchor.y - g_swPrevAnchor.y) / vr_render::kEyePosScale,
+                                (sp.eyeAnchor.z - g_swPrevAnchor.z) / vr_render::kEyePosScale};
+        extras->appSpaceDeltaPose.position = dusk::vr::rotateYawXr(dWorld, -g_swPrevYaw);
+        const float dYaw = yaw - g_swPrevYaw;
+        extras->appSpaceDeltaPose.orientation = XrQuaternionf{0.f, std::sin(dYaw * 0.5f), 0.f, std::cos(dYaw * 0.5f)};
+    } else {
+        extras->appSpaceDeltaPose = XrPosef{{0.f, 0.f, 0.f, 1.f}, {0.f, 0.f, 0.f}};
+    }
+    g_swPrevPoseValid = true;
+    g_swPrevAnchor = sp.eyeAnchor;
+    g_swPrevYaw = yaw;
+    // Forward depth in [0,1] between these two distances (meters).
+    extras->nearZ = nearZ / vr_render::kEyePosScale;
+    extras->farZ = farZ / vr_render::kEyePosScale;
+
+    return g_session->spaceWarpEncode(targets.depth, u);
+}
+#endif  // DUSK_VR_XR_GRAPHICS_VULKAN
 }  // namespace
 
 void tick(const dusk::game_clock::FrameTiming& pacing) {
@@ -2255,6 +2485,42 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     }
 #endif
 
+    // Space warp (XR_FB_space_warp, Quest): live setting -- acquire the
+    // motion-vector/depth swapchain images and open Dawn access to this
+    // slot's MV/depth images when it's on. Only the single-pass stereo path
+    // produces the one double-wide depth snapshot the MV pass consumes.
+    // Every failure inside disables it for the session with a log line.
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+    // PARKED 2026-09-20: the first in-headset test warped badly (the depth
+    // snapshot the MV pass reads came back all-zero -- see vr-mod-notes),
+    // and the user asked to shelve it. The whole path stays compiled and
+    // wired; flip this to true to resume testing. The settings-tab toggles
+    // were removed at the same time (the ConfigVars still exist, inert).
+    constexpr bool kSpaceWarpEnabled = false;
+    g_session->spaceWarpNewFrame();
+    bool spaceWarpFrame = false;
+    {
+        const bool wanted = kSpaceWarpEnabled && dusk::getSettings().game.vrSpaceWarp.getValue() &&
+                            dusk::getSettings().game.vrSinglePassStereo.getValue() && viewCount == 2;
+        const bool available = g_session->spaceWarpAvailable();
+        static int s_loggedState = -1;
+        const int state = !wanted ? 0 : (available ? 1 : 2);
+        if (state != s_loggedState) {
+            s_loggedState = state;
+            duskVrLog(state == 0   ? "[dusk::vr::tick] space warp: off\n"
+                      : state == 1 ? "[dusk::vr::tick] space warp: ON (motion vectors + depth submitted; runtime paces at half rate)\n"
+                                   : "[dusk::vr::tick] space warp: requested but unavailable (extension/shared-image path/"
+                                     "earlier failure -- see startup log)\n");
+        }
+        if (wanted && available && g_session->spaceWarpAcquireFrame()) {
+            g_session->spaceWarpBeginAccess();
+            spaceWarpFrame = true;
+        }
+    }
+#else
+    constexpr bool spaceWarpFrame = false;
+#endif
+
 
     // CONFIRMED this session (m_Do_main.cpp): tick() is called from INSIDE
     // that file's own aurora_begin_frame()/aurora_end_frame() pair (around
@@ -2265,6 +2531,7 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
 
     std::vector<XrCompositionLayerProjectionView> projViews(viewCount);
     std::vector<PendingEyeReadback> pendingEyes(viewCount);
+    g_pendingSubmit.spaceWarp = false;
 
     // Advance the HUD billboard's damped reference direction once per frame
     // (not per eye) -- see vr_stereo_render.hpp's updateHudSmoothing()/
@@ -2424,9 +2691,25 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         }
 
         PerfClock::time_point perfT4 = PerfClock::now();
-        aurora::gfx::ResolvedTargets targets = vr_render::endStereoPass(directRender ? &directTarget : nullptr);
+        aurora::gfx::ResolvedTargets targets =
+            vr_render::endStereoPass(directRender ? &directTarget : nullptr, spaceWarpFrame);
         g_duskVREyePassOpen = false;
         g_perfEyeEndMs += perfMs(perfT4, PerfClock::now());
+
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+        // Space warp: reproject this frame's depth into motion vectors
+        // (pushed as an encoder task -- runs on the render worker right
+        // after the eye pass's depth snapshot) and stash the layer values.
+        if (spaceWarpFrame) {
+            SwLayerExtras extras{};
+            if (spaceWarpEncodeFrame(stereoParams, targets, eyeWidth, eyeHeight, &extras)) {
+                g_pendingSubmit.spaceWarp = true;
+                g_pendingSubmit.spaceWarpDeltaPose = extras.appSpaceDeltaPose;
+                g_pendingSubmit.spaceWarpNearZ = extras.nearZ;
+                g_pendingSubmit.spaceWarpFarZ = extras.farZ;
+            }
+        }
+#endif
 
         // The desktop mirror gets the whole double-wide image for now (both
         // eyes side by side in the window) -- the present-resample pass has
@@ -2798,6 +3081,9 @@ void submitFrame() {
             break;
         }
     }
+    // Space warp: the copies into the MV/depth swapchain images (if any)
+    // were submitted above; release them (no-op if none were acquired).
+    g_session->spaceWarpReleaseFrame();
 #endif
 
     g_session->endAccessAll();
@@ -2826,6 +3112,26 @@ void submitFrame() {
     if (XR_FAILED(xrReleaseSwapchainImage(g_session->swapchain(), &releaseInfo))) {
         duskVrLog("[dusk::vr::submitFrame] FAILED: xrReleaseSwapchainImage\n");
     }
+
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+    // Space warp: chain the per-eye motion-vector/depth info onto the
+    // projection views -- only when this frame's copies really landed
+    // (spaceWarpLayerInfo() says so), otherwise the runtime just composites
+    // this frame normally.
+    if (g_pendingSubmit.spaceWarp) {
+        for (uint32_t eye = 0; eye < g_pendingSubmit.viewCount && eye < 2; ++eye) {
+            XrCompositionLayerSpaceWarpInfoFB& info = g_pendingSubmit.spaceWarpInfo[eye];
+            if (g_session->spaceWarpLayerInfo(eye, &info)) {
+                info.appSpaceDeltaPose = g_pendingSubmit.spaceWarpDeltaPose;
+                info.nearZ = g_pendingSubmit.spaceWarpNearZ;
+                info.farZ = g_pendingSubmit.spaceWarpFarZ;
+                g_pendingSubmit.projViews[eye].next = &info;
+            } else {
+                g_pendingSubmit.projViews[eye].next = nullptr;
+            }
+        }
+    }
+#endif
 
     XrCompositionLayerProjection projLayer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     projLayer.space = g_pendingSubmit.base;

@@ -37,6 +37,7 @@
 #include <openxr/openxr.h>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -509,6 +510,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     dst[gid.y * params.rowWords + gid.x] = packed;
 }
 )WGSL";
+
+// Per-frame constants of the space-warp motion-vector pass (see Session's
+// SPACE WARP section). Layout matches kSpaceWarpShaderSource's SwParams
+// exactly (WGSL uniform rules: mat4x4f = 64 bytes, vec4 = 16).
+struct SpaceWarpUniforms {
+    // Per eye: P_prev * V_prev * inv(V_cur), column-major (WGSL mat4x4f).
+    float prevFromCurView[2][16];
+    // Per eye: this frame's projection terms {p0, p1, p2, p3} =
+    // {m[0][0], m[0][2], m[1][1], m[1][2]} of eyeFovToProjMtx()'s output.
+    float invProj[2][4];
+    float nearFar[4];   // {near, far, debugFlags (as float; 1=negate 2=flipY 4=zeroMv 8=flatDepth), 0}
+    uint32_t sizes[4];  // {mv per-eye width, mv height, depth per-eye width, depth height}
+};
+static_assert(sizeof(SpaceWarpUniforms) == 192, "SpaceWarpUniforms must match SwParams' WGSL layout");
 
 class Session {
 public:
@@ -1460,6 +1475,228 @@ public:
         }
     }
 
+    // One VkImage created on the XR-side device with exportable (opaque-fd)
+    // memory and imported into Dawn as a wgpu::Texture over the SAME memory
+    // -- the building block of every GPU-direct hand-off on this branch:
+    // the color swapchain staging image (SharedImageSlot) and, since
+    // 2026-09-20, space warp's motion-vector and depth images
+    // (SpaceWarpSlot). Factored out of ensureSharedImageResources() verbatim
+    // when space warp needed the same thing twice more.
+    struct ExportedImage {
+        wgpu::SharedTextureMemory memory;
+        wgpu::Texture texture;
+        // View in ExportedImageDesc::dawnViewFormat (the texture's own format
+        // when that's Undefined).
+        wgpu::TextureView view;
+        VkImage xrImage = VK_NULL_HANDLE;
+        VkDeviceMemory xrMemory = VK_NULL_HANDLE;
+        VkFormat vkFormat = VK_FORMAT_UNDEFINED;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        // Layout Dawn reported leaving the image in at its last EndAccess
+        // (SharedTextureMemoryVkImageLayoutEndState::newLayout) -- used as
+        // the XR-side acquire barrier's oldLayout so Dawn's writes are
+        // preserved (an UNDEFINED transition may legally discard them).
+        VkImageLayout dawnEndLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        // Imported (TEMPORARY) from Dawn's EndAccess fence each frame the
+        // image is handed over -- see importDawnEndFence().
+        VkSemaphore dawnDoneSemaphore = VK_NULL_HANDLE;
+    };
+    struct ExportedImageDesc {
+        uint32_t width = 0;
+        uint32_t height = 0;
+        VkFormat vkFormat = VK_FORMAT_UNDEFINED;
+        // MUTABLE_FORMAT + a VkImageFormatListCreateInfo naming {vkFormat,
+        // vkViewFormat} so a second-format view is legal AND the driver
+        // keeps UBWC compression (see the note inside createExportedImage()).
+        // VK_FORMAT_UNDEFINED: no format list, no MUTABLE flag.
+        VkFormat vkViewFormat = VK_FORMAT_UNDEFINED;
+        VkImageUsageFlags vkUsage = 0;
+        wgpu::TextureFormat dawnFormat = wgpu::TextureFormat::Undefined;
+        wgpu::TextureFormat dawnViewFormat = wgpu::TextureFormat::Undefined;  // Undefined = dawnFormat
+        wgpu::TextureUsage dawnUsage = wgpu::TextureUsage::None;
+    };
+
+    // Returns false with a reason in errBuf. On failure `out` may hold a
+    // partially-created XR-side image/memory; callers treat the whole
+    // feature as failed for the session (same as every other one-way
+    // failure flag in this file), so nothing is torn down.
+    bool createExportedImage(const ExportedImageDesc& d, ExportedImage& out, char* errBuf, size_t errLen) {
+        auto fail = [&](const char* what) {
+            duskVrSnprintf(errBuf, errLen, "%s", what);
+            return false;
+        };
+        out.vkFormat = d.vkFormat;
+        out.width = d.width;
+        out.height = d.height;
+
+        // --- XR-side: a normal optimally-tiled image whose memory can be
+        // exported. The SAME VkImageCreateInfo (pNext chain and all) is
+        // handed to Dawn, which creates its own VkImage from it -- the
+        // opaque-fd sharing contract requires identical creation
+        // parameters on both sides, and Dawn requires the chain to hold
+        // exactly one VkExternalMemoryImageCreateInfo with OPAQUE_FD.
+        // MUTABLE_FORMAT alone makes Adreno drop UBWC framebuffer compression
+        // (measured: the eye pass rendering into this image cost ~12ms vs
+        // ~10ms into a pooled texture). Declaring the exact view-format set
+        // via VkImageFormatListCreateInfo (VK_KHR_image_format_list, core in
+        // 1.2) is what lets the driver keep compression for a mutable image.
+        const bool mutableFormat = d.vkViewFormat != VK_FORMAT_UNDEFINED;
+        const VkFormat viewFormats[2] = {d.vkFormat, d.vkViewFormat};
+        VkImageFormatListCreateInfo formatList{VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO};
+        formatList.viewFormatCount = d.vkViewFormat != d.vkFormat ? 2u : 1u;
+        formatList.pViewFormats = viewFormats;
+
+        VkExternalMemoryImageCreateInfo extMemImageInfo{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
+        extMemImageInfo.pNext = mutableFormat ? &formatList : nullptr;
+        extMemImageInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+
+        VkImageCreateInfo imageCI{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        imageCI.pNext = &extMemImageInfo;
+        imageCI.imageType = VK_IMAGE_TYPE_2D;
+        imageCI.format = d.vkFormat;
+        imageCI.extent = {d.width, d.height, 1};
+        imageCI.mipLevels = 1;
+        imageCI.arrayLayers = 1;
+        imageCI.samples = VK_SAMPLE_COUNT_1_BIT;
+        imageCI.tiling = VK_IMAGE_TILING_OPTIMAL;
+        // Dawn creates its own VkImage from this same create info for the
+        // imported memory, so every usage bit either side needs must be here.
+        imageCI.flags = mutableFormat ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0;
+        imageCI.usage = d.vkUsage;
+        imageCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        imageCI.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (vkCreateImage(xrDevice_, &imageCI, nullptr, &out.xrImage) != VK_SUCCESS) {
+            return fail("vkCreateImage (exportable) failed");
+        }
+
+        VkMemoryDedicatedRequirements dedicatedReqs{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS};
+        VkMemoryRequirements2 memReqs2{VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2, &dedicatedReqs};
+        VkImageMemoryRequirementsInfo2 reqInfo{VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2};
+        reqInfo.image = out.xrImage;
+        vkGetImageMemoryRequirements2(xrDevice_, &reqInfo, &memReqs2);
+        const VkMemoryRequirements& memReqs = memReqs2.memoryRequirements;
+
+        VkPhysicalDeviceMemoryProperties memProps{};
+        vkGetPhysicalDeviceMemoryProperties(xrPhysicalDevice_, &memProps);
+        uint32_t memTypeIndex = UINT32_MAX;
+        for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
+            if ((memReqs.memoryTypeBits & (1u << i)) &&
+                (memProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+                memTypeIndex = i;
+                break;
+            }
+        }
+        if (memTypeIndex == UINT32_MAX) {
+            for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
+                if (memReqs.memoryTypeBits & (1u << i)) {
+                    memTypeIndex = i;
+                    break;
+                }
+            }
+        }
+        if (memTypeIndex == UINT32_MAX) {
+            return fail("no usable memory type for the exportable image");
+        }
+
+        // Always dedicated: required by some drivers for exportable images,
+        // always permitted, and it keeps the two sides' allocations
+        // symmetric (Dawn is told dedicatedAllocation=true below).
+        VkMemoryDedicatedAllocateInfo dedicatedInfo{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
+        dedicatedInfo.image = out.xrImage;
+        VkExportMemoryAllocateInfo exportInfo{VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO, &dedicatedInfo};
+        exportInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+        VkMemoryAllocateInfo allocInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &exportInfo};
+        allocInfo.allocationSize = memReqs.size;
+        allocInfo.memoryTypeIndex = memTypeIndex;
+        if (vkAllocateMemory(xrDevice_, &allocInfo, nullptr, &out.xrMemory) != VK_SUCCESS) {
+            return fail("vkAllocateMemory (exportable) failed");
+        }
+        if (vkBindImageMemory(xrDevice_, out.xrImage, out.xrMemory, 0) != VK_SUCCESS) {
+            return fail("vkBindImageMemory failed");
+        }
+
+        // vkGetMemoryFdKHR isn't directly linkable through Android's Vulkan
+        // loader (same as vkImportSemaphoreFdKHR in importDawnEndFence())
+        // -- resolve via vkGetDeviceProcAddr.
+        static PFN_vkGetMemoryFdKHR pfnGetMemoryFdKHR = nullptr;
+        if (!pfnGetMemoryFdKHR) {
+            pfnGetMemoryFdKHR =
+                reinterpret_cast<PFN_vkGetMemoryFdKHR>(vkGetDeviceProcAddr(xrDevice_, "vkGetMemoryFdKHR"));
+        }
+        if (!pfnGetMemoryFdKHR) {
+            return fail("vkGetMemoryFdKHR unavailable on the XR device");
+        }
+        VkMemoryGetFdInfoKHR getFdInfo{VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR};
+        getFdInfo.memory = out.xrMemory;
+        getFdInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+        int memoryFd = -1;
+        if (pfnGetMemoryFdKHR(xrDevice_, &getFdInfo, &memoryFd) != VK_SUCCESS || memoryFd < 0) {
+            return fail("vkGetMemoryFdKHR failed");
+        }
+
+        // --- Dawn side. Bracketed in an error scope: Aurora's uncaptured-
+        // error callback FATALs on any post-init Dawn validation error, so a
+        // rejected import must degrade to a fallback path with a log line.
+        aurora::webgpu::g_device.PushErrorScope(wgpu::ErrorFilter::Validation);
+        {
+            wgpu::SharedTextureMemoryOpaqueFDDescriptor fdDesc{};
+            fdDesc.vkImageCreateInfo = &imageCI;
+            fdDesc.memoryFD = memoryFd;
+            fdDesc.memoryTypeIndex = memTypeIndex;
+            fdDesc.allocationSize = memReqs.size;
+            fdDesc.dedicatedAllocation = true;
+            wgpu::SharedTextureMemoryDescriptor stmDesc{};
+            stmDesc.nextInChain = &fdDesc;
+            out.memory = aurora::webgpu::g_device.ImportSharedTextureMemory(&stmDesc);
+
+            const wgpu::TextureFormat viewFormat =
+                d.dawnViewFormat != wgpu::TextureFormat::Undefined ? d.dawnViewFormat : d.dawnFormat;
+            const bool needsViewFormat = viewFormat != d.dawnFormat;
+            wgpu::TextureDescriptor texDesc{};
+            texDesc.format = d.dawnFormat;
+            texDesc.size = {d.width, d.height, 1};
+            texDesc.usage = d.dawnUsage;
+            texDesc.viewFormatCount = needsViewFormat ? 1 : 0;
+            texDesc.viewFormats = needsViewFormat ? &viewFormat : nullptr;
+            out.texture = out.memory.CreateTexture(&texDesc);
+            if (out.texture) {
+                wgpu::TextureViewDescriptor viewDesc{};
+                viewDesc.format = viewFormat;
+                viewDesc.dimension = wgpu::TextureViewDimension::e2D;
+                viewDesc.mipLevelCount = 1;
+                viewDesc.arrayLayerCount = 1;
+                out.view = out.texture.CreateView(&viewDesc);
+            }
+        }
+        // Dawn dup()s the fd on import (verified in its SharedTextureMemoryVk.cpp)
+        // -- ours is still ours to close, success or failure.
+        close(memoryFd);
+        {
+            bool done = false;
+            bool failed = false;
+            std::string message;
+            const auto future = aurora::webgpu::g_device.PopErrorScope(
+                wgpu::CallbackMode::WaitAnyOnly,
+                [&](wgpu::PopErrorScopeStatus status, wgpu::ErrorType type, wgpu::StringView msg) {
+                    done = true;
+                    if (status != wgpu::PopErrorScopeStatus::Success || type != wgpu::ErrorType::NoError) {
+                        failed = true;
+                        message = std::string{std::string_view{msg}};
+                    }
+                });
+            aurora::webgpu::g_instance.WaitAny(future, 5000000000);
+            if (!done || failed || !out.texture) {
+                duskVrSnprintf(errBuf, errLen, "Dawn rejected the opaque-fd image import: %s",
+                               done ? message.c_str() : "PopErrorScope timed out");
+                return false;
+            }
+        }
+        VkSemaphoreCreateInfo semCI{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+        vkCreateSemaphore(xrDevice_, &semCI, nullptr, &out.dawnDoneSemaphore);
+        return true;
+    }
+
     // Lazily creates one slot's exported VkImage on the XR-side device and
     // imports its memory into Dawn (memory/texture). width/height are the
     // FULL double-wide swapchain dimensions (both eyes share one image,
@@ -1490,189 +1727,41 @@ public:
             return;
         }
 
-        // --- XR-side: a normal optimally-tiled image whose memory can be
-        // exported. The SAME VkImageCreateInfo (pNext chain and all) is
-        // handed to Dawn, which creates its own VkImage from it -- the
-        // opaque-fd sharing contract requires identical creation
-        // parameters on both sides, and Dawn requires the chain to hold
-        // exactly one VkExternalMemoryImageCreateInfo with OPAQUE_FD.
-        // MUTABLE_FORMAT alone makes Adreno drop UBWC framebuffer compression
-        // (measured: the eye pass rendering into this image cost ~12ms vs
-        // ~10ms into a pooled texture). Declaring the exact view-format set
-        // via VkImageFormatListCreateInfo (VK_KHR_image_format_list, core in
-        // 1.2) is what lets the driver keep compression for a mutable image.
+        // The swapchain's own format: the final vkCmdBlitImage is then
+        // format-identical, i.e. an exact byte copy (see the HISTORY note).
+        // Second view format (the UNORM sibling of an sRGB swapchain format):
+        // the direct-render path (sharedImageRenderTarget()) draws the eye
+        // pass into an RGBA8Unorm view of this image. TRANSFER_DST: Dawn's
+        // CopyBufferToTexture writes (Dawn validates this bit is present).
+        // TRANSFER_SRC: the XR-side blit reads. COLOR_ATTACHMENT + SAMPLED:
+        // the direct render, and in-pass GXCopyTex captures sampling it.
         const VkFormat swapchainVkFormat = static_cast<VkFormat>(swapchainDxgiFormat_);
         const VkFormat unormVkFormat = swapchainVkFormat == VK_FORMAT_R8G8B8A8_SRGB   ? VK_FORMAT_R8G8B8A8_UNORM
                                        : swapchainVkFormat == VK_FORMAT_B8G8R8A8_SRGB ? VK_FORMAT_B8G8R8A8_UNORM
                                                                                       : swapchainVkFormat;
-        const VkFormat viewFormats[2] = {swapchainVkFormat, unormVkFormat};
-        VkImageFormatListCreateInfo formatList{VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO};
-        formatList.viewFormatCount = unormVkFormat != swapchainVkFormat ? 2u : 1u;
-        formatList.pViewFormats = viewFormats;
-
-        VkExternalMemoryImageCreateInfo extMemImageInfo{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
-        extMemImageInfo.pNext = &formatList;
-        extMemImageInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
-
-        VkImageCreateInfo imageCI{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-        imageCI.pNext = &extMemImageInfo;
-        imageCI.imageType = VK_IMAGE_TYPE_2D;
-        // The swapchain's own format: the final vkCmdBlitImage is then
-        // format-identical, i.e. an exact byte copy (see the HISTORY note).
-        imageCI.format = static_cast<VkFormat>(swapchainDxgiFormat_);
-        imageCI.extent = {width, height, 1};
-        imageCI.mipLevels = 1;
-        imageCI.arrayLayers = 1;
-        imageCI.samples = VK_SAMPLE_COUNT_1_BIT;
-        imageCI.tiling = VK_IMAGE_TILING_OPTIMAL;
-        // TRANSFER_DST: Dawn's CopyBufferToTexture writes (Dawn validates
-        // this bit is present). TRANSFER_SRC: the XR-side blit reads.
-        // COLOR_ATTACHMENT + SAMPLED, and MUTABLE_FORMAT: the direct-render
-        // path (sharedImageRenderTarget()) draws the eye pass into an
-        // RGBA8Unorm view of this sRGB-format image and in-pass GXCopyTex
-        // captures sample it. Dawn creates its own VkImage from this same
-        // create info for the imported memory, so the bits must be here.
-        imageCI.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
-        imageCI.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-        imageCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        imageCI.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        if (vkCreateImage(xrDevice_, &imageCI, nullptr, &s.xrImage) != VK_SUCCESS) {
-            fail("vkCreateImage (exportable) failed");
+        ExportedImageDesc d{};
+        d.width = width;
+        d.height = height;
+        d.vkFormat = swapchainVkFormat;
+        d.vkViewFormat = unormVkFormat;  // == vkFormat for a UNORM swapchain: 1-entry list, still MUTABLE (as before)
+        d.vkUsage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        d.dawnFormat = dawnFormat;
+        d.dawnViewFormat = aurora::gfx::color_format();  // renderView: aurora's scene format
+        d.dawnUsage = wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::CopySrc |
+                      wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding;
+        ExportedImage img;
+        char err[512];
+        if (!createExportedImage(d, img, err, sizeof(err))) {
+            fail(err);
             return;
         }
-
-        VkMemoryDedicatedRequirements dedicatedReqs{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS};
-        VkMemoryRequirements2 memReqs2{VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2, &dedicatedReqs};
-        VkImageMemoryRequirementsInfo2 reqInfo{VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2};
-        reqInfo.image = s.xrImage;
-        vkGetImageMemoryRequirements2(xrDevice_, &reqInfo, &memReqs2);
-        const VkMemoryRequirements& memReqs = memReqs2.memoryRequirements;
-
-        VkPhysicalDeviceMemoryProperties memProps{};
-        vkGetPhysicalDeviceMemoryProperties(xrPhysicalDevice_, &memProps);
-        uint32_t memTypeIndex = UINT32_MAX;
-        for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
-            if ((memReqs.memoryTypeBits & (1u << i)) &&
-                (memProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
-                memTypeIndex = i;
-                break;
-            }
-        }
-        if (memTypeIndex == UINT32_MAX) {
-            for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
-                if (memReqs.memoryTypeBits & (1u << i)) {
-                    memTypeIndex = i;
-                    break;
-                }
-            }
-        }
-        if (memTypeIndex == UINT32_MAX) {
-            fail("no usable memory type for the exportable image");
-            return;
-        }
-
-        // Always dedicated: required by some drivers for exportable images,
-        // always permitted, and it keeps the two sides' allocations
-        // symmetric (Dawn is told dedicatedAllocation=true below).
-        VkMemoryDedicatedAllocateInfo dedicatedInfo{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
-        dedicatedInfo.image = s.xrImage;
-        VkExportMemoryAllocateInfo exportInfo{VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO, &dedicatedInfo};
-        exportInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
-        VkMemoryAllocateInfo allocInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &exportInfo};
-        allocInfo.allocationSize = memReqs.size;
-        allocInfo.memoryTypeIndex = memTypeIndex;
-        if (vkAllocateMemory(xrDevice_, &allocInfo, nullptr, &s.xrMemory) != VK_SUCCESS) {
-            fail("vkAllocateMemory (exportable) failed");
-            return;
-        }
-        if (vkBindImageMemory(xrDevice_, s.xrImage, s.xrMemory, 0) != VK_SUCCESS) {
-            fail("vkBindImageMemory failed");
-            return;
-        }
-
-        // vkGetMemoryFdKHR isn't directly linkable through Android's Vulkan
-        // loader (same as vkImportSemaphoreFdKHR in finishSharedImageGpuCopy())
-        // -- resolve via vkGetDeviceProcAddr.
-        static PFN_vkGetMemoryFdKHR pfnGetMemoryFdKHR = nullptr;
-        if (!pfnGetMemoryFdKHR) {
-            pfnGetMemoryFdKHR =
-                reinterpret_cast<PFN_vkGetMemoryFdKHR>(vkGetDeviceProcAddr(xrDevice_, "vkGetMemoryFdKHR"));
-        }
-        if (!pfnGetMemoryFdKHR) {
-            fail("vkGetMemoryFdKHR unavailable on the XR device");
-            return;
-        }
-        VkMemoryGetFdInfoKHR getFdInfo{VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR};
-        getFdInfo.memory = s.xrMemory;
-        getFdInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
-        int memoryFd = -1;
-        if (pfnGetMemoryFdKHR(xrDevice_, &getFdInfo, &memoryFd) != VK_SUCCESS || memoryFd < 0) {
-            fail("vkGetMemoryFdKHR failed");
-            return;
-        }
-
-        // --- Dawn side. Bracketed in an error scope: Aurora's uncaptured-
-        // error callback FATALs on any post-init Dawn validation error, so a
-        // rejected import must degrade to the CPU path with a log line.
-        aurora::webgpu::g_device.PushErrorScope(wgpu::ErrorFilter::Validation);
-        {
-            wgpu::SharedTextureMemoryOpaqueFDDescriptor fdDesc{};
-            fdDesc.vkImageCreateInfo = &imageCI;
-            fdDesc.memoryFD = memoryFd;
-            fdDesc.memoryTypeIndex = memTypeIndex;
-            fdDesc.allocationSize = memReqs.size;
-            fdDesc.dedicatedAllocation = true;
-            wgpu::SharedTextureMemoryDescriptor stmDesc{};
-            stmDesc.nextInChain = &fdDesc;
-            s.memory = aurora::webgpu::g_device.ImportSharedTextureMemory(&stmDesc);
-
-            // Direct-render path: the eye pass renders into this texture
-            // through a view in aurora's scene format (see renderView).
-            const wgpu::TextureFormat sceneFormat = aurora::gfx::color_format();
-            const bool needsViewFormat = sceneFormat != dawnFormat;
-            wgpu::TextureDescriptor texDesc{};
-            texDesc.format = dawnFormat;
-            texDesc.size = {width, height, 1};
-            texDesc.usage = wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::CopySrc |
-                            wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding;
-            texDesc.viewFormatCount = needsViewFormat ? 1 : 0;
-            texDesc.viewFormats = needsViewFormat ? &sceneFormat : nullptr;
-            s.texture = s.memory.CreateTexture(&texDesc);
-            if (s.texture) {
-                wgpu::TextureViewDescriptor viewDesc{};
-                viewDesc.format = sceneFormat;
-                viewDesc.dimension = wgpu::TextureViewDimension::e2D;
-                viewDesc.mipLevelCount = 1;
-                viewDesc.arrayLayerCount = 1;
-                s.renderView = s.texture.CreateView(&viewDesc);
-            }
-        }
-        // Dawn dup()s the fd on import (verified in its SharedTextureMemoryVk.cpp)
-        // -- ours is still ours to close, success or failure.
-        close(memoryFd);
-        {
-            bool done = false;
-            bool failed = false;
-            std::string message;
-            const auto future = aurora::webgpu::g_device.PopErrorScope(
-                wgpu::CallbackMode::WaitAnyOnly,
-                [&](wgpu::PopErrorScopeStatus status, wgpu::ErrorType type, wgpu::StringView msg) {
-                    done = true;
-                    if (status != wgpu::PopErrorScopeStatus::Success || type != wgpu::ErrorType::NoError) {
-                        failed = true;
-                        message = std::string{std::string_view{msg}};
-                    }
-                });
-            aurora::webgpu::g_instance.WaitAny(future, 5000000000);
-            if (!done || failed || !s.texture) {
-                char buf[512];
-                duskVrSnprintf(buf, sizeof(buf), "Dawn rejected the opaque-fd image import: %s",
-                               done ? message.c_str() : "PopErrorScope timed out");
-                fail(buf);
-                return;
-            }
-        }
+        s.memory = img.memory;
+        s.texture = img.texture;
+        s.renderView = img.view;
+        s.xrImage = img.xrImage;
+        s.xrMemory = img.xrMemory;
+        s.dawnDoneSemaphore = img.dawnDoneSemaphore;
 
         // --- Per-slot XR-side sync objects. ---
         ensureSharedCopyCmdPool();
@@ -1683,8 +1772,6 @@ public:
         vkAllocateCommandBuffers(xrDevice_, &cbAllocInfo, &s.cmdBuf);
         VkFenceCreateInfo fenceCI{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         vkCreateFence(xrDevice_, &fenceCI, nullptr, &s.copyFence);
-        VkSemaphoreCreateInfo semCI{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
-        vkCreateSemaphore(xrDevice_, &semCI, nullptr, &s.dawnDoneSemaphore);
 
         char buf[224];
         duskVrSnprintf(buf, sizeof(buf),
@@ -1729,6 +1816,7 @@ public:
             vkWaitForFences(xrDevice_, 1, &s.copyFence, VK_TRUE, UINT64_MAX);
             vkResetFences(xrDevice_, 1, &s.copyFence);
             s.copyPending = false;
+            spaceWarpDebugReadbackLog(slotIndex);  // TEMP diagnostic, no-op unless pending
         }
 
         // Dawn's Vulkan backend REQUIRES this chained struct (found via a
@@ -1782,12 +1870,127 @@ public:
         aurora::gfx::push_encoder_task(cpuCopyTaskId_, &payload, sizeof(payload));
     }
 
+    // Imports the completion fence Dawn's EndAccess handed back (endState)
+    // into `semaphore` (TEMPORARY import -- the payload is consumed by one
+    // queue wait and the semaphore reverts to its own unsignaled state,
+    // ready for this slot's next import kSharedSlotCount frames later, by
+    // which point that wait has provably executed since
+    // beginSwapchainAccessForFrame() waited on the slot's copy fence).
+    // Returns true when `semaphore` now carries a payload the copy submit
+    // must wait on. *knownComplete is set when Dawn reports the work is
+    // already finished (a SyncFD of -1, Dawn's kSemaphoreFdAlreadySignaledFd
+    // convention) -- nothing to wait on at all, GPU- or CPU-side. Both
+    // false: no usable fence, caller must fall back to a CPU wait.
+    // Type is read from the fence Dawn returned: SyncFD (Dawn's preference
+    // on Android when enabled) or OpaqueFD.
+    bool importDawnEndFence(const wgpu::SharedTextureMemoryEndAccessState& endState, VkSemaphore semaphore,
+                            bool* knownComplete) {
+        *knownComplete = false;
+        if (!supportsExternalSemaphoreFd_ || endState.fenceCount == 0 || endState.fences == nullptr) {
+            return false;
+        }
+        wgpu::SharedFenceExportInfo typeQuery{};
+        endState.fences[0].ExportInfo(&typeQuery);
+
+        int dawnFd = -1;
+        VkExternalSemaphoreHandleTypeFlagBits vkHandleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
+        if (typeQuery.type == wgpu::SharedFenceType::SyncFD) {
+            wgpu::SharedFenceSyncFDExportInfo info{};
+            wgpu::SharedFenceExportInfo exportInfo{};
+            exportInfo.nextInChain = &info;
+            endState.fences[0].ExportInfo(&exportInfo);
+            dawnFd = info.handle;
+            vkHandleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
+            if (dawnFd < 0) {
+                *knownComplete = true;
+                return false;
+            }
+        } else if (typeQuery.type == wgpu::SharedFenceType::VkSemaphoreOpaqueFD) {
+            wgpu::SharedFenceVkSemaphoreOpaqueFDExportInfo info{};
+            wgpu::SharedFenceExportInfo exportInfo{};
+            exportInfo.nextInChain = &info;
+            endState.fences[0].ExportInfo(&exportInfo);
+            dawnFd = info.handle;
+            vkHandleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+        } else {
+            static bool s_loggedUnexpectedType = false;
+            if (!s_loggedUnexpectedType) {
+                s_loggedUnexpectedType = true;
+                char buf[160];
+                duskVrSnprintf(buf, sizeof(buf),
+                               "[dusk::vr] importDawnEndFence: unexpected SharedFenceType=%d -- using the "
+                               "CPU-wait fallback every frame\n",
+                               static_cast<int>(typeQuery.type));
+                duskVrLog(buf);
+            }
+            return false;
+        }
+        if (dawnFd < 0) {
+            return false;
+        }
+
+        // dup(): Dawn keeps ownership of (and will close) the fd it handed
+        // us; Vulkan takes ownership of the fd it imports. Giving Vulkan its
+        // own copy is the only way both are right.
+        const int importFd = dup(dawnFd);
+        if (importFd < 0) {
+            return false;
+        }
+        static PFN_vkImportSemaphoreFdKHR pfnImportSemaphoreFdKHR = nullptr;
+        if (!pfnImportSemaphoreFdKHR) {
+            // Not directly linkable through Android's Vulkan loader
+            // (confirmed: "undefined symbol" at link time) -- resolve via
+            // vkGetDeviceProcAddr like any non-core extension entry point.
+            pfnImportSemaphoreFdKHR = reinterpret_cast<PFN_vkImportSemaphoreFdKHR>(
+                vkGetDeviceProcAddr(xrDevice_, "vkImportSemaphoreFdKHR"));
+        }
+        VkImportSemaphoreFdInfoKHR importInfo{VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR};
+        importInfo.semaphore = semaphore;
+        importInfo.flags = VK_SEMAPHORE_IMPORT_TEMPORARY_BIT;  // mandatory for SyncFD, fine for OpaqueFD
+        importInfo.handleType = vkHandleType;
+        importInfo.fd = importFd;
+        const bool ok = pfnImportSemaphoreFdKHR != nullptr &&
+                        pfnImportSemaphoreFdKHR(xrDevice_, &importInfo) == VK_SUCCESS;
+        if (!ok) {
+            close(importFd);  // import failed: the dup is still ours
+            static bool s_loggedImportFail = false;
+            if (!s_loggedImportFail) {
+                s_loggedImportFail = true;
+                duskVrLog("[dusk::vr] importDawnEndFence: vkImportSemaphoreFdKHR unavailable/failed -- "
+                          "using the CPU-wait fallback\n");
+            }
+        }
+        return ok;
+    }
+
+    // Hands an ExportedImage back from Dawn for this frame and, if Dawn's
+    // completion fence could be imported, appends the image's semaphore to
+    // `waits`. Sets *needCpuWait when neither a semaphore nor a
+    // known-complete answer was available.
+    void endDawnAccess(ExportedImage& img, VkSemaphore* waits, uint32_t* waitCount, bool* needCpuWait) {
+        wgpu::SharedTextureMemoryVkImageLayoutEndState vkLayoutEnd{};
+        wgpu::SharedTextureMemoryEndAccessState endState{};
+        endState.nextInChain = &vkLayoutEnd;
+        img.memory.EndAccess(img.texture, &endState);
+        img.dawnEndLayout = static_cast<VkImageLayout>(vkLayoutEnd.newLayout);
+        bool knownComplete = false;
+        if (importDawnEndFence(endState, img.dawnDoneSemaphore, &knownComplete)) {
+            waits[(*waitCount)++] = img.dawnDoneSemaphore;
+        } else if (!knownComplete) {
+            *needCpuWait = true;
+        }
+    }
+
     // Call ONCE per frame from submitFrame() (after aurora::gfx::synchronize()
     // has confirmed the render worker submitted this frame's Dawn work),
     // in place of the per-eye readbackEyeCopy() loop, when usesSharedImageGpuDirect()
     // is true. width/height are the full double-wide dimensions, same as
     // beginSwapchainAccessForFrame() got this frame. Non-blocking in the
     // normal case -- see the block comment at the top of this section.
+    // Space warp (see the SPACE WARP section below): when this frame also
+    // produced motion vectors + depth, their images ride the SAME command
+    // buffer/submit/fence as the color image -- one slot, one fence, one
+    // set of semaphore waits.
     void finishSharedImageGpuCopy(uint32_t swapchainIndex, uint32_t width, uint32_t height) {
         if (!sharedFrameSlotValid_) {
             return; // beginSwapchainAccessForFrame() didn't open a slot this frame
@@ -1795,110 +1998,43 @@ public:
         sharedFrameSlotValid_ = false;
         SharedImageSlot& s = sharedSlots_[sharedFrameSlot_];
         if (!s.texture) {
+            spaceWarpAbandonFrame();
             return;
         }
 
-        // --- Hand the texture back from Dawn. The chained EndState tells us
-        // which layout Dawn actually left the image in (fed into the XR-side
-        // acquire barrier below), and endState.fences carries the GPU-side
-        // signal for "Dawn's writes are complete" -- the real async handoff.
-        wgpu::SharedTextureMemoryVkImageLayoutEndState vkLayoutEnd{};
-        wgpu::SharedTextureMemoryEndAccessState endState{};
-        endState.nextInChain = &vkLayoutEnd;
-        s.memory.EndAccess(s.texture, &endState);
-        s.dawnEndLayout = static_cast<VkImageLayout>(vkLayoutEnd.newLayout);
-
-        // --- Import Dawn's completion fence as a VkSemaphore the copy
-        // submit waits on. Type is read from the fence Dawn returned:
-        // SyncFD (Dawn's preference on Android when enabled) or OpaqueFD.
-        bool haveGpuWaitSemaphore = false;
-        bool dawnKnownComplete = false;
-        if (supportsExternalSemaphoreFd_ && endState.fenceCount > 0 && endState.fences != nullptr) {
-            wgpu::SharedFenceExportInfo typeQuery{};
-            endState.fences[0].ExportInfo(&typeQuery);
-
-            int dawnFd = -1;
-            VkExternalSemaphoreHandleTypeFlagBits vkHandleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
-            if (typeQuery.type == wgpu::SharedFenceType::SyncFD) {
-                wgpu::SharedFenceSyncFDExportInfo info{};
-                wgpu::SharedFenceExportInfo exportInfo{};
-                exportInfo.nextInChain = &info;
-                endState.fences[0].ExportInfo(&exportInfo);
-                dawnFd = info.handle;
-                vkHandleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
-                if (dawnFd < 0) {
-                    // Dawn's kSemaphoreFdAlreadySignaledFd convention: a SyncFD
-                    // of -1 means the work is already complete -- nothing to
-                    // wait on at all, GPU- or CPU-side.
-                    dawnKnownComplete = true;
-                }
-            } else if (typeQuery.type == wgpu::SharedFenceType::VkSemaphoreOpaqueFD) {
-                wgpu::SharedFenceVkSemaphoreOpaqueFDExportInfo info{};
-                wgpu::SharedFenceExportInfo exportInfo{};
-                exportInfo.nextInChain = &info;
-                endState.fences[0].ExportInfo(&exportInfo);
-                dawnFd = info.handle;
-                vkHandleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
-            } else {
-                static bool s_loggedUnexpectedType = false;
-                if (!s_loggedUnexpectedType) {
-                    s_loggedUnexpectedType = true;
-                    char buf[160];
-                    duskVrSnprintf(buf, sizeof(buf),
-                                   "[dusk::vr] finishSharedImageGpuCopy: unexpected SharedFenceType=%d -- using the "
-                                   "CPU-wait fallback every frame\n",
-                                   static_cast<int>(typeQuery.type));
-                    duskVrLog(buf);
-                }
-            }
-
-            if (dawnFd >= 0) {
-                // dup(): Dawn keeps ownership of (and will close) the fd it
-                // handed us; Vulkan takes ownership of the fd it imports.
-                // Giving Vulkan its own copy is the only way both are right.
-                const int importFd = dup(dawnFd);
-                if (importFd >= 0) {
-                    static PFN_vkImportSemaphoreFdKHR pfnImportSemaphoreFdKHR = nullptr;
-                    if (!pfnImportSemaphoreFdKHR) {
-                        // Not directly linkable through Android's Vulkan
-                        // loader (confirmed: "undefined symbol" at link time)
-                        // -- resolve via vkGetDeviceProcAddr like any
-                        // non-core extension entry point.
-                        pfnImportSemaphoreFdKHR = reinterpret_cast<PFN_vkImportSemaphoreFdKHR>(
-                            vkGetDeviceProcAddr(xrDevice_, "vkImportSemaphoreFdKHR"));
-                    }
-                    VkImportSemaphoreFdInfoKHR importInfo{VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR};
-                    importInfo.semaphore = s.dawnDoneSemaphore;
-                    // TEMPORARY is mandatory for SyncFD imports and fine for
-                    // OpaqueFD: the payload is consumed by this frame's single
-                    // queue wait and the semaphore reverts to its own
-                    // (unsignaled) state, ready for this slot's next import
-                    // kSharedSlotCount frames later -- by which point that wait
-                    // has provably executed (beginSwapchainAccessForFrame()
-                    // waited on this slot's copy fence).
-                    importInfo.flags = VK_SEMAPHORE_IMPORT_TEMPORARY_BIT;
-                    importInfo.handleType = vkHandleType;
-                    importInfo.fd = importFd;
-                    haveGpuWaitSemaphore = pfnImportSemaphoreFdKHR != nullptr &&
-                                           pfnImportSemaphoreFdKHR(xrDevice_, &importInfo) == VK_SUCCESS;
-                    if (!haveGpuWaitSemaphore) {
-                        close(importFd); // import failed: the dup is still ours
-                        static bool s_loggedImportFail = false;
-                        if (!s_loggedImportFail) {
-                            s_loggedImportFail = true;
-                            duskVrLog("[dusk::vr] finishSharedImageGpuCopy: vkImportSemaphoreFdKHR unavailable/failed -- "
-                                      "using the CPU-wait fallback\n");
-                        }
-                    }
-                }
-            }
+        // --- Hand the textures back from Dawn. The chained EndState tells
+        // us which layout Dawn actually left each image in (fed into the
+        // XR-side acquire barriers below), and endState.fences carries the
+        // GPU-side signal for "Dawn's writes are complete" -- the real async
+        // handoff, imported as VkSemaphores the copy submit waits on.
+        VkSemaphore waits[3];
+        uint32_t waitCount = 0;
+        bool needCpuWait = false;
+        {
+            // The color slot predates ExportedImage; adapt its fields in place.
+            ExportedImage color;
+            color.memory = s.memory;
+            color.texture = s.texture;
+            color.dawnDoneSemaphore = s.dawnDoneSemaphore;
+            endDawnAccess(color, waits, &waitCount, &needCpuWait);
+            s.dawnEndLayout = color.dawnEndLayout;
         }
-        if (!haveGpuWaitSemaphore && !dawnKnownComplete) {
-            // Fallback only: no usable fence this frame. Block until Dawn's
-            // queue is idle so the copy below can't read a half-written
-            // buffer. Correct, but this IS a full CPU-on-GPU stall -- if the
-            // perf log shows it happening every frame, the log lines above
-            // say why the fast path wasn't taken.
+        const bool spaceWarpThisFrame = swAccessOpen_ && swEncoded_;
+        if (swAccessOpen_) {
+            SpaceWarpSlot& sw = swSlots_[sharedFrameSlot_];
+            // EndAccess is owed whether or not the frame encoded anything
+            // into them (BeginAccess without EndAccess would leak the slot).
+            endDawnAccess(sw.mv, waits, &waitCount, &needCpuWait);
+            endDawnAccess(sw.depth, waits, &waitCount, &needCpuWait);
+            swAccessOpen_ = false;
+        }
+        if (needCpuWait) {
+            // Fallback only: some image had no usable fence this frame.
+            // Block until Dawn's queue is idle so the copies below can't
+            // read a half-written image. Correct, but this IS a full
+            // CPU-on-GPU stall -- if the perf log shows it happening every
+            // frame, the log lines from importDawnEndFence() say why the
+            // fast path wasn't taken.
             bool workDone = false;
             const auto future = aurora::webgpu::g_queue.OnSubmittedWorkDone(
                 wgpu::CallbackMode::WaitAnyOnly,
@@ -1908,6 +2044,7 @@ public:
             aurora::webgpu::g_instance.WaitAny(future, 5000000000);
             if (!workDone) {
                 duskVrLog("[dusk::vr] finishSharedImageGpuCopy: OnSubmittedWorkDone timed out -- skipping this frame's copy\n");
+                spaceWarpAbandonFrame();
                 return;
             }
         }
@@ -1983,17 +2120,21 @@ public:
         vkCmdPipelineBarrier(s.cmdBuf, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                              0, 0, nullptr, 0, nullptr, 1, &dstToPresent);
 
+        if (spaceWarpThisFrame) {
+            recordSpaceWarpCopies(s.cmdBuf, swSlots_[sharedFrameSlot_]);
+            swSubmitted_ = true;
+        }
+
         vkEndCommandBuffer(s.cmdBuf);
 
         VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         submitInfo.commandBufferCount = 1;
         submitInfo.pCommandBuffers = &s.cmdBuf;
-        const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-        if (haveGpuWaitSemaphore) {
-            submitInfo.waitSemaphoreCount = 1;
-            submitInfo.pWaitSemaphores = &s.dawnDoneSemaphore;
-            submitInfo.pWaitDstStageMask = &waitStage;
-        }
+        const VkPipelineStageFlags waitStages[3] = {VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                                    VK_PIPELINE_STAGE_TRANSFER_BIT};
+        submitInfo.waitSemaphoreCount = waitCount;
+        submitInfo.pWaitSemaphores = waits;
+        submitInfo.pWaitDstStageMask = waitStages;
         // No wait here (see the section comment): the fence is checked only
         // when this slot comes around again. xrReleaseSwapchainImage() right
         // after this is fine with in-flight work -- the OpenXR Vulkan
@@ -2005,8 +2146,885 @@ public:
         s.copyPending = true;
 
         sharedNextSlot_ = (sharedFrameSlot_ + 1) % kSharedSlotCount;
-
+        swEncoded_ = false;
     }
+
+    // -----------------------------------------------------------------------
+    // SPACE WARP (XR_FB_space_warp / "AppSW", 2026-09-20) -- Quest/Vulkan only.
+    //
+    // The app hands the runtime, per eye, a motion-vector image and a depth
+    // image alongside the color image (chained onto each projection view via
+    // XrCompositionLayerSpaceWarpInfoFB); the runtime synthesizes every other
+    // display frame from them and paces the app at half rate. Per the spec
+    // and Meta's own XrSpaceWarp sample, the app keeps submitting every
+    // frame it renders and just chains the info -- the runtime does the
+    // halving -- so this is live-toggleable and needs no frame skipping here.
+    //
+    // Motion vectors are CAMERA-ONLY: the GX stream has no stable per-draw
+    // identity to carry a previous-frame transform through, so each pixel is
+    // reprojected from this frame's depth through P_prev * V_prev * V_cur^-1
+    // (per eye) and the vector is CurrNDC - PrevNDC as the spec defines it.
+    // World geometry, HUD/menu billboards and anything else that only moves
+    // because the camera moved is exact; self-moving things (Link, NPCs,
+    // enemies, projectiles) get the camera's motion only and can ghost on
+    // the synthesized frames -- the known, documented artifact class.
+    //
+    // Data flow per frame:
+    //   tick():        spaceWarpAcquireFrame()   -- acquire MV + depth swapchain images
+    //                  spaceWarpBeginAccess()    -- BeginAccess this slot's MV/depth ExportedImages
+    //                  (eye pass, resolved with .depth = true)
+    //                  spaceWarpEncode()         -- push the MV pass (encoder task, render worker)
+    //   submitFrame(): finishSharedImageGpuCopy() -- EndAccess + XR-side copies, same submit as color
+    //                  spaceWarpReleaseFrame()   -- release the two images
+    //                  spaceWarpLayerInfo()      -- fill the per-eye chained structs
+    //
+    // Depth goes through a buffer hop on the XR device (R32 color image ->
+    // staging buffer -> depth-format swapchain image): Vulkan forbids
+    // image-to-image copies/blits between a color and a depth format, but
+    // buffer<->image copies of the depth aspect are byte-identical to the
+    // matching color format (D32_SFLOAT <-> R32_SFLOAT, D24S8's depth aspect
+    // <-> a u32 with D24 in the low bits, D16 <-> R16). The MV pass writes
+    // FORWARD depth (1 - reversedZ) so the runtime gets the standard
+    // near/far convention and nearZ/farZ can be passed unswapped.
+    // -----------------------------------------------------------------------
+
+    struct SpaceWarpSwapchain {
+        XrSwapchain handle = XR_NULL_HANDLE;
+        std::vector<XrSwapchainImageVulkanKHR> images;
+        int64_t format = 0;  // VkFormat
+        uint32_t width = 0;
+        uint32_t height = 0;
+        uint32_t acquiredIndex = 0;
+        bool acquired = false;
+    };
+    struct SpaceWarpSlot {
+        ExportedImage mv;     // RGBA16F, double-wide at the MV resolution
+        ExportedImage depth;  // R32Float / R32Uint / R16Uint (see depthColorFormat_), same size
+        VkBuffer depthStaging = VK_NULL_HANDLE;
+        VkDeviceMemory depthStagingMemory = VK_NULL_HANDLE;
+        wgpu::Buffer uniform;
+        // Side table for the encoder task (wgpu handles can't ride the POD
+        // payload): this frame's depth snapshot + uniform contents.
+        wgpu::TextureView depthSnapshot;
+        SpaceWarpUniforms uniforms{};
+        bool ready = false;
+    };
+    struct SpaceWarpTaskPayload {
+        uint32_t slot;
+    };
+
+    void setSpaceWarpSupport(bool supported, uint32_t recommendedMvWidth, uint32_t recommendedMvHeight) {
+        swSupported_ = supported;
+        swMvWidth_ = recommendedMvWidth;
+        swMvHeight_ = recommendedMvHeight;
+    }
+    // True when the extension is enabled AND the shared-image hand-off this
+    // rides on is active AND nothing has failed for the session.
+    bool spaceWarpAvailable() const {
+        return swSupported_ && swMvWidth_ > 0 && swMvHeight_ > 0 && usesSharedImageGpuDirect() && !swFailed_;
+    }
+    uint32_t spaceWarpMvWidth() const { return swMvWidth_; }
+    uint32_t spaceWarpMvHeight() const { return swMvHeight_; }
+
+    // Lazily creates the two swapchains (first call), then acquires + waits
+    // on this frame's image of each. Call right after the color swapchain's
+    // own acquire/wait in tick(). Returns false (and disables space warp for
+    // the session) on any failure.
+    bool spaceWarpAcquireFrame() {
+        if (!spaceWarpAvailable()) {
+            return false;
+        }
+        if (!ensureSpaceWarpSwapchains()) {
+            return false;
+        }
+        for (SpaceWarpSwapchain* sc : {&swMvSwapchain_, &swDepthSwapchain_}) {
+            XrSwapchainImageAcquireInfo acquireInfo{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+            if (XR_FAILED(xrAcquireSwapchainImage(sc->handle, &acquireInfo, &sc->acquiredIndex))) {
+                spaceWarpFail("xrAcquireSwapchainImage failed");
+                spaceWarpReleaseFrame();
+                return false;
+            }
+            sc->acquired = true;
+            XrSwapchainImageWaitInfo waitInfo{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+            waitInfo.timeout = XR_INFINITE_DURATION;
+            if (XR_FAILED(xrWaitSwapchainImage(sc->handle, &waitInfo))) {
+                spaceWarpFail("xrWaitSwapchainImage failed");
+                spaceWarpReleaseFrame();
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Call right after beginSwapchainAccessForFrame() (needs the frame's
+    // slot). Creates the slot's MV/depth images on first use and opens Dawn
+    // access to them for this frame.
+    void spaceWarpBeginAccess() {
+        if (!swMvSwapchain_.acquired || !sharedFrameSlotValid_) {
+            return;
+        }
+        SpaceWarpSlot& sw = swSlots_[sharedFrameSlot_];
+        if (!sw.ready && !ensureSpaceWarpSlot(sw)) {
+            spaceWarpReleaseFrame();
+            return;
+        }
+        wgpu::SharedTextureMemoryVkImageLayoutBeginState vkLayoutBegin{};
+        vkLayoutBegin.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        vkLayoutBegin.newLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        wgpu::SharedTextureMemoryBeginAccessDescriptor beginDesc{};
+        beginDesc.nextInChain = &vkLayoutBegin;
+        beginDesc.initialized = false;  // fully overwritten by the MV pass
+        sw.mv.memory.BeginAccess(sw.mv.texture, &beginDesc);
+        sw.depth.memory.BeginAccess(sw.depth.texture, &beginDesc);
+        swAccessOpen_ = true;
+    }
+
+    // Call once per frame after the eye pass resolved (with .depth = true),
+    // while the EFB pass is active (push_encoder_task's requirement).
+    // depthSnapshot: ResolvedTargets::depth (R32Float, double-wide, valid
+    // this frame). Returns false if space warp isn't producing data this
+    // frame (no chained info will be submitted for it).
+    bool spaceWarpEncode(const wgpu::TextureView& depthSnapshot, const SpaceWarpUniforms& uniforms) {
+        if (!swAccessOpen_ || !depthSnapshot) {
+            return false;
+        }
+        SpaceWarpSlot& sw = swSlots_[sharedFrameSlot_];
+        sw.depthSnapshot = depthSnapshot;
+        sw.uniforms = uniforms;
+        const SpaceWarpTaskPayload payload{sharedFrameSlot_};
+        static_assert(sizeof(SpaceWarpTaskPayload) <= aurora::gfx::InlineDrawPayloadSize,
+                      "SpaceWarpTaskPayload too large for inline encoder task payload");
+        if (!aurora::gfx::push_encoder_task(swTaskId_, &payload, sizeof(payload))) {
+            return false;
+        }
+        swEncoded_ = true;
+        return true;
+    }
+
+    // Releases this frame's MV/depth swapchain images (after
+    // finishSharedImageGpuCopy() submitted the copies into them). Safe to
+    // call every frame; no-op when nothing was acquired.
+    void spaceWarpReleaseFrame() {
+        for (SpaceWarpSwapchain* sc : {&swMvSwapchain_, &swDepthSwapchain_}) {
+            if (sc->acquired) {
+                XrSwapchainImageReleaseInfo releaseInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+                xrReleaseSwapchainImage(sc->handle, &releaseInfo);
+                sc->acquired = false;
+            }
+        }
+    }
+
+    // True when this frame's submit carried real MV + depth for the layer;
+    // fills the struct to chain onto projection view `eye`. Only the
+    // sub-image fields are set here -- the caller owns nearZ/farZ/
+    // appSpaceDeltaPose (game-side quantities).
+    bool spaceWarpLayerInfo(uint32_t eye, XrCompositionLayerSpaceWarpInfoFB* out) const {
+        if (!swSubmitted_) {
+            return false;
+        }
+        *out = XrCompositionLayerSpaceWarpInfoFB{XR_TYPE_COMPOSITION_LAYER_SPACE_WARP_INFO_FB};
+        out->layerFlags = 0;
+        out->motionVectorSubImage.swapchain = swMvSwapchain_.handle;
+        out->motionVectorSubImage.imageArrayIndex = 0;
+        out->motionVectorSubImage.imageRect.offset = {static_cast<int32_t>(eye * swMvWidth_), 0};
+        out->motionVectorSubImage.imageRect.extent = {static_cast<int32_t>(swMvWidth_),
+                                                      static_cast<int32_t>(swMvHeight_)};
+        out->depthSubImage = out->motionVectorSubImage;
+        out->depthSubImage.swapchain = swDepthSwapchain_.handle;
+        out->minDepth = 0.f;
+        out->maxDepth = 1.f;
+        return true;
+    }
+    // Call at the top of every tick(): the layer info is only valid for
+    // the frame that produced it, and a frame that never reached
+    // finishSharedImageGpuCopy() (no valid eye) still owes Dawn its
+    // EndAccess before the slot can be reopened.
+    void spaceWarpNewFrame() {
+        swSubmitted_ = false;
+        if (swAccessOpen_) {
+            spaceWarpAbandonFrame();
+        }
+        spaceWarpReleaseFrame();
+    }
+
+private:
+    // Used when a frame can't complete: drops Dawn access without copies
+    // (the acquired images get released by the caller's spaceWarpReleaseFrame()).
+    void spaceWarpAbandonFrame() {
+        if (swAccessOpen_) {
+            SpaceWarpSlot& sw = swSlots_[sharedFrameSlot_];
+            wgpu::SharedTextureMemoryEndAccessState endState{};
+            sw.mv.memory.EndAccess(sw.mv.texture, &endState);
+            wgpu::SharedTextureMemoryEndAccessState endState2{};
+            sw.depth.memory.EndAccess(sw.depth.texture, &endState2);
+            swAccessOpen_ = false;
+        }
+        swEncoded_ = false;
+    }
+
+    void spaceWarpFail(const char* what) {
+        char buf[320];
+        duskVrSnprintf(buf, sizeof(buf), "[dusk::vr] space warp: %s -- disabling space warp for this session\n", what);
+        duskVrLog(buf);
+        swFailed_ = true;
+    }
+
+    // Depth swapchain format -> the color format the MV pass renders depth
+    // as (byte-identical to the depth aspect for buffer copies) and the
+    // WGSL that produces it.
+    struct DepthFormatChoice {
+        VkFormat depthFormat;
+        VkFormat colorFormat;
+        wgpu::TextureFormat dawnFormat;
+        uint32_t bytesPerTexel;
+        const char* wgslOutType;
+        const char* wgslOutExpr;
+        VkImageAspectFlags aspects;  // for the swapchain image's layout transitions
+    };
+    static bool depthFormatChoice(int64_t vkFormat, DepthFormatChoice* out) {
+        switch (vkFormat) {
+            case VK_FORMAT_D32_SFLOAT:
+                *out = {VK_FORMAT_D32_SFLOAT, VK_FORMAT_R32_SFLOAT, wgpu::TextureFormat::R32Float, 4, "vec4f",
+                        "vec4f(dOut, 0.0, 0.0, 1.0)", VK_IMAGE_ASPECT_DEPTH_BIT};
+                return true;
+            case VK_FORMAT_D32_SFLOAT_S8_UINT:
+                *out = {VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_R32_SFLOAT, wgpu::TextureFormat::R32Float, 4, "vec4f",
+                        "vec4f(dOut, 0.0, 0.0, 1.0)", VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT};
+                return true;
+            case VK_FORMAT_D24_UNORM_S8_UINT:
+                *out = {VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_R32_UINT, wgpu::TextureFormat::R32Uint, 4, "vec4u",
+                        "vec4u(u32(dOut * 16777215.0 + 0.5), 0u, 0u, 1u)",
+                        VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT};
+                return true;
+            case VK_FORMAT_D16_UNORM:
+                *out = {VK_FORMAT_D16_UNORM, VK_FORMAT_R16_UINT, wgpu::TextureFormat::R16Uint, 2, "vec4u",
+                        "vec4u(u32(dOut * 65535.0 + 0.5), 0u, 0u, 1u)", VK_IMAGE_ASPECT_DEPTH_BIT};
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    bool ensureSpaceWarpSwapchains() {
+        if (swMvSwapchain_.handle != XR_NULL_HANDLE) {
+            return true;
+        }
+        const std::vector<int64_t> supported = enumerateSwapchainFormats();
+        auto has = [&](int64_t f) { return std::find(supported.begin(), supported.end(), f) != supported.end(); };
+        if (!has(VK_FORMAT_R16G16B16A16_SFLOAT)) {
+            spaceWarpFail("runtime offers no R16G16B16A16_SFLOAT swapchain format for motion vectors");
+            return false;
+        }
+        const int64_t depthPrefs[] = {VK_FORMAT_D32_SFLOAT, VK_FORMAT_D24_UNORM_S8_UINT, VK_FORMAT_D16_UNORM,
+                                      VK_FORMAT_D32_SFLOAT_S8_UINT};
+        int64_t depthFormat = 0;
+        for (int64_t f : depthPrefs) {
+            if (has(f)) {
+                depthFormat = f;
+                break;
+            }
+        }
+        if (depthFormat == 0 || !depthFormatChoice(depthFormat, &swDepthChoice_)) {
+            spaceWarpFail("runtime offers no usable depth swapchain format");
+            return false;
+        }
+
+        const uint32_t width = swMvWidth_ * 2;  // double-wide, same layout as the color swapchain
+        const uint32_t height = swMvHeight_;
+        auto create = [&](SpaceWarpSwapchain& sc, int64_t format, XrSwapchainUsageFlags usage) {
+            XrSwapchainCreateInfo ci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+            ci.usageFlags = usage;
+            ci.format = format;
+            ci.width = width;
+            ci.height = height;
+            ci.sampleCount = 1;
+            ci.faceCount = 1;
+            ci.arraySize = 1;
+            ci.mipCount = 1;
+            if (XR_FAILED(xrCreateSwapchain(session_, &ci, &sc.handle))) {
+                sc.handle = XR_NULL_HANDLE;
+                return false;
+            }
+            uint32_t imageCount = 0;
+            xrEnumerateSwapchainImages(sc.handle, 0, &imageCount, nullptr);
+            sc.images.resize(imageCount, {XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR});
+            xrEnumerateSwapchainImages(sc.handle, imageCount, &imageCount,
+                                       reinterpret_cast<XrSwapchainImageBaseHeader*>(sc.images.data()));
+            sc.format = format;
+            sc.width = width;
+            sc.height = height;
+            return true;
+        };
+        // TRANSFER_DST on both: they're filled with transfer commands, and
+        // on Vulkan a copy into an image created without that usage is
+        // undefined (same reasoning as the color swapchain's flag).
+        if (!create(swMvSwapchain_, VK_FORMAT_R16G16B16A16_SFLOAT,
+                    XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT |
+                        XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT)) {
+            spaceWarpFail("xrCreateSwapchain (motion vectors) failed");
+            return false;
+        }
+        if (!create(swDepthSwapchain_, depthFormat,
+                    XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT |
+                        XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT)) {
+            spaceWarpFail("xrCreateSwapchain (depth) failed");
+            return false;
+        }
+        char buf[200];
+        duskVrSnprintf(buf, sizeof(buf),
+                       "[dusk::vr] space warp: swapchains created, %ux%u per eye, mv=R16G16B16A16_SFLOAT depth=vkFormat %lld\n",
+                       swMvWidth_, swMvHeight_, static_cast<long long>(depthFormat));
+        duskVrLog(buf);
+        return true;
+    }
+
+    bool ensureSpaceWarpSlot(SpaceWarpSlot& sw) {
+        if (!ensureSpaceWarpPipeline()) {
+            return false;
+        }
+        const uint32_t width = swMvWidth_ * 2;
+        const uint32_t height = swMvHeight_;
+        char err[512];
+        {
+            ExportedImageDesc d{};
+            d.width = width;
+            d.height = height;
+            d.vkFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+            // TRANSFER_DST: Dawn refuses to import an opaque-fd image without
+            // it ("vkImageCreateInfo.usage did not have
+            // VK_IMAGE_USAGE_TRANSFER_DST_BIT", real Quest 3 log 2026-09-20)
+            // even though nothing here copies into these images.
+            d.vkUsage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+            d.dawnFormat = wgpu::TextureFormat::RGBA16Float;
+            d.dawnUsage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding;
+            if (!createExportedImage(d, sw.mv, err, sizeof(err))) {
+                spaceWarpFail(err);
+                return false;
+            }
+        }
+        {
+            ExportedImageDesc d{};
+            d.width = width;
+            d.height = height;
+            d.vkFormat = swDepthChoice_.colorFormat;
+            // TRANSFER_DST: Dawn refuses to import an opaque-fd image without
+            // it ("vkImageCreateInfo.usage did not have
+            // VK_IMAGE_USAGE_TRANSFER_DST_BIT", real Quest 3 log 2026-09-20)
+            // even though nothing here copies into these images.
+            d.vkUsage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+            d.dawnFormat = swDepthChoice_.dawnFormat;
+            d.dawnUsage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::TextureBinding;
+            if (!createExportedImage(d, sw.depth, err, sizeof(err))) {
+                spaceWarpFail(err);
+                return false;
+            }
+        }
+        // Device-local staging buffer for the color->depth hop.
+        {
+            VkBufferCreateInfo bufCI{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+            bufCI.size = static_cast<VkDeviceSize>(width) * height * swDepthChoice_.bytesPerTexel;
+            bufCI.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            bufCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            if (vkCreateBuffer(xrDevice_, &bufCI, nullptr, &sw.depthStaging) != VK_SUCCESS) {
+                spaceWarpFail("vkCreateBuffer (depth staging) failed");
+                return false;
+            }
+            VkMemoryRequirements memReq{};
+            vkGetBufferMemoryRequirements(xrDevice_, sw.depthStaging, &memReq);
+            VkPhysicalDeviceMemoryProperties memProps{};
+            vkGetPhysicalDeviceMemoryProperties(xrPhysicalDevice_, &memProps);
+            uint32_t memTypeIndex = UINT32_MAX;
+            for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
+                if ((memReq.memoryTypeBits & (1u << i)) &&
+                    (memProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+                    memTypeIndex = i;
+                    break;
+                }
+            }
+            if (memTypeIndex == UINT32_MAX) {
+                for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
+                    if (memReq.memoryTypeBits & (1u << i)) {
+                        memTypeIndex = i;
+                        break;
+                    }
+                }
+            }
+            if (memTypeIndex == UINT32_MAX) {
+                spaceWarpFail("no memory type for the depth staging buffer");
+                return false;
+            }
+            VkMemoryAllocateInfo allocInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+            allocInfo.allocationSize = memReq.size;
+            allocInfo.memoryTypeIndex = memTypeIndex;
+            if (vkAllocateMemory(xrDevice_, &allocInfo, nullptr, &sw.depthStagingMemory) != VK_SUCCESS ||
+                vkBindBufferMemory(xrDevice_, sw.depthStaging, sw.depthStagingMemory, 0) != VK_SUCCESS) {
+                spaceWarpFail("vkAllocateMemory/vkBindBufferMemory (depth staging) failed");
+                return false;
+            }
+        }
+        wgpu::BufferDescriptor uniformDesc{};
+        uniformDesc.size = sizeof(SpaceWarpUniforms);
+        uniformDesc.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
+        sw.uniform = aurora::webgpu::g_device.CreateBuffer(&uniformDesc);
+        sw.ready = true;
+        duskVrLog("[dusk::vr] space warp: slot resources created (MV + depth exported images imported into Dawn)\n");
+        return true;
+    }
+
+    // Full-screen reprojection pass: one fragment per MV texel, both eyes
+    // (double-wide, eye picked by x). See the section comment for the math.
+    static constexpr const char* kSpaceWarpShaderSource = R"WGSL(
+struct SwParams {
+    prevFromCurView: array<mat4x4f, 2>,
+    invProj: array<vec4f, 2>,
+    nearFar: vec4f,
+    sizes: vec4u,
+};
+
+@group(0) @binding(0) var depthTex: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> params: SwParams;
+
+@vertex fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
+    var positions = array<vec2f, 3>(vec2f(-1.0, 1.0), vec2f(-1.0, -3.0), vec2f(3.0, 1.0));
+    return vec4f(positions[vi], 0.0, 1.0);
+}
+
+struct FsOut {
+    @location(0) mv: vec4f,
+    @location(1) depth: DEPTH_OUT_TYPE,
+};
+
+@fragment fn fs_main(@builtin(position) pos: vec4f) -> FsOut {
+    let px = u32(pos.x);
+    let py = u32(pos.y);
+    let mvW = params.sizes.x;
+    let mvH = params.sizes.y;
+    let dW = params.sizes.z;
+    let dH = params.sizes.w;
+    let eye = select(0u, 1u, px >= mvW);
+    let lx = px - eye * mvW;
+    let flags = u32(params.nearFar.z + 0.5);
+    let fx = (f32(lx) + 0.5) / f32(mvW);
+    var fy = (f32(py) + 0.5) / f32(mvH);
+    if ((flags & 16u) != 0u) { fy = 1.0 - fy; }
+    // Point-sample the (full-resolution) depth snapshot at this texel's center.
+    let sx = min(u32(fx * f32(dW)), dW - 1u) + eye * dW;
+    let sy = min(u32(fy * f32(dH)), dH - 1u);
+    let dRev = clamp(textureLoad(depthTex, vec2i(i32(sx), i32(sy)), 0).r, 0.0, 1.0);
+    let dFwd = 1.0 - dRev;
+
+    // Reversed-Z perspective depth -> positive eye-space distance
+    // (dRev = n(f-e) / (e(f-n)), see vr_stereo_render.hpp's projection).
+    let n = params.nearFar.x;
+    let f = params.nearFar.y;
+    let e = n * f / (dRev * (f - n) + n);
+
+    // NDC (x right, y up) of this texel in its own eye, then back to view
+    // space through the eye's asymmetric projection:
+    //   ndc.x = p0 * xv / e - p1,  ndc.y = p2 * yv / e - p3
+    let ndcX = fx * 2.0 - 1.0;
+    let ndcY = 1.0 - fy * 2.0;
+    let ip = params.invProj[eye];
+    let xv = (ndcX + ip.y) * e / ip.x;
+    let yv = (ndcY + ip.w) * e / ip.z;
+    let prevClip = params.prevFromCurView[eye] * vec4f(xv, yv, -e, 1.0);
+
+    var out: FsOut;
+    var mv = vec4f(0.0, 0.0, 0.0, 0.0);
+    if (prevClip.w > 1e-5) {
+        let prevNdc = prevClip.xyz / prevClip.w;
+        // z as GL-style NDC ([-1,1], forward), the convention Meta's sample uses.
+        let zCur = 2.0 * dFwd - 1.0;
+        let zPrev = 2.0 * (1.0 - clamp(prevNdc.z, 0.0, 1.0)) - 1.0;
+        mv = vec4f(ndcX - prevNdc.x, ndcY - prevNdc.y, zCur - zPrev, 0.0);
+    }
+    // TEMPORARY convention A/B flags (settings.h's vrSpaceWarpDebug*).
+    if ((flags & 1u) != 0u) { mv = -mv; }
+    if ((flags & 2u) != 0u) { mv.y = -mv.y; }
+    if ((flags & 4u) != 0u) { mv = vec4f(0.0, 0.0, 0.0, 0.0); }
+    var dOut = dFwd;
+    if ((flags & 32u) != 0u) { dOut = dRev; }
+    if ((flags & 64u) != 0u) {
+        // TEMP raw diagnostic: what the shader actually sees.
+        let dims = textureDimensions(depthTex);
+        mv = vec4f(textureLoad(depthTex, vec2i(i32(sx), i32(sy)), 0).r, f32(dims.x), f32(dims.y), f32(sx));
+    }
+    if ((flags & 8u) != 0u) { dOut = 1.0; }
+    out.mv = mv;
+    out.depth = DEPTH_OUT_EXPR;
+    return out;
+}
+)WGSL";
+
+    bool ensureSpaceWarpPipeline() {
+        if (swPipeline_) {
+            return true;
+        }
+        std::string src = kSpaceWarpShaderSource;
+        auto replaceAll = [&](const char* from, const char* to) {
+            for (size_t pos = src.find(from); pos != std::string::npos; pos = src.find(from, pos + std::strlen(to))) {
+                src.replace(pos, std::strlen(from), to);
+            }
+        };
+        replaceAll("DEPTH_OUT_TYPE", swDepthChoice_.wgslOutType);
+        replaceAll("DEPTH_OUT_EXPR", swDepthChoice_.wgslOutExpr);
+
+        aurora::webgpu::g_device.PushErrorScope(wgpu::ErrorFilter::Validation);
+        {
+            wgpu::ShaderSourceWGSL wgslDesc{};
+            wgslDesc.code = src.c_str();
+            wgpu::ShaderModuleDescriptor moduleDesc{};
+            moduleDesc.nextInChain = &wgslDesc;
+            moduleDesc.label = "vr_space_warp";
+            wgpu::ShaderModule module = aurora::webgpu::g_device.CreateShaderModule(&moduleDesc);
+
+            wgpu::BindGroupLayoutEntry bglEntries[2] = {};
+            bglEntries[0].binding = 0;
+            bglEntries[0].visibility = wgpu::ShaderStage::Fragment;
+            bglEntries[0].texture.sampleType = wgpu::TextureSampleType::UnfilterableFloat;  // R32Float
+            bglEntries[0].texture.viewDimension = wgpu::TextureViewDimension::e2D;
+            bglEntries[1].binding = 1;
+            bglEntries[1].visibility = wgpu::ShaderStage::Fragment;
+            bglEntries[1].buffer.type = wgpu::BufferBindingType::Uniform;
+            bglEntries[1].buffer.minBindingSize = sizeof(SpaceWarpUniforms);
+            wgpu::BindGroupLayoutDescriptor bglDesc{};
+            bglDesc.entryCount = 2;
+            bglDesc.entries = bglEntries;
+            swBindGroupLayout_ = aurora::webgpu::g_device.CreateBindGroupLayout(&bglDesc);
+
+            wgpu::PipelineLayoutDescriptor plDesc{};
+            plDesc.bindGroupLayoutCount = 1;
+            plDesc.bindGroupLayouts = &swBindGroupLayout_;
+            wgpu::PipelineLayout pipelineLayout = aurora::webgpu::g_device.CreatePipelineLayout(&plDesc);
+
+            wgpu::ColorTargetState targets[2] = {};
+            targets[0].format = wgpu::TextureFormat::RGBA16Float;
+            targets[0].writeMask = wgpu::ColorWriteMask::All;
+            targets[1].format = swDepthChoice_.dawnFormat;
+            targets[1].writeMask = wgpu::ColorWriteMask::All;
+            wgpu::FragmentState fragment{};
+            fragment.module = module;
+            fragment.entryPoint = "fs_main";
+            fragment.targetCount = 2;
+            fragment.targets = targets;
+
+            wgpu::RenderPipelineDescriptor pipelineDesc{};
+            pipelineDesc.label = "vr_space_warp";
+            pipelineDesc.layout = pipelineLayout;
+            pipelineDesc.vertex.module = module;
+            pipelineDesc.vertex.entryPoint = "vs_main";
+            pipelineDesc.primitive.topology = wgpu::PrimitiveTopology::TriangleList;
+            pipelineDesc.multisample.count = 1;
+            pipelineDesc.fragment = &fragment;
+            swPipeline_ = aurora::webgpu::g_device.CreateRenderPipeline(&pipelineDesc);
+        }
+        bool done = false;
+        bool failed = false;
+        std::string message;
+        const auto future = aurora::webgpu::g_device.PopErrorScope(
+            wgpu::CallbackMode::WaitAnyOnly,
+            [&](wgpu::PopErrorScopeStatus status, wgpu::ErrorType type, wgpu::StringView msg) {
+                done = true;
+                if (status != wgpu::PopErrorScopeStatus::Success || type != wgpu::ErrorType::NoError) {
+                    failed = true;
+                    message = std::string{std::string_view{msg}};
+                }
+            });
+        aurora::webgpu::g_instance.WaitAny(future, 5000000000);
+        if (!done || failed || !swPipeline_) {
+            char buf[512];
+            duskVrSnprintf(buf, sizeof(buf), "Dawn rejected the motion-vector pipeline: %s",
+                           done ? message.c_str() : "PopErrorScope timed out");
+            swPipeline_ = nullptr;
+            spaceWarpFail(buf);
+            return false;
+        }
+        aurora::gfx::EncoderTaskDescriptor desc{
+            .label = "vr_space_warp_mv",
+            .callback = &Session::spaceWarpTaskCallback,
+            .userdata = this,
+        };
+        swTaskId_ = aurora::gfx::register_encoder_task_type(desc);
+        return true;
+    }
+
+    // Render worker: the MV pass itself, between two scene passes on the
+    // frame's encoder (same contract as encoderTaskCallback()).
+    static void spaceWarpTaskCallback(const aurora::gfx::EncoderTaskContext& ctx, const wgpu::CommandEncoder& cmd,
+                                      const void* payload, size_t /*payloadSize*/, void* userdata) {
+        auto* self = static_cast<Session*>(userdata);
+        const auto& p = *static_cast<const SpaceWarpTaskPayload*>(payload);
+        SpaceWarpSlot& sw = self->swSlots_[p.slot];
+        if (!sw.ready || !sw.depthSnapshot) {
+            return;
+        }
+        wgpu::CommandEncoder mutableCmd = cmd;
+        const aurora::webgpu::gpu_prof::Zone gpuZone{cmd, "VR space warp MV"};
+
+        ctx.queue.WriteBuffer(sw.uniform, 0, &sw.uniforms, sizeof(sw.uniforms));
+
+        wgpu::BindGroupEntry entries[2] = {};
+        entries[0].binding = 0;
+        entries[0].textureView = sw.depthSnapshot;
+        entries[1].binding = 1;
+        entries[1].buffer = sw.uniform;
+        entries[1].size = sizeof(SpaceWarpUniforms);
+        wgpu::BindGroupDescriptor bgDesc{};
+        bgDesc.layout = self->swBindGroupLayout_;
+        bgDesc.entryCount = 2;
+        bgDesc.entries = entries;
+        wgpu::BindGroup bindGroup = aurora::webgpu::g_device.CreateBindGroup(&bgDesc);
+
+        wgpu::RenderPassColorAttachment colorAttachments[2] = {};
+        colorAttachments[0].view = sw.mv.view;
+        colorAttachments[0].loadOp = wgpu::LoadOp::Clear;
+        colorAttachments[0].storeOp = wgpu::StoreOp::Store;
+        colorAttachments[0].clearValue = {0.0, 0.0, 0.0, 0.0};
+        colorAttachments[1].view = sw.depth.view;
+        colorAttachments[1].loadOp = wgpu::LoadOp::Clear;
+        colorAttachments[1].storeOp = wgpu::StoreOp::Store;
+        colorAttachments[1].clearValue = {0.0, 0.0, 0.0, 0.0};
+        wgpu::RenderPassDescriptor passDesc{};
+        passDesc.label = "VR space warp MV";
+        passDesc.colorAttachmentCount = 2;
+        passDesc.colorAttachments = colorAttachments;
+        wgpu::RenderPassEncoder pass = mutableCmd.BeginRenderPass(&passDesc);
+        pass.SetPipeline(self->swPipeline_);
+        pass.SetBindGroup(0, bindGroup);
+        pass.Draw(3);
+        pass.End();
+        sw.depthSnapshot = nullptr;  // pooled per-frame view; don't keep it alive past the frame
+    }
+
+    // XR-side: MV blit + depth buffer hop into this frame's swapchain
+    // images, appended to the color copy's command buffer.
+    void recordSpaceWarpCopies(VkCommandBuffer cmdBuf, SpaceWarpSlot& sw) {
+        const uint32_t width = swMvWidth_ * 2;
+        const uint32_t height = swMvHeight_;
+        VkImage mvDst = swMvSwapchain_.images[swMvSwapchain_.acquiredIndex].image;
+        VkImage depthDst = swDepthSwapchain_.images[swDepthSwapchain_.acquiredIndex].image;
+
+        VkImageSubresourceRange colorRange{};
+        colorRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        colorRange.levelCount = 1;
+        colorRange.layerCount = 1;
+        VkImageSubresourceRange depthRange = colorRange;
+        depthRange.aspectMask = swDepthChoice_.aspects;
+
+        auto barrier = [](VkImage image, VkImageSubresourceRange range, VkImageLayout from, VkImageLayout to,
+                          VkAccessFlags srcAccess, VkAccessFlags dstAccess) {
+            VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+            b.srcAccessMask = srcAccess;
+            b.dstAccessMask = dstAccess;
+            b.oldLayout = from;
+            b.newLayout = to;
+            b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.image = image;
+            b.subresourceRange = range;
+            return b;
+        };
+        const VkImageMemoryBarrier toTransfer[4] = {
+            barrier(sw.mv.xrImage, colorRange, sw.mv.dawnEndLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT),
+            barrier(sw.depth.xrImage, colorRange, sw.depth.dawnEndLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT),
+            barrier(mvDst, colorRange, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+                    VK_ACCESS_TRANSFER_WRITE_BIT),
+            barrier(depthDst, depthRange, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+                    VK_ACCESS_TRANSFER_WRITE_BIT),
+        };
+        vkCmdPipelineBarrier(cmdBuf, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr,
+                             0, nullptr, 4, toTransfer);
+
+        // Motion vectors: identical formats -> exact blit (see the color copy).
+        VkImageBlit blit{};
+        blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.srcSubresource.layerCount = 1;
+        blit.srcOffsets[1] = {static_cast<int32_t>(width), static_cast<int32_t>(height), 1};
+        blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.dstSubresource.layerCount = 1;
+        blit.dstOffsets[1] = {static_cast<int32_t>(width), static_cast<int32_t>(height), 1};
+        vkCmdBlitImage(cmdBuf, sw.mv.xrImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mvDst,
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_NEAREST);
+
+        // Depth: color image -> staging buffer -> depth aspect of the swapchain image.
+        VkBufferImageCopy toBuf{};
+        toBuf.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        toBuf.imageSubresource.layerCount = 1;
+        toBuf.imageExtent = {width, height, 1};
+        vkCmdCopyImageToBuffer(cmdBuf, sw.depth.xrImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, sw.depthStaging, 1,
+                               &toBuf);
+        VkBufferMemoryBarrier bufBarrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+        bufBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        bufBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        bufBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bufBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bufBarrier.buffer = sw.depthStaging;
+        bufBarrier.size = VK_WHOLE_SIZE;
+        vkCmdPipelineBarrier(cmdBuf, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1,
+                             &bufBarrier, 0, nullptr);
+        VkBufferImageCopy toImg{};
+        toImg.imageSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        toImg.imageSubresource.layerCount = 1;
+        toImg.imageExtent = {width, height, 1};
+        vkCmdCopyBufferToImage(cmdBuf, sw.depthStaging, depthDst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &toImg);
+
+        // Final layouts the runtime expects at release (XR_KHR_vulkan_enable2):
+        // COLOR_ATTACHMENT_OPTIMAL for color, DEPTH_STENCIL_ATTACHMENT_OPTIMAL for depth.
+        const VkImageMemoryBarrier toFinal[2] = {
+            barrier(mvDst, colorRange, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT),
+            barrier(depthDst, depthRange, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT),
+        };
+        vkCmdPipelineBarrier(cmdBuf, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+                             0, 0, nullptr, 0, nullptr, 2, toFinal);
+
+        // TEMP DIAGNOSTIC (2026-09-20 convention hunt): copy this frame's
+        // MV image + depth bytes to a host-visible buffer; logged once the
+        // slot's fence is waited on (spaceWarpDebugReadbackLog()).
+        spaceWarpDebugRecordReadback(cmdBuf, sw, slotIndexOf(sw));
+    }
+
+    // ---- TEMP DIAGNOSTIC: readback of a few MV/depth texels ----
+public:
+    void spaceWarpDebugRearmReadback() { swDebugFramesLogged_ = 0; }
+private:
+    uint32_t slotIndexOf(const SpaceWarpSlot& sw) const {
+        return static_cast<uint32_t>(&sw - &swSlots_[0]);
+    }
+    static float halfToFloat(uint16_t h) {
+        const uint32_t sign = (h >> 15) & 1u, exp = (h >> 10) & 0x1Fu, man = h & 0x3FFu;
+        float v;
+        if (exp == 0) {
+            v = std::ldexp(static_cast<float>(man), -24);
+        } else if (exp == 31) {
+            v = man ? NAN : INFINITY;
+        } else {
+            v = std::ldexp(static_cast<float>(man | 0x400u), static_cast<int>(exp) - 25);
+        }
+        return sign ? -v : v;
+    }
+    void spaceWarpDebugRecordReadback(VkCommandBuffer cmdBuf, SpaceWarpSlot& sw, uint32_t slot) {
+        if (swDebugFramesLogged_ >= 6 || swDebugPendingSlot_ != UINT32_MAX) {
+            return;
+        }
+        const uint32_t width = swMvWidth_ * 2;
+        const uint32_t height = swMvHeight_;
+        const VkDeviceSize mvBytes = static_cast<VkDeviceSize>(width) * height * 8;
+        const VkDeviceSize depthBytes = static_cast<VkDeviceSize>(width) * height * swDepthChoice_.bytesPerTexel;
+        if (swDebugReadback_ == VK_NULL_HANDLE) {
+            VkBufferCreateInfo bufCI{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+            bufCI.size = mvBytes + depthBytes;
+            bufCI.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            bufCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            if (vkCreateBuffer(xrDevice_, &bufCI, nullptr, &swDebugReadback_) != VK_SUCCESS) {
+                swDebugFramesLogged_ = 99;
+                return;
+            }
+            VkMemoryRequirements memReq{};
+            vkGetBufferMemoryRequirements(xrDevice_, swDebugReadback_, &memReq);
+            VkPhysicalDeviceMemoryProperties memProps{};
+            vkGetPhysicalDeviceMemoryProperties(xrPhysicalDevice_, &memProps);
+            uint32_t memTypeIndex = UINT32_MAX;
+            const VkMemoryPropertyFlags required = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+            for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
+                if ((memReq.memoryTypeBits & (1u << i)) && (memProps.memoryTypes[i].propertyFlags & required) == required) {
+                    memTypeIndex = i;
+                    break;
+                }
+            }
+            if (memTypeIndex == UINT32_MAX) {
+                swDebugFramesLogged_ = 99;
+                return;
+            }
+            VkMemoryAllocateInfo allocInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+            allocInfo.allocationSize = memReq.size;
+            allocInfo.memoryTypeIndex = memTypeIndex;
+            vkAllocateMemory(xrDevice_, &allocInfo, nullptr, &swDebugReadbackMemory_);
+            vkBindBufferMemory(xrDevice_, swDebugReadback_, swDebugReadbackMemory_, 0);
+        }
+        // MV image is in TRANSFER_SRC_OPTIMAL here (barrier above); depth
+        // staging buffer already holds this frame's depth bytes.
+        VkBufferImageCopy toBuf{};
+        toBuf.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        toBuf.imageSubresource.layerCount = 1;
+        toBuf.imageExtent = {width, height, 1};
+        vkCmdCopyImageToBuffer(cmdBuf, sw.mv.xrImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swDebugReadback_, 1, &toBuf);
+        VkBufferCopy region{};
+        region.dstOffset = mvBytes;
+        region.size = depthBytes;
+        vkCmdCopyBuffer(cmdBuf, sw.depthStaging, swDebugReadback_, 1, &region);
+        VkBufferMemoryBarrier hostBarrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+        hostBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        hostBarrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        hostBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        hostBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        hostBarrier.buffer = swDebugReadback_;
+        hostBarrier.size = VK_WHOLE_SIZE;
+        vkCmdPipelineBarrier(cmdBuf, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1,
+                             &hostBarrier, 0, nullptr);
+        swDebugPendingSlot_ = slot;
+    }
+    void spaceWarpDebugReadbackLog(uint32_t slot) {
+        if (swDebugPendingSlot_ != slot) {
+            return;
+        }
+        swDebugPendingSlot_ = UINT32_MAX;
+        ++swDebugFramesLogged_;
+        const uint32_t width = swMvWidth_ * 2;
+        const uint32_t height = swMvHeight_;
+        const size_t mvBytes = static_cast<size_t>(width) * height * 8;
+        void* mapped = nullptr;
+        if (vkMapMemory(xrDevice_, swDebugReadbackMemory_, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS) {
+            return;
+        }
+        const auto* mv = static_cast<const uint16_t*>(mapped);
+        const auto* depthBytes = static_cast<const uint8_t*>(mapped) + mvBytes;
+        auto depthAt = [&](uint32_t x, uint32_t y) -> float {
+            const size_t i = static_cast<size_t>(y) * width + x;
+            switch (swDepthChoice_.bytesPerTexel) {
+                case 4:
+                    if (swDepthChoice_.dawnFormat == wgpu::TextureFormat::R32Float) {
+                        float f;
+                        std::memcpy(&f, depthBytes + i * 4, 4);
+                        return f;
+                    } else {
+                        uint32_t u;
+                        std::memcpy(&u, depthBytes + i * 4, 4);
+                        return static_cast<float>(u & 0xFFFFFFu) / 16777215.f;
+                    }
+                default: {
+                    uint16_t u;
+                    std::memcpy(&u, depthBytes + i * 2, 2);
+                    return static_cast<float>(u) / 65535.f;
+                }
+            }
+        };
+        const uint32_t w = swMvWidth_, h = swMvHeight_;
+        const struct { const char* name; uint32_t x, y; } pts[] = {
+            {"L-center", w / 2, h / 2},   {"L-top", w / 2, h / 10},      {"L-bottom", w / 2, h - h / 10},
+            {"L-left", w / 10, h / 2},    {"L-right", w - w / 10, h / 2}, {"R-center", w + w / 2, h / 2},
+        };
+        char msg[900];
+        int off = duskVrSnprintf(msg, sizeof(msg), "[dusk::vr] space warp READBACK #%u:", swDebugFramesLogged_);
+        for (const auto& pt : pts) {
+            const size_t i = (static_cast<size_t>(pt.y) * width + pt.x) * 4;
+            off += duskVrSnprintf(msg + off, sizeof(msg) - off, " %s mv=(%.4f,%.4f,%.4f,%.1f) d=%.5f;", pt.name,
+                                  halfToFloat(mv[i]), halfToFloat(mv[i + 1]), halfToFloat(mv[i + 2]),
+                                  halfToFloat(mv[i + 3]), depthAt(pt.x, pt.y));
+        }
+        duskVrSnprintf(msg + off, sizeof(msg) - off, "\n");
+        duskVrLog(msg);
+        vkUnmapMemory(xrDevice_, swDebugReadbackMemory_);
+    }
+
+public:
 #endif  // DUSK_VR_XR_GRAPHICS_VULKAN
 
     // Call once per eye AFTER aurora_end_frame() has returned for this
@@ -2995,6 +4013,27 @@ private:
     uint32_t sharedHeight_ = 0;
     bool sharedImageCreateFailed_ = false;
     VkCommandPool sharedCopyCmdPool_ = VK_NULL_HANDLE;
+
+    // --- Space warp state -- see the SPACE WARP section. ---
+    bool swSupported_ = false;   // XR_FB_space_warp enabled on the instance
+    bool swFailed_ = false;      // one-way: any failure disables it for the session
+    uint32_t swMvWidth_ = 0;     // runtime-recommended motion-vector size, per eye
+    uint32_t swMvHeight_ = 0;
+    SpaceWarpSwapchain swMvSwapchain_;
+    SpaceWarpSwapchain swDepthSwapchain_;
+    DepthFormatChoice swDepthChoice_{};
+    SpaceWarpSlot swSlots_[kSharedSlotCount];  // same slot index as sharedSlots_ each frame
+    wgpu::RenderPipeline swPipeline_;
+    wgpu::BindGroupLayout swBindGroupLayout_;
+    aurora::gfx::EncoderTaskId swTaskId_ = aurora::gfx::InvalidEncoderTask;
+    bool swAccessOpen_ = false;  // this frame's slot has BeginAccess'd its MV/depth images
+    bool swEncoded_ = false;     // the MV pass was pushed for this frame
+    bool swSubmitted_ = false;   // XR-side copies were recorded -> spaceWarpLayerInfo() valid
+    // TEMP diagnostic readback (see spaceWarpDebugRecordReadback()).
+    VkBuffer swDebugReadback_ = VK_NULL_HANDLE;
+    VkDeviceMemory swDebugReadbackMemory_ = VK_NULL_HANDLE;
+    uint32_t swDebugPendingSlot_ = UINT32_MAX;
+    uint32_t swDebugFramesLogged_ = 0;
 #else
     // --- fence sync state ---
     Microsoft::WRL::ComPtr<ID3D12Device> xrDevice_;

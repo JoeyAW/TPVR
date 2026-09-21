@@ -778,7 +778,13 @@ inline aurora::gfx::ResolvedTargets beginStereoPass(const StereoParams& sp,
     return {};
 }
 
-inline aurora::gfx::ResolvedTargets endStereoPass(const aurora::gfx::ExternalPassTarget* external = nullptr) {
+// `wantDepth`: also snapshot the pass's depth into an R32Float texture
+// (ResolvedTargets::depth, valid for this frame) -- the input of the
+// space-warp motion-vector pass (Session::encodeSpaceWarp()). Costs a
+// depth store + one full-screen copy pass, so only asked for when
+// space warp is actually active this frame.
+inline aurora::gfx::ResolvedTargets endStereoPass(const aurora::gfx::ExternalPassTarget* external = nullptr,
+                                                  bool wantDepth = false) {
     // Both switch off in-stream, after every scene command and before the
     // drain inside resolve_pass_checked() -- same ordering endEye() had to
     // get right by hand (its "must NOT clear the override before this
@@ -789,7 +795,7 @@ inline aurora::gfx::ResolvedTargets endStereoPass(const aurora::gfx::ExternalPas
     aurora::gfx::ResolvedTargets targets;
     // External target: no snapshot (color = false) -- the result is the
     // caller's own texture, filled in below.
-    const bool ok = aurora::gfx::resolve_pass_checked({.color = external == nullptr, .depth = false}, targets,
+    const bool ok = aurora::gfx::resolve_pass_checked({.color = external == nullptr, .depth = wantDepth}, targets,
                                                        g_currentEyePassId, g_currentEyeColorView);
     aurora::gfx::clear_protected_offscreen_pass();
     if (!ok) {
@@ -847,7 +853,10 @@ inline constexpr float kHudUnitsPerMetre = kEyePosScale;
 // (this project's usual workflow, see CLAUDE.md's Build Workflow section)
 // rather than deriving analytically; "comfortable, unobtrusive" is a
 // subjective target.
-inline constexpr float kHudDistanceMeters = 2.0f;
+// 2026-09-20: pulled ~1ft closer (2.0 -> 1.7) per user request, together
+// with the menu billboard below; widths unchanged, so both panels also
+// subtend a proportionally larger angle now.
+inline constexpr float kHudDistanceMeters = 1.7f;
 inline constexpr float kHudWidthMeters = 1.4f; // bumped up from 1.0f per user feedback
 inline constexpr float kHudHeightMeters = kHudWidthMeters * (448.0f / 608.0f); // matches FB_HEIGHT/FB_WIDTH
 
@@ -1145,7 +1154,7 @@ inline void drawHudBillboard(TGXTexObj* hudTex) {
 // (deliberately far/small); a settings menu is read/interacted-with for
 // extended periods and wants to be closer/larger, more like a typical VR
 // desktop-panel placement.
-inline constexpr float kMenuBillboardDistanceMeters = 1.2f;
+inline constexpr float kMenuBillboardDistanceMeters = 0.9f; // 1.2 -> 0.9, see kHudDistanceMeters
 inline constexpr float kMenuBillboardWidthMeters = 1.0f;
 
 // Height is NOT a compile-time constant like HUD's fixed 608:448 aspect --

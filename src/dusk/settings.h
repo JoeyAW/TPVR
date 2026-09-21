@@ -17,8 +17,13 @@ using config::ActionBindConfigVar;
 // build, Android included.
 #if defined(TARGET_ANDROID) || defined(__ANDROID__)
 inline constexpr int kDefaultInternalResolutionScale = 1;
+// Dusklight menu (RmlUi) text/UI scale, percent. The standalone headset
+// shows the menu as a VR billboard where 100% is unreadably small (user
+// settled on 200%, 2026-09-20); a desktop monitor wants the normal 100%.
+inline constexpr int kDefaultUiScalePercent = 200;
 #else
 inline constexpr int kDefaultInternalResolutionScale = 0;
+inline constexpr int kDefaultUiScalePercent = 100;
 #endif
 
 enum class BloomMode : int {
@@ -282,6 +287,30 @@ struct UserSettings {
         // Read once at VR startup (sizes the swapchain), so it takes effect
         // on the next launch.
         ConfigVar<float> vrRenderScale;
+        // Application SpaceWarp (XR_FB_space_warp, standalone Quest only):
+        // the app submits per-eye motion vectors + depth alongside the
+        // color image and the runtime synthesizes every other frame,
+        // pacing the app at half the display rate (36fps at 72Hz). Motion
+        // vectors are camera-only (reprojected from depth through the
+        // previous frame's view-projection), so self-moving objects can
+        // ghost/judder on the synthesized frames. Toggles live: the info
+        // is simply not chained onto the layer while off. Ignored where the
+        // runtime doesn't advertise the extension. Default off.
+        ConfigVar<bool> vrSpaceWarp;
+        // TEMPORARY space-warp convention A/B toggles (2026-09-20): the
+        // first in-headset test warped near content badly, and the spec
+        // leaves the motion-vector sign/orientation and the delta pose's
+        // role ambiguous enough that these are quicker to settle live than
+        // by rebuild. Remove (baking in the winning combination) once the
+        // right conventions are confirmed.
+        ConfigVar<bool> vrSpaceWarpDebugNegateMv;      // motion vector = Prev - Curr instead of Curr - Prev
+        ConfigVar<bool> vrSpaceWarpDebugFlipMvY;       // negate the motion vector's y (NDC y-down convention)
+        ConfigVar<bool> vrSpaceWarpDebugZeroMv;        // submit all-zero motion vectors (isolates depth/PTW)
+        ConfigVar<bool> vrSpaceWarpDebugFlatDepth;     // submit far-plane depth everywhere (isolates MVs)
+        ConfigVar<bool> vrSpaceWarpDebugIdentityDelta; // appSpaceDeltaPose = identity instead of the anchor/yaw delta
+        ConfigVar<bool> vrSpaceWarpDebugFlipImage;     // write MV+depth images bottom-up (GL row order)
+        ConfigVar<bool> vrSpaceWarpDebugReversedDepth; // submit reversed-Z depth (1 = near) instead of forward
+        ConfigVar<bool> vrSpaceWarpDebugRawProbe;      // MV texels = (raw snapshot depth, snapshot w, h, sample x) for the readback log
         // Hides Link's whole body model in VR (any outfit/armor -- gates
         // the modelDraw(mpLinkModel, ...) call itself, not per-outfit
         // material indices, so it works uniformly regardless of which

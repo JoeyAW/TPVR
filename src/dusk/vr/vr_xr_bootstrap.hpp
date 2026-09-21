@@ -105,6 +105,12 @@ struct Bootstrap {
     //    FIFO threads so the runtime schedules them on the big cores.
     bool hasPerformanceSettings = false;
     bool hasAndroidThreadSettings = false;
+    // XR_FB_space_warp (Application SpaceWarp, Meta standalone): enabled
+    // only if advertised, same rule as the two above. Consumed by
+    // vr_main.cpp's startup() (queries XrSystemSpaceWarpPropertiesFB for
+    // the recommended motion-vector image size) and Session's space-warp
+    // path (vr_xr_submit.hpp). Never true on the D3D12/PC branch.
+    bool hasSpaceWarp = false;
     PFN_xrPerfSettingsSetPerformanceLevelEXT xrPerfSettingsSetPerformanceLevelEXT_ = nullptr;
     PFN_xrSetAndroidApplicationThreadKHR xrSetAndroidApplicationThreadKHR_ = nullptr;
 };
@@ -226,6 +232,10 @@ inline Bootstrap initialize() {
         instanceExtensionAvailable(XR_KHR_ANDROID_THREAD_SETTINGS_EXTENSION_NAME);
     if (boot.hasAndroidThreadSettings) {
         enabledExtensions.push_back(XR_KHR_ANDROID_THREAD_SETTINGS_EXTENSION_NAME);
+    }
+    boot.hasSpaceWarp = instanceExtensionAvailable(XR_FB_SPACE_WARP_EXTENSION_NAME);
+    if (boot.hasSpaceWarp) {
+        enabledExtensions.push_back(XR_FB_SPACE_WARP_EXTENSION_NAME);
     }
 
     XrInstanceCreateInfoAndroidKHR androidInfo{XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR};

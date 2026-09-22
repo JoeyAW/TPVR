@@ -47,23 +47,53 @@ namespace dusk::vr {
 // snap/smooth-turn works in essentially every other VR game.
 inline float g_smoothTurnYawRad = 0.f;
 
-// Turn rate at full stick deflection, and a deadzone to avoid drift from
-// controller noise while the stick is resting near center.
-inline constexpr float kSmoothTurnDegPerSec = 135.f;  // 90 * 1.5, per explicit user request 2026-08-14
+// Deadzone to avoid drift from controller noise while the stick is resting
+// near center. The turn RATE itself is no longer a constant here -- it's
+// the game.vrSmoothTurnSpeed setting (default 135 deg/s, the value
+// confirmed 2026-08-14), passed in by the caller so this header stays
+// free of game/settings includes (it's pulled into vr_stereo_render.hpp
+// and vr_link_visibility.hpp purely for the two rotation helpers below).
 inline constexpr float kSmoothTurnStickDeadzone = 0.15f;
 
-// Advances g_smoothTurnYawRad from the right stick's raw X axis (-1..1)
-// and this frame's real elapsed time (pacing.presentation_dt_seconds).
+// Advances g_smoothTurnYawRad from the right stick's raw X axis (-1..1),
+// this frame's real elapsed time (pacing.dt), and the turn rate at full
+// deflection in degrees/second.
 // Sign: NEGATED here so pushing the stick right (positive rightStickX)
 // turns the view right -- derived from rotateYawQuat's own convention
 // (verified in script: a positive yaw rotates a forward-facing camera's
 // view toward -X, i.e. turns it LEFT), not guessed, so this shouldn't
 // need an in-headset sign-flip pass the way some of this project's other
 // direction constants have.
-inline void updateSmoothTurn(float rightStickX, float dtSeconds) {
+inline void updateSmoothTurn(float rightStickX, float dtSeconds, float degPerSec) {
     if (std::abs(rightStickX) < kSmoothTurnStickDeadzone) return;
     constexpr float kDegToRad = 3.14159265358979323846f / 180.f;
-    g_smoothTurnYawRad -= kSmoothTurnDegPerSec * kDegToRad * rightStickX * dtSeconds;
+    g_smoothTurnYawRad -= degPerSec * kDegToRad * rightStickX * dtSeconds;
+}
+
+// Snap turn (game.vrSnapTurn, added 2026-09-21): instead of a continuous
+// rotation while the stick is held, rotate by a fixed snapDeg once per
+// flick. Edge-detected with hysteresis -- fires when |stickX| first
+// crosses kSnapTurnEngageThreshold, then stays disarmed until the stick
+// comes back inside kSnapTurnReleaseThreshold, so a held or slowly-
+// released stick can't fire twice (same enter/exit-threshold shape as
+// vr_menu_gamepad.hpp's stick gate and dusk/ui/input.cpp's own press/
+// release bands). One snap per flick, no auto-repeat while held. Same
+// sign convention as updateSmoothTurn above (stick right = view right).
+inline constexpr float kSnapTurnEngageThreshold = 0.6f;
+inline constexpr float kSnapTurnReleaseThreshold = 0.3f;
+inline bool g_snapTurnArmed = true;
+
+inline void updateSnapTurn(float rightStickX, float snapDeg) {
+    const float mag = std::abs(rightStickX);
+    if (g_snapTurnArmed) {
+        if (mag >= kSnapTurnEngageThreshold) {
+            g_snapTurnArmed = false;
+            constexpr float kDegToRad = 3.14159265358979323846f / 180.f;
+            g_smoothTurnYawRad -= snapDeg * kDegToRad * (rightStickX > 0.f ? 1.f : -1.f);
+        }
+    } else if (mag <= kSnapTurnReleaseThreshold) {
+        g_snapTurnArmed = true;
+    }
 }
 
 // Scripted-camera facing assist (Third Person VR setting only, 2026-08-19

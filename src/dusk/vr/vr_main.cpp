@@ -2007,8 +2007,6 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
             padStatus.substickY = static_cast<s8>(std::clamp(rightStick.y, -1.f, 1.f) * 127.f);
         }
     } else {
-        dusk::vr::updateSmoothTurn(rightStick.x, pacing.dt);
-
         // Real physical gamepad's C-stick (2026-08-19, explicit user
         // request: "make the c stick function, c left and c right, rotate
         // the camera left and right in the same way that moving the right
@@ -2030,8 +2028,23 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         // C-stick is already doing fishing input on those frames (real
         // hardware feeds d_a_mg_rod.cpp's rod_substick_x/y from this same
         // getSubStickX() call), so it shouldn't also spin the camera.
+        //
+        // 2026-09-21: both sources are summed into ONE turn axis before
+        // the single update call below. For smooth turn this is identical
+        // to the previous two separate calls (the update is linear in the
+        // stick value); for snap turn it's required -- the edge detector
+        // (g_snapTurnArmed) must see one combined signal, or a held
+        // C-stick would keep the VR stick's snaps disarmed and vice versa.
         const float realCStickX = mDoCPd_c::getSubStickX(PAD_1);
-        dusk::vr::updateSmoothTurn(realCStickX, pacing.dt);
+        const float turnStickX = std::clamp(rightStick.x + realCStickX, -1.f, 1.f);
+        const auto& turnSettings = dusk::getSettings().game;
+        if (turnSettings.vrSnapTurn.getValue()) {
+            dusk::vr::updateSnapTurn(turnStickX,
+                static_cast<float>(turnSettings.vrSnapTurnAngle.getValue()));
+        } else {
+            dusk::vr::updateSmoothTurn(turnStickX, pacing.dt,
+                static_cast<float>(turnSettings.vrSmoothTurnSpeed.getValue()));
+        }
     }
 
     // Scripted-camera facing assist (2026-08-19 request, Third Person VR

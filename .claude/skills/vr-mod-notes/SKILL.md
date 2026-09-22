@@ -14943,3 +14943,21 @@ attempt / COMMITTED lines, in the tree since 2026-08-15) removed --
 calibration is confirmed across several rounds now. If a calibration bug
 ever resurfaces, re-add a log of `candidate`/`plausible`/`mProcID` at the
 sampling site; `mProcID` is the new field worth seeing.
+
+### Turn settings: smooth-turn speed slider + snap-turn toggle/angle — CONFIRMED WORKING IN-HEADSET 2026-09-21 ("looks good")
+
+Per user request. `kSmoothTurnDegPerSec` (`vr_smooth_turn.hpp`) is GONE --
+the rate is now `game.vrSmoothTurnSpeed` (int deg/s, default 135 = the
+2026-08-14 confirmed value, slider 30-360 step 15) passed into
+`updateSmoothTurn(stickX, dt, degPerSec)` by `vr_main.cpp` so the header
+stays settings-free. New `game.vrSnapTurn` (bool, default off) and
+`game.vrSnapTurnAngle` (int deg, default 45, slider 15-90 step 15) drive a
+new `updateSnapTurn(stickX, snapDeg)`: hysteresis edge detector
+(`g_snapTurnArmed`, engage 0.6 / release 0.3), one snap per flick, no
+auto-repeat while held; same sign convention as smooth. `vr_main.cpp` now
+SUMS the VR right stick and the real C-stick into one clamped axis before a
+single update call (linear, so smooth behavior is unchanged; required for
+snap so a held C-stick can't keep the VR stick disarmed). UI: new
+"Turning" section in Settings > VR (Snap Turn toggle; each slider greys
+out when its mode isn't active). The scripted-camera `snapScriptedCameraYaw`
+path is untouched (writes `g_smoothTurnYawRad` directly, mode-independent).

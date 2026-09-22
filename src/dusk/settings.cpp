@@ -159,6 +159,9 @@ UserSettings g_userSettings = {
         .vrGammaCompensationSteamVr {"game.vrGammaCompensationSteamVr", 1.0f},
         .vrPositionalTracking {"game.vrPositionalTracking", true},
         .vrPositionalTrackingRadius {"game.vrPositionalTrackingRadius", 0.75f},
+        .vrSmoothTurnSpeed {"game.vrSmoothTurnSpeed", 135},
+        .vrSnapTurn {"game.vrSnapTurn", false},
+        .vrSnapTurnAngle {"game.vrSnapTurnAngle", 45},
 
         // Audio
         .noLowHpSound {"game.noLowHpSound", false},
@@ -427,6 +430,9 @@ void registerSettings() {
     Register(g_userSettings.game.vrGammaCompensationSteamVr);
     Register(g_userSettings.game.vrPositionalTracking);
     Register(g_userSettings.game.vrPositionalTrackingRadius);
+    Register(g_userSettings.game.vrSmoothTurnSpeed);
+    Register(g_userSettings.game.vrSnapTurn);
+    Register(g_userSettings.game.vrSnapTurnAngle);
     Register(g_userSettings.game.enableFastIronBoots);
     Register(g_userSettings.game.canTransformAnywhere);
     Register(g_userSettings.game.fastRoll);

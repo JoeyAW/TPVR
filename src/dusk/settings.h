@@ -515,6 +515,17 @@ struct UserSettings {
         // ImGuiMenuTools.cpp) if leaning/ducking feels too restrictive or
         // lets the camera drift uncomfortably far.
         ConfigVar<float> vrPositionalTrackingRadius;
+        // Right-stick turning (vr_smooth_turn.hpp, driven from vr_main.cpp's
+        // tick()). vrSnapTurn picks the mode: off = smooth turn at
+        // vrSmoothTurnSpeed degrees/second at full stick deflection (the
+        // 135 default is the value confirmed 2026-08-14); on = a discrete
+        // vrSnapTurnAngle-degree rotation each time the stick is flicked
+        // past the engage threshold, re-armed once it returns to center.
+        // Both apply to the VR right thumbstick and a real gamepad's
+        // C-stick alike. Added 2026-09-21 per explicit user request.
+        ConfigVar<int> vrSmoothTurnSpeed;
+        ConfigVar<bool> vrSnapTurn;
+        ConfigVar<int> vrSnapTurnAngle;
 
         // Audio
         ConfigVar<bool> noLowHpSound;

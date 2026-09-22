@@ -958,6 +958,29 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                             "is tunable in Debug > Graphics Settings. On by default."
             });
 
+        leftPane.add_section("Turning");
+        config_bool_select(leftPane, rightPane, getSettings().game.vrSnapTurn,
+            {
+                .key = "Snap Turn",
+                .helpText = "Off: pushing the right stick (or a gamepad's C-stick) left/right "
+                            "turns your view smoothly at the Smooth Turn Speed below. On: each "
+                            "flick of the stick instantly rotates the view by the Snap Turn "
+                            "Angle instead -- easier on the stomach for many people, since the "
+                            "view never slides. Return the stick to center between snaps. Off "
+                            "by default."
+            });
+        config_int_select(leftPane, rightPane, getSettings().game.vrSmoothTurnSpeed,
+            "Smooth Turn Speed",
+            "How fast the view rotates, in degrees per second, with the right stick pushed "
+            "all the way over. Only used while Snap Turn is off.",
+            30, 360, 15,
+            [] { return getSettings().game.vrSnapTurn.getValue(); }, {}, " deg/s");
+        config_int_select(leftPane, rightPane, getSettings().game.vrSnapTurnAngle,
+            "Snap Turn Angle",
+            "How many degrees each snap rotates the view. Only used while Snap Turn is on.",
+            15, 90, 15,
+            [] { return !getSettings().game.vrSnapTurn.getValue(); }, {}, " deg");
+
         leftPane.add_section("Appearance");
         config_bool_select(leftPane, rightPane, getSettings().game.vrThirdPerson,
             {

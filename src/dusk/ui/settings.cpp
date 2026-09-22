@@ -1733,12 +1733,8 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                     "game if a disc image is available.<br/><br/>Note: If any mods register game "
                     "modes, this option will be ignored.",
             });
-        config_bool_select(leftPane, rightPane, getSettings().backend.checkForUpdates,
-            {
-                .key = "Check for Dusklight Updates",
-                .helpText = "Checks GitHub releases for a new Dusklight version on startup.<br/><br/>"
-                            "No personal information is transmitted or collected.",
-            });
+        // VR fork: the startup update check is disabled (see begin_update_check()
+        // in prelaunch.cpp), so the "Check for Dusklight Updates" toggle is hidden.
 #if BOREALIS_HAS_DISCORD
         config_bool_select(leftPane, rightPane, getSettings().game.enableDiscordPresence,
             {

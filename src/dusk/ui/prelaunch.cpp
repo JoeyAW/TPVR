@@ -194,13 +194,11 @@ std::optional<DiscVerificationResult> take_finished_disc_verification() {
 }
 
 void begin_update_check() {
-    if (!getSettings().backend.checkForUpdates.getValue()) {
-        return;
-    }
-    if (sUpdateCheck || sUpdateCheckResult.has_value()) {
-        return;
-    }
-    sUpdateCheck = borealis::update::check_latest_github_release(AppInfo);
+    // VR fork: the release check points at upstream's GitHub releases, which
+    // will always look "newer" than this fork's tag, so the main menu would
+    // permanently show "Update available!" + a download button that opens the
+    // wrong project. Never start the check; with no result the whole
+    // update-status block stays display:none (see prelaunch.rcss).
 }
 
 std::optional<borealis::update::Result> take_finished_update_check() {

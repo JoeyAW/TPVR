@@ -14863,3 +14863,43 @@ removed, so restoring the spawns needed no other changes.
 **Reusable**: prefer this per-resource check over deleting spawn sites
 for any future "dummy"-texture particle report -- it keeps the visible
 part of the effect and only drops the screen-sampling sprite.
+
+### Screen-capture ("fbtex"/"dummy") effects rendering black in VR -> now dropped entirely (GX_AURORA_SET_COPY_TEX_FRESH_ONLY) -- CONFIRMED FIXED IN-HEADSET 2026-09-21
+
+**Symptom** (user): every material/particle that samples the shared
+screen capture (`mDoGph_gInf_c::getFrameBufferTex()`) used to show a
+stale copy of the view in VR; since single-pass stereo they render solid
+black. **Cause**: perf item #4 (2026-09-20) gated `retry_captue_frame()`
+on `g_env_light.is_blure` in VR, so the capture's copy-texture entry is
+never created; `resolve_sampled_textures()` then falls back to decoding
+the (zero-filled) CPU buffer -> black. The materials that show it take
+their alpha from vertex/TEV, not the texture, so zero alpha in the buffer
+doesn't help. Consumers (grep'd): `d_resorce.cpp` (any BMD texture named
+"fbtex": water MA02, wpillar, ...), `d_particle.cpp` ("dummy" JPA
+textures), `d_kankyo_rain.cpp`, `d_a_demo00.cpp`; the menu/fade/error/
+save-icon captures are all already VR-gated or don't sample it in VR.
+
+**Fix (user's choice: make them "transparent", i.e. contribute nothing)**:
+new aurora stream opcode `GX_AURORA_SET_COPY_TEX_FRESH_ONLY` /
+`GXSetCopyTexFreshOnly(dest, enabled)` (`GXAurora.h`/`.cpp`). While set
+for a GXCopyTex destination, `push_gx_draw()` (command_processor.cpp)
+drops any draw whose sampled textures include that dest unless
+`copy_tex()` stamped it during the current texture frame
+(`GXState::freshOnlyCopyDests`, dest -> `texture::frame_count()` at last
+copy; new accessor in texture.hpp). The sampled-dest list is collected
+alongside `resolve_sampled_textures()` (cache field, refreshed with the
+bind groups; the opcode handler dirties textures so it's re-collected);
+a dropped draw sets `DirtyTextures` so the next draw can't merge into
+the last PUSHED draw with the wrong state. Game side: one call per frame
+at the `retry_captue_frame()` gate in `mDoGph_Painter()` with
+`isRenderingToHeadset()` -- underwater blur (whose capture still runs)
+is unaffected by construction; flatscreen clears the flag every frame.
+In-stream, so no FIFO drain / no main-thread `g_gxState` write.
+
+**Deliberately not done**: the full-res `m_fullFrameBufferTex` (mirror
+mode / home button only) is not registered. Aurora submodule is dirty
+(branch `aurora-vr`, uncommitted). If some screen-space effect is still
+wanted in VR later, the right shape is to make its own capture run
+(then it's "fresh" and draws), not to remove this gate.
+
+**CONFIRMED FIXED IN-HEADSET** -- user: "Fixed." No black quads/blobs from screen-sampling effects; nothing reported as unexpectedly missing. Closes this out.

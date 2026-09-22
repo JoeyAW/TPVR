@@ -2863,6 +2863,19 @@ int mDoGph_Painter() {
                 if (!dusk::vr::isRenderingToHeadset() || g_env_light.is_blure) {
                     retry_captue_frame(&camera_p->view, view_port, dComIfGp_getCameraZoomForcus(camera_id));
                 }
+                // VR (2026-09-21): everything that samples this shared capture
+                // (materials named "fbtex" via d_resorce.cpp, "dummy"-textured
+                // particles, odour/heat-wave distortion, ...) used to show a
+                // stale copy of the view and, once the capture above stopped
+                // running every frame, solid black -- the capture buffer is
+                // zeroed and those materials take their alpha from elsewhere.
+                // Tell aurora to drop any draw sampling this texture unless it
+                // was captured THIS frame (GX_AURORA_SET_COPY_TEX_FRESH_ONLY):
+                // the effects simply vanish, and the underwater blur (the one
+                // consumer whose capture does run) still gets its real data.
+                // In-stream, so it orders correctly against queued draws;
+                // cleared again on every flatscreen frame.
+                GXSetCopyTexFreshOnly(mDoGph_gInf_c::getFrameBufferTex(), dusk::vr::isRenderingToHeadset());
 
                 #if DEBUG
                 // "Frame Buffer capture 2nd time (Rendering)"

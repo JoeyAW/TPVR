@@ -5757,8 +5757,34 @@ void dKyr_odour_draw(Mtx drawMtx, u8** tex) {
 
     j3dSys.reinitGX();
 
-    if (dComIfGd_getView() != NULL) {
+    // VR (2026-09-21): this draw is reached in the headset via
+    // m_Do_graphic.cpp's odour-only branch of the (otherwise VR-disabled)
+    // IndScreen pass. Two things differ from flatscreen there:
+    //  1. The quads are camera-facing billboards built from viewMtxNoTrans,
+    //     which is the FLATSCREEN chase camera's orientation -- beginEye()
+    //     never updates it. Billboard off drawMtx (j3dSys' view, i.e. the
+    //     real eye/head-center view) instead, and use its eye position for
+    //     the near-camera fade below.
+    //  2. TEV stage 0 tints the shared frame-buffer capture (a screen-space
+    //     refraction). In VR that capture is stale (only refreshed for the
+    //     underwater blur), same problem class as water's fake reflection --
+    //     so skip the sample and draw a plain colored glow instead.
+    const bool vrEyeView = DUSK_IF_ELSE(dusk::vr::isRenderingToHeadset(), false);
+    cXyz fadeEyePos;
+
+    if (vrEyeView) {
+        Mtx eyeNoTrans;
+        Mtx eyeInv;
+        MTXInverse(drawMtx, eyeInv);
+        fadeEyePos.set(eyeInv[0][3], eyeInv[1][3], eyeInv[2][3]);
+        MTXCopy(drawMtx, eyeNoTrans);
+        eyeNoTrans[0][3] = 0.0f;
+        eyeNoTrans[1][3] = 0.0f;
+        eyeNoTrans[2][3] = 0.0f;
+        MTXInverse(eyeNoTrans, camMtx);
+    } else if (dComIfGd_getView() != NULL) {
         MTXInverse(dComIfGd_getView()->viewMtxNoTrans, camMtx);
+        fadeEyePos = camera->view.lookat.eye;
     } else {
         OS_REPORT("\nodour_draw return!!");
         return;
@@ -5840,14 +5866,18 @@ void dKyr_odour_draw(Mtx drawMtx, u8** tex) {
     dKyr_set_btitex_common(&texobj, (ResTIMG*)tex[0], GX_TEXMAP1);
 #endif
 
-    ResTIMG* fb_timg = mDoGph_gInf_c::getFrameBufferTimg();
-    dDlst_window_c* window = dComIfGp_getWindow(0);
-    camera_process_class* window_cam = dComIfGp_getCamera(window->getCameraID());
-    dKyr_set_btitex_common(&fb_texobj, fb_timg, GX_TEXMAP0);
+    if (!vrEyeView) {
+        ResTIMG* fb_timg = mDoGph_gInf_c::getFrameBufferTimg();
+        dDlst_window_c* window = dComIfGp_getWindow(0);
+        camera_process_class* window_cam = dComIfGp_getCamera(window->getCameraID());
+        dKyr_set_btitex_common(&fb_texobj, fb_timg, GX_TEXMAP0);
 
-    f32 scale = 0.49f;
-    C_MTXLightPerspective(sp120, window_cam->view.fovy, window_cam->view.aspect, scale, -scale, 0.5f, 0.5f);
-    cMtx_concat(sp120, j3dSys.getViewMtx(), spF0);
+        f32 scale = 0.49f;
+        C_MTXLightPerspective(sp120, window_cam->view.fovy, window_cam->view.aspect, scale, -scale, 0.5f, 0.5f);
+        cMtx_concat(sp120, j3dSys.getViewMtx(), spF0);
+    } else {
+        MTXIdentity(spF0);
+    }
 
     rot += 2.0f IF_DUSK(* dusk::game_clock::original_frames());
     MTXRotRad(rotMtx, 'Z', DEG_TO_RAD(rot));
@@ -5876,8 +5906,15 @@ void dKyr_odour_draw(Mtx drawMtx, u8** tex) {
     GXSetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX3x4, GX_TG_POS, GX_TEXMTX0);
     GXSetTexCoordGen(GX_TEXCOORD1, GX_TG_MTX2x4, GX_TG_TEX1, GX_IDENTITY);
     GXSetNumTevStages(2);
-    GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
-    GXSetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, DUSK_IF_ELSE(GX_CC_RASC, GX_CC_C0), GX_CC_C1);
+    if (vrEyeView) {
+        // No frame-buffer sample: approximate "scene * color0 + color1" with a
+        // mid-gray scene (HALF * color0 + color1), a plain colored glow.
+        GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD_NULL, GX_TEXMAP_NULL, GX_COLOR0A0);
+        GXSetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_HALF, GX_CC_RASC, GX_CC_C1);
+    } else {
+        GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR0A0);
+        GXSetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_TEXC, DUSK_IF_ELSE(GX_CC_RASC, GX_CC_C0), GX_CC_C1);
+    }
     GXSetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
     GXSetTevAlphaIn(GX_TEVSTAGE0, GX_CA_TEXA, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO);
     GXSetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
@@ -5905,7 +5942,7 @@ void dKyr_odour_draw(Mtx drawMtx, u8** tex) {
         if (effect->mStatus != 0 && effect->mStatus != 1 && effect->mStatus != 11) {
             sp4C = effect->mBasePos + effect->mPosition;
 
-            f32 var_f31 = camera->view.lookat.eye.abs(sp4C);
+            f32 var_f31 = fadeEyePos.abs(sp4C);
             if (var_f31 < 250.0f) {
                 if (var_f31 < 150.0f) {
                     var_f31 = 0.0f;

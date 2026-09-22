@@ -2905,8 +2905,19 @@ int mDoGph_Painter() {
                 // disables the whole shared pass rather than isolating just
                 // the heat/odour component -- also loses sun lens flares
                 // and cloud shadows in VR, an accepted tradeoff.
+                //
+                // 2026-09-21: the wolf-senses SCENT TRAILS (dKankyo_odour_Packet,
+                // dKyr_odour_draw) live on this same list and were lost with
+                // it. The sun lens flare and cloud shadows have since gotten
+                // their own VR gates, but the twilight warp-pillar model
+                // (d_k_wpillar.cpp, an fbtex/indirect model) also enters
+                // this list, so rather than re-enable the whole pass, draw
+                // just the odour packet in VR. dKyr_odour_draw() has its own
+                // VR branch (eye-view billboarding, no frame-buffer sample).
                 if (!dusk::vr::isRenderingToHeadset()) {
                     GX_DEBUG_GROUP(dComIfGd_drawIndScreen);
+                } else if (g_env_light.mOdourData.mpOdourPacket != NULL) {
+                    g_env_light.mOdourData.mpOdourPacket->draw();
                 }
 
                 if (strcmp(dComIfGp_getStartStageName(), "F_SP124") == 0 &&

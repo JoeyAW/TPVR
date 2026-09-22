@@ -345,6 +345,11 @@ public:
 
     dPa_control_c();
     static u8 getRM_ID(u16);
+    // Dusklight/VR: does the JPA resource behind this particle id reference a
+    // texture with this name? Used to detect "dummy"-textured (live screen-
+    // capture) effects at spawn time -- see createCommon()/createRoomScene()'s
+    // swapTexture(getFrameBufferTimg(), "dummy") and vr-mod-notes section 5.
+    static bool checkResUsesTexture(u16 id, const char* texName);
     void createCommon(void const*);
     void createRoomScene();
     bool readScene(u8, mDoDvdThd_toMainRam_c**);

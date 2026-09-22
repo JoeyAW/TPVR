@@ -14800,3 +14800,66 @@ Per user request: `kHudDistanceMeters` 2.0 -> 1.7 and
 offered to shrink widths if unwanted). `video.uiScale` compiled default
 is `kDefaultUiScalePercent` (`settings.h`): 200 on standalone, 100 on
 PC. User's device config already had 200. Session ended here ("done").
+
+### Wolf-senses scent trails invisible in VR — FIXED, CONFIRMED IN-HEADSET 2026-09-21
+
+**Root cause**: the scent trails (`dKankyo_odour_Packet` / `dKyr_odour_draw()`,
+`d_kankyo_rain.cpp`) are entered on the shared "IndScreen" draw list
+(`dKyw_setDrawPacketListIndScreen`), and `m_Do_graphic.cpp` skips that
+whole pass in VR (`dComIfGd_drawIndScreen` gated on
+`!isRenderingToHeadset()`, a blanket disable from the section-5 heat-wave
+era whose comment even names "odour distortion" as an accepted loss). The
+sun lens flare and cloud shadows on that same list have since gotten their
+own VR gates, so the odour packet was the only thing still being lost.
+
+**Fix, two parts**:
+- `m_Do_graphic.cpp`: in VR, call `g_env_light.mOdourData.mpOdourPacket->draw()`
+  directly instead of the pass. Deliberately NOT re-enabling the whole
+  IndScreen pass: `d_k_wpillar.cpp` (twilight warp pillar, an fbtex/
+  indirect model) also enters this list and would sample the stale
+  frame-buffer capture.
+- `dKyr_odour_draw()` VR branch (`vrEyeView`): (1) billboard off `drawMtx`
+  (= `j3dSys.getViewMtx()`, the real eye/head-center view) with translation
+  zeroed, instead of `dComIfGd_getView()->viewMtxNoTrans` -- `beginEye()`
+  never updates `viewMtxNoTrans`, so it's the flatscreen chase camera's
+  orientation (same bug class as stars/cloud shadows/sun kagerou); (2) skip
+  the frame-buffer-capture sample in TEV stage 0 (stale in VR since
+  `retry_captue_frame()` is gated on `is_blure`) -- stage 0 becomes
+  `GX_TEXMAP_NULL` with `HALF * RASC + C1` (mid-gray-scene approximation of
+  the flatscreen `fb * color0 + color1` tint), a plain colored glow per
+  scent type; (3) the 150-250-unit near-camera fade measures from the
+  eye position (`inverse(drawMtx)` translation) rather than
+  `camera->view.lookat.eye`. Flatscreen path byte-for-byte unchanged.
+
+User: "fixed". No tuning requested; the `GX_CC_HALF` term is the knob if
+the glow ever reads too bright vs. flatscreen. Note for anyone adding
+another camera-relative billboard effect back into VR: `viewMtxNoTrans`
+is NOT per-eye -- derive from `j3dSys.getViewMtx()` as done here.
+
+### Goron Mines fire spouts (pipe fire / magma pole) invisible — section 10's blanket particle removal reversed — CONFIRMED FIXED IN-HEADSET 2026-09-21
+
+**Symptom** (user): the switch-controlled lava spouts in Goron Mines'
+first room are invisible. **Cause**: section 10 removed EVERY particle
+spawn on `daObjFPillar2_c` (pilot light `0x84df/0x84e0`, the 3-part jet
+`l_pipe_fire_id`, the magma-pole head burst `l_yogan_head_id`) on the
+assumption they all shared the "dummy" screen-capture texture -- but the
+actual heat-wave cause was `daYkgr_c`, and the fire pillars were never
+re-evaluated. Most of those 11 ids are ordinary fire/lava sprites; without
+them the spouts have no visuals at all (flatscreen included).
+
+**Fix**: new `dPa_control_c::checkResUsesTexture(u16 id, const char*)`
+(`d_particle.cpp`) walks the JPA resource's TDB1 texture table
+(`JPAResource::mpTDB1`/`texNum` -> `JPAResourceManager::pTexAry[]` ->
+`JPATexture::getName()`) -- the exact lookup the draw code uses -- so a
+spawn site can ask "does this effect sample the screen?" at runtime
+without knowing the archive layout. `d_a_obj_firepillar2.cpp` restores
+all three original spawn sites verbatim through a `fpillar2_particle_set()`
+wrapper that skips an id only when `isRenderingToHeadset() &&
+checkResUsesTexture(id, "dummy")`. Flatscreen gets the full original
+effect back (the CLAUDE.md "unconditional" constraint now covers only
+`daYkgr_c`). Emitter cleanup/`setRate` code for those fields was never
+removed, so restoring the spawns needed no other changes.
+
+**Reusable**: prefer this per-resource check over deleting spawn sites
+for any future "dummy"-texture particle report -- it keeps the visible
+part of the effect and only drops the screen-sampling sprite.

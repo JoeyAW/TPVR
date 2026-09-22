@@ -25,6 +25,7 @@ extern "C" bool g_duskVRSessionActive;
 #include "JSystem/J3DGraphAnimator/J3DMaterialAnm.h"
 #include "JSystem/JParticle/JPAEmitterManager.h"
 #include "JSystem/JParticle/JPAResourceManager.h"
+#include "JSystem/JParticle/JPAResource.h"
 #include "JSystem/JMath/JMATrigonometric.h"
 #include "d/d_s_play.h"
 #include <cstdio>
@@ -1205,6 +1206,33 @@ dPa_control_c::dPa_control_c() {
 
 u8 dPa_control_c::getRM_ID(u16 param_0) {
     return (param_0 & 0x8000) == 0 ? FALSE : TRUE;
+}
+
+bool dPa_control_c::checkResUsesTexture(u16 id, const char* texName) {
+    if (mEmitterMng == NULL) {
+        return false;
+    }
+    JPAResourceManager* mgr = mEmitterMng->getResourceManager(getRM_ID(id));
+    if (mgr == NULL) {
+        return false;
+    }
+    JPAResource* res = mgr->getResource(id);
+    if (res == NULL || res->mpTDB1 == NULL) {
+        return false;
+    }
+    // TDB1 entries index the resource manager's texture table (the same
+    // lookup JPABaseShape/JPAExTexShape do when binding a texture to draw).
+    for (u8 i = 0; i < res->texNum; i++) {
+        u16 texIdx = res->mpTDB1[i];
+        if (texIdx >= mgr->texRegNum) {
+            continue;
+        }
+        JPATexture* tex = mgr->pTexAry[texIdx];
+        if (tex != NULL && strcmp(tex->getName(), texName) == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void dPa_control_c::createCommon(void const* param_0) {

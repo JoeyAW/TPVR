@@ -11,6 +11,32 @@
 #include "d/d_cc_d.h"
 #include "d/d_com_inf_game.h"
 #include "f_op/f_op_actor_mng.h"
+#ifdef TARGET_PC
+#include "dusk/vr/vr_main.hpp"
+#endif
+
+// The "Obj_yogan" archive's fire/lava effects are a mix of ordinary fire
+// textures and "dummy"-textured (live screen-capture) heat-haze sprites.
+// The screen-capture ones look wrong in VR (see vr-mod-notes section 5:
+// a duplicated, floating copy of the scene) -- but the plain fire/lava
+// parts are what make the spouts VISIBLE at all. Skip only the particles
+// whose JPA resource actually references the "dummy" texture, and only
+// in VR; flatscreen spawns everything, as the base game does.
+static bool fpillar2_skipParticle(u16 id) {
+#ifdef TARGET_PC
+    return dusk::vr::isRenderingToHeadset() && dPa_control_c::checkResUsesTexture(id, "dummy");
+#else
+    return false;
+#endif
+}
+
+static JPABaseEmitter* fpillar2_particle_set(u16 id, fopAc_ac_c* actor) {
+    if (fpillar2_skipParticle(id)) {
+        return NULL;
+    }
+    return dComIfGp_particle_set(id, &actor->current.pos, &actor->current.angle, 0, 0xff, 0,
+                                 fopAcM_GetRoomNo(actor), 0, 0, 0);
+}
 
 static int CheckCreateHeap(fopAc_ac_c* i_this) {
     return static_cast<daObjFPillar2_c*>(i_this)->CreateHeap();
@@ -96,9 +122,12 @@ int daObjFPillar2_c::Create() {
                           l_cull_box.max.z);
     fopAcM_SetMtx(this, mMtx);
     mSoundObj.init(&mSoundPos, 1);
-    // 0x84df/0x84e0 share the "Obj_yogan" archive's "dummy"-textured
-    // resource with l_yogan_head_id (see actionOnInit()'s comment) --
-    // disabled unconditionally for the same reason.
+    if (getKind() == KIND_PIPE_FIRE) {
+        // Pilot light. Restored 2026-09-21 (was removed wholesale during the
+        // Goron Mines heat-wave hunt; see fpillar2_particle_set()).
+        field_0x980 = fpillar2_particle_set(0x84df, this);
+        field_0x984 = fpillar2_particle_set(0x84e0, this);
+    }
     actionOffInit();
     return 1;
 }
@@ -278,12 +307,12 @@ void daObjFPillar2_c::actionOff() {
 
 void daObjFPillar2_c::actionOnWaitInit() {
     if (getKind() == KIND_PIPE_FIRE) {
-        // l_pipe_fire_id disabled for the same "Obj_yogan" dummy-texture
-        // reason as l_yogan_head_id/0x84df/0x84e0 above -- this is the
-        // sustained, rate/lifetime-driven upward jet, the strongest match
-        // for the user's "bunch of squares flying up, duplicated view"
-        // report (a continuous jet reads as "flying up" far more than the
-        // magma pole's one-shot head burst already disabled).
+        // The sustained upward jet. Restored 2026-09-21 -- the "squares
+        // flying up" artifact this was blamed for turned out to be the
+        // camera-locked daYkgr_c haze (vr-mod-notes section 10).
+        for (int i = 0; i < 3; i++) {
+            mPipeFireEmitters[i] = fpillar2_particle_set(l_pipe_fire_id[i], this);
+        }
     } else {
         if (getKind() == KIND_MAGMA_POLE) {
             for (int i = 0; i < 3; i++) {
@@ -325,18 +354,16 @@ void daObjFPillar2_c::actionOnWait() {
 
 void daObjFPillar2_c::actionOnInit() {
     if (getKind() == KIND_MAGMA_POLE) {
-        // l_yogan_head_id's JPA texture resolves to "dummy" in this scene's
-        // resource manager, so dPa_control_c::createRoomScene()'s
-        // mSceneResMng->swapTexture(getFrameBufferTimg(), "dummy") silently
-        // substitutes the live screen-capture texture here -- the same
-        // mechanism documented for the sun/candle/torch kagerou effects
-        // (CLAUDE.md section 5), just a scene-local archive ("Obj_yogan")
-        // instead of a common one. Confirmed via the particle-id logging
-        // added for that investigation: user reproduced the "heat wave"
-        // floating-scene-duplicate artifact in Goron Mines and only ids
-        // 0x84e7-0x84e9 (l_yogan_headM_id) were newly spawned. Disabled
-        // unconditionally (not VR-gated) per explicit request -- this is
-        // just the geyser's burst VFX, not its hazard/damage logic.
+        // Head burst. Restored 2026-09-21 with the per-resource "dummy"
+        // texture check (fpillar2_particle_set()) instead of a blanket
+        // removal -- only the screen-sampling sprites are skipped in VR.
+        for (int i = 0; i < 3; i++) {
+            mMagmaPoleEmitters[i] = fpillar2_particle_set(l_yogan_head_id[getSize()][i], this);
+            if (mMagmaPoleEmitters[i] != NULL) {
+                mMagmaPoleEmitters[i]->becomeImmortalEmitter();
+                mMagmaPoleEmitters[i]->setGlobalRTMatrix(mModel->getAnmMtx(0));
+            }
+        }
         mBck->setFrame(0.0f);
         mBck->setPlaySpeed(1.0f);
         mActionTimer = 125;

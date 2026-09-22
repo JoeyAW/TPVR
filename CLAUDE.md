@@ -41,10 +41,16 @@ reasoning before touching any of this again.
   for water's reflection placeholder as originally written — it crashes
   (`begin_offscreen()`/`end_offscreen()` only track one level of pass
   nesting). Needs arbitrary-nesting-depth support first.
-- **Section 10's Goron Mines heat-wave particle removal (in `vr-mod-notes`)
-  is UNCONDITIONAL** (affects flatscreen too), unlike this project's usual
-  VR-only-gate pattern for this bug class — an explicit one-off user choice,
-  not a default to copy elsewhere.
+- **Section 10's Goron Mines heat-wave fix (in `vr-mod-notes`)**: the
+  `daYkgr_c` camera-locked haze removal is still UNCONDITIONAL (affects
+  flatscreen too) — an explicit one-off user choice, not a default to copy
+  elsewhere. The fire-pillar (`d_a_obj_firepillar2.cpp`) particle removal
+  that rode along with it was REVERSED 2026-09-21 (it made the Goron Mines
+  fire spouts invisible): those spawns are back, with only the
+  `"dummy"`-textured (screen-capture) sprites skipped, VR-only, via
+  `dPa_control_c::checkResUsesTexture(id, "dummy")` — reuse that helper
+  for any other "dummy"-texture particle instead of removing whole spawn
+  sites.
 - **`rotateVecByQuat()` (`vr_link_visibility.hpp`) previously computed the
   INVERSE rotation** — now fixed and confirmed. If touching hand-rotation
   math again: don't reintroduce an inverse rotation, and don't attempt a

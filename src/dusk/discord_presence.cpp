@@ -87,7 +87,7 @@ void update_presence() {
     borealis::discord::Presence presence{};
     presence.startTimestamp = g_startTime;
     presence.largeImageKey = "icon";
-    presence.largeImageText = "Dusklight";
+    presence.largeImageText = "TPVR";
 
     if (IsGameLaunched) {
         const char* stageName = dComIfGp_getLastPlayStageName();

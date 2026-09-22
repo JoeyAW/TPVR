@@ -9,7 +9,7 @@ namespace dusk {
         .appName = "Dusklight",
         .githubOwner = "TwilitRealm",
         .githubRepo = "dusklight",
-        .discordApplicationId = "1495632471994405035",
+        .discordApplicationId = "1551765715164467302",
     };
 
     /**

@@ -88,7 +88,7 @@ UserSettings g_userSettings = {
         .disableLetterboxing {"game.disableLetterboxing", LetterboxMode::Off},
         .enableHighQualityMinimapTextures {"game.enableHighQualityMinimapTextures", true},
         .vrDesktopMirror {"game.vrDesktopMirror", true},
-        .vrSinglePassStereo {"game.vrSinglePassStereo", false},
+        .vrSinglePassStereo {"game.vrSinglePassStereo", true},
         .vrRenderScale {"game.vrRenderScale", 1.0f},
         .vrSpaceWarp {"game.vrSpaceWarp", false},
         .vrSpaceWarpDebugNegateMv {"game.vrSpaceWarpDebugNegateMv", false},

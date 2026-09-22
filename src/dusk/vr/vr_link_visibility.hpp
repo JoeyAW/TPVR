@@ -30,7 +30,7 @@
 #include <cstdio>
 #include <cstring>
 
-#include "dusk/vr/vr_debug_log.hpp"  // dusk::vr::duskVrLog, for [dusk::vr::coreanchor] logging below
+#include "dusk/vr/vr_debug_log.hpp"  // dusk::vr::duskVrLog
 
 namespace vr_link {
 
@@ -3300,46 +3300,86 @@ inline constexpr float kCoreAnchorExtraForwardUnits = 15.24f; // 6 real inches
 // cited there). Calibrates/updates detail::s_coreAnchorHeightOffset as a
 // side effect, same as before this was factored out. Caller must already
 // know isFirstPerson(link) is true.
+// Teleport/warp detection -- see kCoreAnchorTeleportDistanceUnits' own
+// comment above for why this exists. Gated on a real new sim tick
+// (current.pos only actually changes once per tick) so this can't
+// misfire by comparing two reads of the same tick's position.
+//
+// FIXED 2026-09-21 (user report: "when getting off of epona the camera is
+// too low"): this used to live inline in computeRawCoreAnchoredEye(), so
+// the tracker was only ever fed while the CORE branch was active. Every
+// physical-state fallback in computeRawEyeAnchor() (mounted, swimming,
+// crawling, vine, hookshot, magnetized, water-walk) returns before reaching
+// it, so after e.g. a ride on Epona the first core-branch call compared
+// current.pos against wherever Link was BEFORE mounting -- trivially past
+// the 300-unit threshold -- and fired a spurious recalibration right in
+// the middle of the dismount animation (see the upright-proc gate in
+// computeRawCoreAnchoredEye() for the other half of that bug). Now called
+// from those fallback branches too with allowRecalibration=false: the
+// position is tracked continuously so leaving the fallback state isn't a
+// "jump", but a real teleport only triggers recalibration from the core
+// branch. The EVENT branch deliberately does NOT feed it -- loads/warps
+// wrapped in a door/transition event are exactly what this detector
+// exists to catch on the way back out.
+inline void trackCoreAnchorPosition(daAlink_c* link, bool allowRecalibration) {
+    const uint64_t posSimTick = dusk::interp::sim_tick_seq();
+    if (!s_coreAnchorLastTickPosValid) {
+        s_coreAnchorLastTickPos = link->current.pos;
+        s_coreAnchorLastTickPosValid = true;
+        s_coreAnchorLastTickPosSimTick = posSimTick;
+        return;
+    }
+    if (posSimTick == s_coreAnchorLastTickPosSimTick) return;
+    const float dx = link->current.pos.x - s_coreAnchorLastTickPos.x;
+    const float dy = link->current.pos.y - s_coreAnchorLastTickPos.y;
+    const float dz = link->current.pos.z - s_coreAnchorLastTickPos.z;
+    const float distSq = dx * dx + dy * dy + dz * dz;
+    if (allowRecalibration &&
+        distSq > kCoreAnchorTeleportDistanceUnits * kCoreAnchorTeleportDistanceUnits) {
+        // A jump this big in one tick can't be real movement --
+        // force a fresh calibration, same reset shape as
+        // getVrCameraEyeAnchor()'s own isFirstPerson()-false case.
+        s_coreAnchorCalibrated = false;
+        s_coreAnchorActivationTickKnown = false;
+        s_coreAnchorCalibrationAttempts = 0;
+        s_coreAnchorConsecutivePlausible = 0;
+    }
+    s_coreAnchorLastTickPos = link->current.pos;
+    s_coreAnchorLastTickPosSimTick = posSimTick;
+}
+
+// Calibration may only SAMPLE while Link is in an ordinary upright
+// standing/walking proc (2026-09-21, same Epona-dismount report as
+// trackCoreAnchorPosition() above). realEye.y - current.pos.y is only the
+// standing eye height while he's actually standing: during a dismount
+// landing, a crouch, a roll, a fall, climbing out of water etc. the
+// animated eye sits well below (or above) that, and a pose held for a few
+// ticks is enough to pass the consecutive-sample settle check with a
+// genuinely wrong value that then sticks. Attempts (and the max-attempts
+// fallback counter) simply don't advance until he's upright -- the offset
+// keeps its previous/default value meanwhile, which is the right behavior
+// (kCoreAnchorHeightOffsetDefault is the real measured standing value).
+inline bool isUprightStandingProc(const daAlink_c* link) {
+    switch (link->mProcID) {
+    case daAlink_c::PROC_SERVICE_WAIT:
+    case daAlink_c::PROC_TIRED_WAIT:
+    case daAlink_c::PROC_WAIT:
+    case daAlink_c::PROC_MOVE:
+    case daAlink_c::PROC_ATN_MOVE:
+    case daAlink_c::PROC_ATN_ACTOR_WAIT:
+    case daAlink_c::PROC_ATN_ACTOR_MOVE:
+    case daAlink_c::PROC_WAIT_TURN:
+    case daAlink_c::PROC_MOVE_TURN:
+        return true;
+    default:
+        return false;
+    }
+}
+
 inline cXyz computeRawCoreAnchoredEye(daAlink_c* link) {
     const cXyz realEye = *link->getSubjectEyePos();
 
-    // Teleport/warp detection -- see kCoreAnchorTeleportDistanceUnits' own
-    // comment above for why this exists. Gated on a real new sim tick
-    // (current.pos only actually changes once per tick) so this can't
-    // misfire by comparing two reads of the same tick's position.
-    {
-        const uint64_t posSimTick = dusk::interp::sim_tick_seq();
-        if (!s_coreAnchorLastTickPosValid) {
-            s_coreAnchorLastTickPos = link->current.pos;
-            s_coreAnchorLastTickPosValid = true;
-            s_coreAnchorLastTickPosSimTick = posSimTick;
-        } else if (posSimTick != s_coreAnchorLastTickPosSimTick) {
-            const float dx = link->current.pos.x - s_coreAnchorLastTickPos.x;
-            const float dy = link->current.pos.y - s_coreAnchorLastTickPos.y;
-            const float dz = link->current.pos.z - s_coreAnchorLastTickPos.z;
-            const float distSq = dx * dx + dy * dy + dz * dz;
-            if (distSq > kCoreAnchorTeleportDistanceUnits * kCoreAnchorTeleportDistanceUnits) {
-                // A jump this big in one tick can't be real movement --
-                // force a fresh calibration, same reset shape as
-                // getVrCameraEyeAnchor()'s own isFirstPerson()-false case.
-                s_coreAnchorCalibrated = false;
-                s_coreAnchorActivationTickKnown = false;
-                s_coreAnchorCalibrationAttempts = 0;
-                s_coreAnchorConsecutivePlausible = 0;
-                // TEMP DIAGNOSTIC 2026-08-15 -- remove once the "5s to
-                // self-correct" report is root-caused. See kCoreAnchor*
-                // constants' own comments for context.
-                char buf[192];
-                std::snprintf(buf, sizeof(buf),
-                              "[dusk::vr::coreanchor] TELEPORT DETECTED dist=%.1f "
-                              "(threshold=%.1f) -- forcing recalibration\n",
-                              std::sqrt(distSq), kCoreAnchorTeleportDistanceUnits);
-                dusk::vr::duskVrLog(buf);
-            }
-            s_coreAnchorLastTickPos = link->current.pos;
-            s_coreAnchorLastTickPosSimTick = posSimTick;
-        }
-    }
+    trackCoreAnchorPosition(link, /*allowRecalibration=*/true);
 
     if (!s_coreAnchorCalibrated) {
         const uint64_t simTick = dusk::interp::sim_tick_seq();
@@ -3351,7 +3391,8 @@ inline cXyz computeRawCoreAnchoredEye(daAlink_c* link) {
             s_coreAnchorActivationSimTick = simTick;
             s_coreAnchorActivationTickKnown = true;
         } else if (simTick != s_coreAnchorActivationSimTick &&
-                   simTick != s_coreAnchorLastAttemptSimTick) {
+                   simTick != s_coreAnchorLastAttemptSimTick &&
+                   isUprightStandingProc(link)) {
             // A real sim tick has run since activation (and since our last
             // attempt, if any) -- current.pos/getSubjectEyePos() have had a
             // chance to settle post-transition. Try calibrating from it.
@@ -3382,32 +3423,9 @@ inline cXyz computeRawCoreAnchoredEye(daAlink_c* link) {
             const bool forcedByMaxAttempts =
                 !settled && s_coreAnchorCalibrationAttempts >= kCoreAnchorCalibrationMaxAttempts;
 
-            // TEMP DIAGNOSTIC 2026-08-15 -- remove once the "5s to
-            // self-correct" report is root-caused. Logs every attempt (not
-            // throttled) since a single activation caps at
-            // kCoreAnchorCalibrationMaxAttempts (150) attempts -- fine for
-            // a short-lived capture.
-            {
-                char buf[256];
-                std::snprintf(
-                    buf, sizeof(buf),
-                    "[dusk::vr::coreanchor] attempt=%d candidate=%.2f plausible=%d "
-                    "consecutivePlausible=%d realEye.y=%.2f current.pos.y=%.2f\n",
-                    s_coreAnchorCalibrationAttempts, candidate, plausible ? 1 : 0,
-                    s_coreAnchorConsecutivePlausible, realEye.y, link->current.pos.y);
-                dusk::vr::duskVrLog(buf);
-            }
-
             if (settled || forcedByMaxAttempts) {
                 s_coreAnchorHeightOffset = candidate;
                 s_coreAnchorCalibrated = true;
-                char buf[192];
-                std::snprintf(buf, sizeof(buf),
-                              "[dusk::vr::coreanchor] COMMITTED offset=%.2f via=%s "
-                              "afterAttempts=%d\n",
-                              candidate, settled ? "SETTLED" : "MAX_ATTEMPTS_FALLBACK",
-                              s_coreAnchorCalibrationAttempts);
-                dusk::vr::duskVrLog(buf);
             }
         }
     }
@@ -3596,6 +3614,7 @@ inline constexpr float kHorseCameraUpUnits = 15.24f;    // 6 real inches, same c
 
 inline cXyz computeRawEyeAnchor(daAlink_c* link) {
     if (link->checkReinRide()) {
+        trackCoreAnchorPosition(link, /*allowRecalibration=*/false);
         cXyz eye = *link->getSubjectEyePos();
         const float yawRad = static_cast<float>(link->current.angle.y) * (3.14159265f / 32768.0f);
         eye.x -= kHorseCameraBackUnits * std::sin(yawRad);
@@ -3607,6 +3626,7 @@ inline cXyz computeRawEyeAnchor(daAlink_c* link) {
         isCrawling(link) || isHookshotAirborneOrHanging(link) || isMagnetized(link) ||
         link->checkWaterInMove() || link->checkCanoeRide() || link->checkBoardRide())
     {
+        trackCoreAnchorPosition(link, /*allowRecalibration=*/false);
         return *link->getSubjectEyePos();
     }
     if (!link->checkEventRun()) {

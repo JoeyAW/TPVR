@@ -14903,3 +14903,43 @@ wanted in VR later, the right shape is to make its own capture run
 (then it's "fresh" and draws), not to remove this gate.
 
 **CONFIRMED FIXED IN-HEADSET** -- user: "Fixed." No black quads/blobs from screen-sampling effects; nothing reported as unexpectedly missing. Closes this out.
+
+### Camera too low after dismounting Epona — spurious teleport-recalibration mid-dismount — CONFIRMED FIXED IN-HEADSET 2026-09-21
+
+**Symptom** (user): "when getting off of epona the camera is too low"
+(persistent, not a one-frame dip). **Root cause, two halves, both in
+`vr_link_visibility.hpp`**:
+1. The teleport detector's tracker (`s_coreAnchorLastTickPos`) was only
+   fed inside `computeRawCoreAnchoredEye()`, which never runs while
+   `checkReinRide()` (or swim/crawl/vine/hookshot/magnet/water-walk/
+   canoe/board) is true. So the first core-branch call after a ride
+   compared `current.pos` against the PRE-MOUNT position -> trivially
+   past the 300-unit threshold -> `TELEPORT DETECTED` -> forced
+   recalibration, exactly as the dismount animation is finishing.
+2. That recalibration sampled `eyeY - current.pos.y` during the tail of
+   `PROC_HORSE_GETOFF`/landing: `procHorseGetOffInit()` already does
+   `current.pos.y -= 102` while the animated eye is still descending/
+   crouched, so 3 consistent ticks of a too-small (but in-band) value
+   passed the settle check and stuck.
+
+**Fix**: `trackCoreAnchorPosition(link, allowRecalibration)` factored out
+and now ALSO called (with `false`) from every physical-state fallback
+branch in `computeRawEyeAnchor()` -- position tracked continuously, so
+leaving a mount/swim/etc. is never a "jump"; a real teleport still
+recalibrates from the core branch only. The EVENT branch deliberately
+still doesn't feed it (loads wrapped in a door/transition event are what
+the detector is for). Plus `isUprightStandingProc()` gates calibration
+SAMPLING to WAIT/MOVE/ATN_*/WAIT_TURN/MOVE_TURN/SERVICE_WAIT/TIRED_WAIT --
+mid-animation states just delay the attempt (the offset keeps its
+previous/default value, and `kCoreAnchorHeightOffsetDefault=158` is the
+real measured standing value anyway). User: "fixed".
+
+**Also this session**: `game.vrSinglePassStereo` now defaults ON
+(settings.cpp; UI label lost its "(experimental)" tag). Saved configs with
+an explicit `false` still win over the new default.
+
+**Cleanup**: the `[dusk::vr::coreanchor]` diagnostic logging (TELEPORT /
+attempt / COMMITTED lines, in the tree since 2026-08-15) removed --
+calibration is confirmed across several rounds now. If a calibration bug
+ever resurfaces, re-add a log of `candidate`/`plausible`/`mProcID` at the
+sampling site; `mProcID` is the new field worth seeing.

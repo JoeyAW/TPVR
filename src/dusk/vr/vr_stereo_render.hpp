@@ -647,7 +647,8 @@ inline aurora::gfx::ResolvedTargets endEye() {
 // single-pass-stereo practice.
 //
 // Both paths coexist behind game.vrSinglePassStereo so the proven two-pass
-// path stays available for A/B until this one is confirmed in-headset.
+// path stays available as a fallback. Single-pass is the default (confirmed
+// on PC and Quest 2026-09-20).
 // ---------------------------------------------------------------------------
 
 struct StereoParams {

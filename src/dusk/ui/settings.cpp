@@ -1018,10 +1018,10 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
         leftPane.add_section("Performance");
         config_bool_select(leftPane, rightPane, getSettings().game.vrSinglePassStereo,
             {
-                .key = "Single-Pass Stereo (experimental)",
+                .key = "Single-Pass Stereo",
                 .helpText = "Draws both eyes in one rendering pass instead of two. Roughly halves "
                             "the CPU work per frame, which is what the standalone headset needs to "
-                            "hold a steady framerate. Turn off if you see anything wrong in one eye."
+                            "hold a steady framerate. On by default; turn off if you see anything wrong in one eye."
             });
         config_percent_select(leftPane, rightPane, getSettings().game.vrRenderScale,
             "VR Render Resolution",

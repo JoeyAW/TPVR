@@ -5907,13 +5907,75 @@ bool daAlink_c::checkVrPhysicalSword() {
 // when none). Only one Link exists, so a file static is enough and keeps
 // daAlink_c's layout untouched.
 static u8 s_vrPhysicalCutType = daPy_py_c::CUT_TYPE_NONE;
+// Blade-tip motion accumulated since the swing started, in Link's facing
+// frame (forward, lateral(+ = Link's left = LEFT cut, confirmed in-headset), up).
+static f32 s_vrSwingFwd = 0.0f;
+static f32 s_vrSwingLat = 0.0f;
+static f32 s_vrSwingUp = 0.0f;
+static bool s_vrSwingFinisher = false;
+static bool s_vrSwingTypeLocked = false;
+
+// A stab has to be clearly forward, not just slightly more forward than
+// sideways: nearly every swing starts with the arm extending forward.
+static constexpr f32 kVrStabDominance = 2.0f;
+
+static u8 classifyVrSwing(f32 fwd, f32 lat, f32 up, bool finisher) {
+    const f32 absF = std::fabs(fwd);
+    const f32 absL = std::fabs(lat);
+    const f32 absV = std::fabs(up);
+    if (fwd > 0.0f && absF >= kVrStabDominance * absL && absF >= kVrStabDominance * absV) {
+        return finisher ? daPy_py_c::CUT_TYPE_FINISH_STAB : daPy_py_c::CUT_TYPE_NM_STAB;
+    }
+    if (absV >= absL) {
+        return finisher ? daPy_py_c::CUT_TYPE_FINISH_VERTICAL : daPy_py_c::CUT_TYPE_NM_VERTICAL;
+    }
+    // lat > 0 = blade moving toward Link's left -> LEFT. Confirmed in-headset
+    // 2026-09-22 (a flip was tried the same day on a mistaken report and reverted).
+    if (lat > 0.0f) {
+        return finisher ? daPy_py_c::CUT_TYPE_FINISH_LEFT : daPy_py_c::CUT_TYPE_NM_LEFT;
+    }
+    return finisher ? daPy_py_c::CUT_TYPE_FINISH_RIGHT : daPy_py_c::CUT_TYPE_NM_RIGHT;
+}
+
+
+// Adds this tick's blade-tip motion (minus Link's own movement) to the swing's
+// running total.
+void daAlink_c::accumulateVrPhysicalSwing() {
+    cXyz move = (mSwordTopPos - field_0x34b0) - (current.pos - old.pos);
+    const f32 fwdX = cM_ssin(shape_angle.y);
+    const f32 fwdZ = cM_scos(shape_angle.y);
+    s_vrSwingFwd += move.x * fwdX + move.z * fwdZ;
+    s_vrSwingLat += move.x * fwdZ - move.z * fwdX;
+    s_vrSwingUp += move.y;
+}
+
+// Every active tick of a physical swing: re-derive the cut type from the
+// whole swing so far, until the blade actually hits something (enemies read
+// getCutType() at the moment of the hit, so it's locked from then on).
+void daAlink_c::updateVrPhysicalSwordCut() {
+    if (s_vrPhysicalCutType == CUT_TYPE_NONE || s_vrSwingTypeLocked) {
+        return;
+    }
+    // Hit results are from last tick's collision pass -- lock before this
+    // tick's motion can change the type the hit was reported with.
+    if (mAtCps[0].ChkAtHit() || mAtCps[1].ChkAtHit() || mAtCps[2].ChkAtHit()) {
+        s_vrSwingTypeLocked = true;
+        return;
+    }
+    accumulateVrPhysicalSwing();
+    const u8 type = classifyVrSwing(s_vrSwingFwd, s_vrSwingLat, s_vrSwingUp, s_vrSwingFinisher);
+    if (type != s_vrPhysicalCutType && mCutType == s_vrPhysicalCutType) {
+        setCutType(type);
+        s_vrPhysicalCutType = type;
+    }
+}
 
 // Start of a physical swing: tell the game Link is doing a sword attack the
 // way a B press would -- advance the combo counter (4th hit = finisher, as in
 // checkCutAction()), set the cut type enemies read (getCutType()), refresh the
 // combo timer -- without entering an attack proc, so no animation or lunge.
-// Cut direction comes from the blade's own motion this tick, relative to the
-// way Link is facing.
+// The cut direction is refined over the rest of the swing
+// (updateVrPhysicalSwordCut()).
 void daAlink_c::startVrPhysicalSwordCut() {
     if (mComboCutCount == 4) {
         resetCombo(TRUE);
@@ -5924,42 +5986,14 @@ void daAlink_c::startVrPhysicalSwordCut() {
     }
     const bool finisher = mComboCutCount == 4;
 
-    // Blade-tip motion over the last tick, minus Link's own movement.
-    cXyz move = (mSwordTopPos - field_0x34b0) - (current.pos - old.pos);
-    const f32 fwdX = cM_ssin(shape_angle.y);
-    const f32 fwdZ = cM_scos(shape_angle.y);
-    const f32 forward = move.x * fwdX + move.z * fwdZ;
-    const f32 lateral = move.x * fwdZ - move.z * fwdX;  // + = toward Link's left (UNVERIFIED sign)
-    const f32 vertical = move.y;
-    const f32 absF = std::fabs(forward);
-    const f32 absL = std::fabs(lateral);
-    const f32 absV = std::fabs(vertical);
+    s_vrSwingFwd = s_vrSwingLat = s_vrSwingUp = 0.0f;
+    s_vrSwingFinisher = finisher;
+    s_vrSwingTypeLocked = false;
+    accumulateVrPhysicalSwing();
 
-    u8 type;
-    if (forward > 0.0f && absF >= absL && absF >= absV) {
-        type = finisher ? CUT_TYPE_FINISH_STAB : CUT_TYPE_NM_STAB;
-    } else if (absV >= absL) {
-        type = finisher ? CUT_TYPE_FINISH_VERTICAL : CUT_TYPE_NM_VERTICAL;
-    } else if (lateral > 0.0f) {
-        type = finisher ? CUT_TYPE_FINISH_LEFT : CUT_TYPE_NM_LEFT;
-    } else {
-        type = finisher ? CUT_TYPE_FINISH_RIGHT : CUT_TYPE_NM_RIGHT;
-    }
+    const u8 type = classifyVrSwing(s_vrSwingFwd, s_vrSwingLat, s_vrSwingUp, finisher);
     setCutType(type);
     s_vrPhysicalCutType = type;
-
-    const char* typeName = "?";
-    switch (type) {
-    case CUT_TYPE_NM_STAB: typeName = "STAB"; break;
-    case CUT_TYPE_NM_VERTICAL: typeName = "VERTICAL"; break;
-    case CUT_TYPE_NM_LEFT: typeName = "LEFT"; break;
-    case CUT_TYPE_NM_RIGHT: typeName = "RIGHT"; break;
-    case CUT_TYPE_FINISH_STAB: typeName = "FINISH_STAB"; break;
-    case CUT_TYPE_FINISH_VERTICAL: typeName = "FINISH_VERTICAL"; break;
-    case CUT_TYPE_FINISH_LEFT: typeName = "FINISH_LEFT"; break;
-    case CUT_TYPE_FINISH_RIGHT: typeName = "FINISH_RIGHT"; break;
-    }
-    dusk::vr::logPhysicalSwordCut(typeName, mComboCutCount, forward, lateral, vertical);
 
     field_0x307e = mpHIO->mCut.m.mComboDuration;
 
@@ -6734,6 +6768,8 @@ void daAlink_c::setAtCollision() {
     {
         if (!checkNoResetFlg0(FLG0_CUT_AT_FLG)) {
             startVrPhysicalSwordCut();
+        } else {
+            updateVrPhysicalSwordCut();
         }
         // Same global "player is attacking" status bit the real cut procs set.
         dComIfGp_setPlayerStatus0(0, 0x8000);

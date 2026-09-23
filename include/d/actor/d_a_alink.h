@@ -1501,6 +1501,8 @@ public:
     void setSwordAtCollision(int);
     bool checkVrPhysicalSword();
     void startVrPhysicalSwordCut();
+    void updateVrPhysicalSwordCut();
+    void accumulateVrPhysicalSwing();
     void endVrPhysicalSwordCut();
     BOOL checkNoCollisionCorret();
     void decSwordBlur();

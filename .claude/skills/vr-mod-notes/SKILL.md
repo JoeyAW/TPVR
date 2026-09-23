@@ -15022,3 +15022,24 @@ never happens here) unless a real cut proc took over. State in a file static
 (`s_vrPhysicalCutType`) to keep daAlink_c's layout unchanged. User choice:
 keep the 4-hit finisher ("some bosses need it to cycle"). Side effect: the
 count is shared with real B attacks (3 physical swings then B = finisher).
+
+**Follow-up (same day), tested in-headset:** (1) "half my swings are stabs" --
+cut type had been picked from the single arming tick (arm extension reads as
+forward). Now accumulated over the whole swing (`accumulateVrPhysicalSwing()`,
+`updateVrPhysicalSwordCut()` each active tick), re-classified until the blade
+registers a hit (`mAtCps[*].ChkAtHit()` -> locked; checked BEFORE adding the
+tick's motion since hit results are from last tick's collision pass); stab
+needs forward >= 2x both other axes (`kVrStabDominance`). Not yet re-confirmed.
+(2) Left/right mirror report turned out WRONG (user: "I was wrong") -- flip reverted; lat > 0 = LEFT is correct. (was: `classifyVrSwing()` flip,
+maps to RIGHT). `[dusk::vr::physsword]` log (vr_main.cpp
+`logPhysicalSwordCut()`, called from `endVrPhysicalSwordCut()`) is still in --
+remove once stab tuning is confirmed.
+
+**CONFIRMED WORKING IN-HEADSET 2026-09-22 ("its good").** Final state of the
+Physical Sword feature: whole-swing direction accumulation + lock-on-hit,
+stab needs 2x forward dominance (`kVrStabDominance`), lat > 0 (blade toward
+Link's left) = LEFT (the mirror report was a false alarm, reverted), 4-hit
+combo with finisher kept (user choice). `[dusk::vr::physsword]` logging and
+`logPhysicalSwordCut()`/`vrCutTypeName()` removed. Retune knobs if ever
+needed: arm/disarm speeds (2.2 / 1.5 m/s, vr_main.cpp tick() physical-sword
+block) and `kVrStabDominance` (d_a_alink.cpp).

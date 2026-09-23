@@ -1055,13 +1055,41 @@ if (WIN32)
     # Copy the OpenXR loader DLL next to the dusklight executable at build
     # time so you can run from the build directory without installing.
     if (TARGET OpenXR::openxr_loader)
+        # vcpkg's packages only provide DEBUG/RELEASE configurations. Without
+        # a mapping, CMake links RelWithDebInfo/MinSizeRel builds against the
+        # DEBUG loader (openxr_loaderd.dll -> debug CRT + jsoncpp.dll). Scoped
+        # to these targets: a global CMAKE_MAP_IMPORTED_CONFIG_* breaks
+        # config-less imported targets such as nod::nod_shared.
+        foreach (_xr_target OpenXR::openxr_loader jsoncpp_lib)
+            if (TARGET ${_xr_target})
+                set_target_properties(${_xr_target} PROPERTIES
+                    MAP_IMPORTED_CONFIG_RELWITHDEBINFO "RelWithDebInfo;Release"
+                    MAP_IMPORTED_CONFIG_MINSIZEREL "MinSizeRel;Release")
+            endif ()
+        endforeach ()
+
         get_target_property(_xr_dll OpenXR::openxr_loader IMPORTED_LOCATION)
         if (_xr_dll)
+            # Manual OPENXR_SDK_DIR path (config-less imported target).
             add_custom_command(TARGET dusklight POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
                     "${_xr_dll}"
                     "$<TARGET_FILE_DIR:dusklight>"
                 COMMENT "Copying openxr_loader.dll"
+            )
+        else ()
+            # Config-aware package (vcpkg): IMPORTED_LOCATION is per-config,
+            # so resolve through the generator expression instead. The vcpkg
+            # loader also depends on jsoncpp.dll.
+            set(_xr_copy_files "$<TARGET_FILE:OpenXR::openxr_loader>")
+            if (TARGET jsoncpp_lib)
+                list(APPEND _xr_copy_files "$<TARGET_FILE:jsoncpp_lib>")
+            endif ()
+            add_custom_command(TARGET dusklight POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    ${_xr_copy_files}
+                    "$<TARGET_FILE_DIR:dusklight>"
+                COMMENT "Copying OpenXR loader DLLs"
             )
         endif ()
     endif ()

@@ -1499,6 +1499,9 @@ public:
     void setWolfItemMatrix();
     void setHandIndex(daAlink_c::daAlink_ANM);
     void setSwordAtCollision(int);
+    bool checkVrPhysicalSword();
+    void startVrPhysicalSwordCut();
+    void endVrPhysicalSwordCut();
     BOOL checkNoCollisionCorret();
     void decSwordBlur();
     void resetWolfAtCollision();

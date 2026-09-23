@@ -2175,7 +2175,23 @@ inline void markModelJointsLive(J3DModel* model) {
 // separate smoothing needed since mDoExt_modelUpdateDL() (d_a_alink.cpp)
 // already resubmits geometry at real eye-pass rate regardless of
 // first/third person.
+namespace detail {
+// Last tracked (hand-attached) sword base transform written this real frame,
+// for the physical-sword hitbox (daAlink_c::setSwordPos() reads it at sim-tick
+// rate via getTrackedSwordMtx()). Invalid whenever the sword isn't drawn or
+// isn't following the tracked hand.
+inline Mtx s_trackedSwordMtx;
+inline bool s_trackedSwordMtxValid = false;
+}  // namespace detail
+
+inline bool getTrackedSwordMtx(Mtx outMtx) {
+    if (!detail::s_trackedSwordMtxValid) return false;
+    MTXCopy(detail::s_trackedSwordMtx, outMtx);
+    return true;
+}
+
 inline void refreshTrackedItemMtxLive() {
+    detail::s_trackedSwordMtxValid = false;
     auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
     if (!link) return;
     if (!isFirstPerson(link)) return;
@@ -2291,6 +2307,10 @@ inline void refreshTrackedItemMtxLive() {
     const bool swordUpdated = applyTrackedItemMtxIfAttached(
         swordModel, swordAttached, leftItemJointMtx, leftHandJointMtx, swordTrackedHandMtx,
         swordMirrorAxis, swordExtraFlipAxis, swordOffsetX, swordOffsetY, swordOffsetZ);
+    if (swordUpdated) {
+        MTXCopy(swordModel->getBaseTRMtx(), detail::s_trackedSwordMtx);
+        detail::s_trackedSwordMtxValid = true;
+    }
     if (swordModel) {
         if (!swordUpdated) {
             refreshRestingPoseSmoothed(swordModel, detail::s_swordRestingTick, detail::s_swordRestingValid,

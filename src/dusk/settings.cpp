@@ -104,6 +104,7 @@ UserSettings g_userSettings = {
         .vrAttachBodyRotationToHead {"game.vrAttachBodyRotationToHead", false},
         .vrExperimentalCutsceneFirstPerson {"game.vrExperimentalCutsceneFirstPerson", false},
         .vrSwapSwordShieldHands {"game.vrSwapSwordShieldHands", false},
+        .vrPhysicalSword {"game.vrPhysicalSword", false},
         // Key string deliberately kept as the original "game.vrSwapGripMirrorAxis"
         // (not renamed to match the C++ member) so a value the user already
         // tuned before the sword/shield split (2026-08-20) carries over
@@ -416,6 +417,7 @@ void registerSettings() {
     Register(g_userSettings.game.vrAttachBodyRotationToHead);
     Register(g_userSettings.game.vrExperimentalCutsceneFirstPerson);
     Register(g_userSettings.game.vrSwapSwordShieldHands);
+    Register(g_userSettings.game.vrPhysicalSword);
     Register(g_userSettings.game.vrSwapSwordGripMirrorAxis);
     Register(g_userSettings.game.vrSwapShieldGripMirrorAxis);
     Register(g_userSettings.game.vrSwapSwordExtraFlipAxis);

@@ -1037,6 +1037,15 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                             "attack vs. a shield bash, so the hand actually holding each item "
                             "is the one that uses it. Off by default."
             });
+        config_bool_select(leftPane, rightPane, getSettings().game.vrPhysicalSword,
+            {
+                .key = "Physical Sword",
+                .helpText = "Swinging your sword hand no longer presses the attack button. "
+                            "Instead the sword itself deals damage: while you swing it fast, "
+                            "its blade is a live hitbox that hurts whatever it touches, until "
+                            "the swing slows down. Link doesn't play an attack animation. "
+                            "The real attack button still works normally. Off by default."
+            });
 
         leftPane.add_section("Performance");
         config_bool_select(leftPane, rightPane, getSettings().game.vrSinglePassStereo,

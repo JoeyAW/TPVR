@@ -387,6 +387,10 @@ struct UserSettings {
         // ranged-weapon aiming hand. Default off (added 2026-08-20,
         // explicit user request).
         ConfigVar<bool> vrSwapSwordShieldHands;
+        // Physical sword: swinging the sword hand no longer presses B; the
+        // tracked sword's own attack hitbox is live while the hand moves
+        // faster than the swing-gesture threshold (no attack animation).
+        ConfigVar<bool> vrPhysicalSword;
         // Which local axis (0=X, 1=Y, 2=Z) mirrorLocalMtxAxis()
         // (vr_link_visibility.hpp) reflects the sword's grip data through
         // when vrSwapSwordShieldHands is on -- see that function's own

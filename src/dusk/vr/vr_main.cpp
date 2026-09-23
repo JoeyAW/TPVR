@@ -609,6 +609,32 @@ s16 getHeadMoveAngleS() {
     return g_headMoveAngleS;
 }
 
+// Physical sword (game.vrPhysicalSword): true while the sword hand is moving
+// fast enough to count as a swing. Updated once per real frame in tick();
+// read once per sim tick by daAlink_c::setAtCollision() to arm the sword's
+// real attack hitbox.
+static bool g_physicalSwordSwingActive = false;
+
+bool isPhysicalSwordSwingActive() {
+    return g_physicalSwordSwingActive;
+}
+
+bool getTrackedSwordMtx(float (*outMtx)[4]) {
+    return vr_link::getTrackedSwordMtx(outMtx);
+}
+
+// TEMP DIAGNOSTIC (physical sword): one line per swing. Remove once the
+// left/right mapping is confirmed.
+void logPhysicalSwordCut(const char* typeName, int comboCount, float forward, float lateral,
+                         float vertical) {
+    char msg[192];
+    duskVrSnprintf(msg, sizeof(msg),
+                   "[dusk::vr::physsword] cut=%s combo=%d  blade move: fwd=%.1f lat(+left)=%.1f "
+                   "up=%.1f\n",
+                   typeName, comboCount, forward, lateral, vertical);
+    duskVrLog(msg);
+}
+
 void getControllerAimAngles(s16* outYawS, s16* outPitchS) {
     *outYawS = g_controllerAimYawS;
     *outPitchS = g_controllerAimPitchS;
@@ -1377,6 +1403,9 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     g_renderedToHeadsetThisFrame = false;
     g_duskVRRenderingToHeadset = false;
     g_duskVREyePassOpen = false;
+    // Recomputed further down on frames that read controller input; an early
+    // return must not leave a stale "sword is swinging" armed.
+    g_physicalSwordSwingActive = false;
     // VR-menu-gamepad (see vr_menu_gamepad.hpp): FIXED 2026-08-18 -- this
     // used to call neutralizeVrMenuGamepadState() unconditionally right
     // here, every single frame, which turned out to be a real, systemic
@@ -1841,7 +1870,58 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         s_leftSwingButtonHoldRemaining =
             std::max(0.0, s_leftSwingButtonHoldRemaining - static_cast<double>(pacing.dt));
     }
-    const bool leftSwingButtonHeld = s_leftSwingButtonHoldRemaining > 0.0;
+    const bool physicalSword = dusk::getSettings().game.vrPhysicalSword.getValue();
+    // Physical sword mode: the swing gesture no longer presses B. Instead the
+    // sword's own hitbox is live while the sword hand is moving fast (see
+    // daAlink_c::setAtCollision()). The real B button still attacks.
+    const bool leftSwingButtonHeld = !physicalSword && s_leftSwingButtonHoldRemaining > 0.0;
+
+    // Sword-hand speed in tracking space (so walking and smooth turning don't
+    // count as swinging). Arms at the swing gesture's own trigger speed and
+    // disarms once the hand slows down, with hysteresis so it doesn't flicker
+    // right at the threshold. The hold latch guarantees at least one ~30Hz
+    // sim tick sees even a very short swing -- same reason the B latch above
+    // exists.
+    {
+        constexpr float kArmSpeed = 2.2f;        // m/s, = g_leftSwing.triggerSpeed
+        constexpr float kDisarmSpeed = 1.5f;     // m/s
+        constexpr float kMaxPlausibleSpeed = 15.0f;  // tracking-glitch reject
+        constexpr double kActiveHoldSec = 0.1;
+        static bool s_hasPrev = false;
+        static XrVector3f s_prevPos{};
+        static double s_prevTimeSec = 0.0;
+        static bool s_armed = false;
+        static double s_holdRemaining = 0.0;
+
+        const double nowSec = static_cast<double>(time) * 1e-9;
+        const XrVector3f& pos = swordSwingSourcePose.position;
+        if (!physicalSword) {
+            s_hasPrev = false;
+            s_armed = false;
+            s_holdRemaining = 0.0;
+        } else if (s_hasPrev && nowSec > s_prevTimeSec) {
+            const float dx = pos.x - s_prevPos.x;
+            const float dy = pos.y - s_prevPos.y;
+            const float dz = pos.z - s_prevPos.z;
+            const float speed = static_cast<float>(std::sqrt(dx * dx + dy * dy + dz * dz) /
+                                                   (nowSec - s_prevTimeSec));
+            if (speed > kMaxPlausibleSpeed) {
+                // ignore the sample, keep current state
+            } else if (speed >= kArmSpeed) {
+                s_armed = true;
+            } else if (speed < kDisarmSpeed) {
+                s_armed = false;
+            }
+            s_holdRemaining = s_armed ? kActiveHoldSec
+                                      : std::max(0.0, s_holdRemaining - static_cast<double>(pacing.dt));
+        }
+        if (physicalSword) {
+            s_prevPos = pos;
+            s_prevTimeSec = nowSec;
+            s_hasPrev = true;
+        }
+        g_physicalSwordSwingActive = physicalSword && (s_armed || s_holdRemaining > 0.0);
+    }
 
     // Thrust-gesture -> shield bash, RIGHT hand: added 2026-08-13 per
     // explicit user request ("if you thrust the right controller it should

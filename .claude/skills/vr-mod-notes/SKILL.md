@@ -14961,3 +14961,64 @@ snap so a held C-stick can't keep the VR stick disarmed). UI: new
 "Turning" section in Settings > VR (Snap Turn toggle; each slider greys
 out when its mode isn't active). The scripted-camera `snapScriptedCameraYaw`
 path is untouched (writes `g_smoothTurnYawRad` directly, mode-independent).
+
+### "Physical Sword" VR setting — built 2026-09-22, NOT yet tested in-headset
+
+Per user request: swinging arms the sword's REAL attack hitbox instead of
+pressing B. Confirmed TP works this way first: `setSwordAtCollision()`
+builds 3 capsules from blade base (`field_0x3498`) to tip (`mSwordTopPos`),
+two of them spanning last tick's blade (`field_0x34b0/34bc`) so a fast swing
+sweeps a triangle; attack procs only turn it on by setting `RFLG0_UNK_2`
+during their active frames, and `setAtCollision()` is the ONLY reader of that
+flag. User choices: no attack animation, fixed basic-slash damage.
+
+- `game.vrPhysicalSword` (default off), VR tab > Combat > "Physical Sword".
+- `vr_main.cpp`: with it on, the swing gesture no longer ORs into B (real B
+  still attacks). New sword-hand speed state machine in TRACKING space (so
+  locomotion/smooth turn don't count): arm >= 2.2 m/s (= swing gesture
+  trigger), disarm < 1.5, reject > 15 (glitch), 100ms hold latch so a ~30Hz
+  tick always sees it. `isPhysicalSwordSwingActive()`; reset in tick()'s
+  up-front block. Follows the swap-hands setting (swordSwingSourcePose).
+- `vr_link_visibility.hpp`: `refreshTrackedItemMtxLive()` caches the tracked
+  sword base matrix (`getTrackedSwordMtx()`), invalid unless hand-attached.
+- `d_a_alink.cpp`: `checkVrPhysicalSword()` (headset + setting + !wolf +
+  `checkItemSwordEquip()` + `isVrFirstPerson`). `setSwordPos()` builds blade
+  base/tip from the tracked matrix when active (so the hitbox is where the
+  drawn sword is). `setAtCollision()`: if no real attack is active and the
+  swing is active, `setSwordAtParam(Spl_UNK_0, 1, SE_SWORD, 2, mSwordLength,
+  mSwordRadius)` (procCutNormalInit's params) on the first tick, then
+  `onResetFlg0(RFLG0_UNK_2)` -- the stock pipeline does the rest (capsules,
+  hit vibration, blur trail). Skipped during GUARD_ATTACK / CUT_TURN /
+  CUT_LARGE_JUMP_LAND / BOARD_CUT_TURN / HORSE_CUT_TURN / CUT_FINISH_JUMP_UP
+  (non-blade attack shapes).
+
+Untested risks: enemies that key reactions off Link's attack proc/cut type
+(blocking, finishing blows) may react oddly to an animation-less hit; whether
+grass/object cutting works via the same capsules; whether mSwordLength's
+length factor looks right with the tracked blade; hit spam (the capsules'
+per-hit reset is the stock one -- one hit per arming, re-arm needs the hand
+to drop below 1.5 m/s).
+
+**Follow-up (same day): physical swings now tell the game "Link is attacking",
+built, NOT yet tested.** Enemies never read the animation -- they read
+`getCutType()` (281 refs across ~70 actor files), `getCutCount()` (33, the
+`>= 4` finisher checks), `checkCutJumpCancelTurn()`, `getCutAtFlg()`, and
+status bit `dComIfGp_setPlayerStatus0(0, 0x8000)`. Most use cut type at HIT
+time to pick a reaction; a few anticipate (e.g. Bulblin `d_a_e_oc`
+searchSound watches Link whenever cutType != NONE nearby). Special moves
+(jump strike, helm splitter, back slice, mortal draw, spin) stay on B.
+`daAlink_c::startVrPhysicalSwordCut()` (on the arming tick, i.e. when
+FLG0_CUT_AT_FLG isn't set yet): mirrors commonCutAction()/checkCutAction()
+-- combo count++ (reset after 4, capped to 1 on horseback), 4th hit =
+finisher (FINISH_* cut type + procCutFinishInit's (Spl_UNK_1,3,..,3) params),
+otherwise NM_* + basic params; cut direction from blade-tip motion minus
+Link's own movement, projected onto his facing (stab = forward-dominant,
+vertical = vertical-dominant, else left/right -- LEFT/RIGHT sign vs. the
+NM_LEFT/NM_RIGHT naming is UNVERIFIED); refreshes the combo timer
+(field_0x307e) so combos expire normally via checkComboCnt(). Status bit set
+every active tick. `endVrPhysicalSwordCut()` clears the injected cut type
+when the swing ends (the game only clears mCutType on a proc change, which
+never happens here) unless a real cut proc took over. State in a file static
+(`s_vrPhysicalCutType`) to keep daAlink_c's layout unchanged. User choice:
+keep the 4-hit finisher ("some bosses need it to cycle"). Side effect: the
+count is shared with real B attacks (3 physical swings then B = finisher).

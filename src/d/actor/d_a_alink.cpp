@@ -5894,6 +5894,99 @@ int daAlink_c::simpleAnmPlay(J3DAnmBase* i_anm) {
     return ret;
 }
 
+// VR physical sword (game.vrPhysicalSword): the drawn sword follows the
+// tracked hand and its attack hitbox is armed by real swing speed instead of
+// by an attack animation. See setSwordPos()/setAtCollision().
+bool daAlink_c::checkVrPhysicalSword() {
+    return dusk::vr::isRenderingToHeadset() &&
+           dusk::getSettings().game.vrPhysicalSword.getValue() &&
+           !checkWolf() && checkItemSwordEquip() && dusk::vr::isVrFirstPerson(this);
+}
+
+// Cut type this file injected for the current physical swing (CUT_TYPE_NONE
+// when none). Only one Link exists, so a file static is enough and keeps
+// daAlink_c's layout untouched.
+static u8 s_vrPhysicalCutType = daPy_py_c::CUT_TYPE_NONE;
+
+// Start of a physical swing: tell the game Link is doing a sword attack the
+// way a B press would -- advance the combo counter (4th hit = finisher, as in
+// checkCutAction()), set the cut type enemies read (getCutType()), refresh the
+// combo timer -- without entering an attack proc, so no animation or lunge.
+// Cut direction comes from the blade's own motion this tick, relative to the
+// way Link is facing.
+void daAlink_c::startVrPhysicalSwordCut() {
+    if (mComboCutCount == 4) {
+        resetCombo(TRUE);
+    }
+    mComboCutCount++;
+    if (checkReinRide() && mComboCutCount > 1) {
+        mComboCutCount = 1;  // horseback has no combo, same as commonCutAction()
+    }
+    const bool finisher = mComboCutCount == 4;
+
+    // Blade-tip motion over the last tick, minus Link's own movement.
+    cXyz move = (mSwordTopPos - field_0x34b0) - (current.pos - old.pos);
+    const f32 fwdX = cM_ssin(shape_angle.y);
+    const f32 fwdZ = cM_scos(shape_angle.y);
+    const f32 forward = move.x * fwdX + move.z * fwdZ;
+    const f32 lateral = move.x * fwdZ - move.z * fwdX;  // + = toward Link's left (UNVERIFIED sign)
+    const f32 vertical = move.y;
+    const f32 absF = std::fabs(forward);
+    const f32 absL = std::fabs(lateral);
+    const f32 absV = std::fabs(vertical);
+
+    u8 type;
+    if (forward > 0.0f && absF >= absL && absF >= absV) {
+        type = finisher ? CUT_TYPE_FINISH_STAB : CUT_TYPE_NM_STAB;
+    } else if (absV >= absL) {
+        type = finisher ? CUT_TYPE_FINISH_VERTICAL : CUT_TYPE_NM_VERTICAL;
+    } else if (lateral > 0.0f) {
+        type = finisher ? CUT_TYPE_FINISH_LEFT : CUT_TYPE_NM_LEFT;
+    } else {
+        type = finisher ? CUT_TYPE_FINISH_RIGHT : CUT_TYPE_NM_RIGHT;
+    }
+    setCutType(type);
+    s_vrPhysicalCutType = type;
+
+    const char* typeName = "?";
+    switch (type) {
+    case CUT_TYPE_NM_STAB: typeName = "STAB"; break;
+    case CUT_TYPE_NM_VERTICAL: typeName = "VERTICAL"; break;
+    case CUT_TYPE_NM_LEFT: typeName = "LEFT"; break;
+    case CUT_TYPE_NM_RIGHT: typeName = "RIGHT"; break;
+    case CUT_TYPE_FINISH_STAB: typeName = "FINISH_STAB"; break;
+    case CUT_TYPE_FINISH_VERTICAL: typeName = "FINISH_VERTICAL"; break;
+    case CUT_TYPE_FINISH_LEFT: typeName = "FINISH_LEFT"; break;
+    case CUT_TYPE_FINISH_RIGHT: typeName = "FINISH_RIGHT"; break;
+    }
+    dusk::vr::logPhysicalSwordCut(typeName, mComboCutCount, forward, lateral, vertical);
+
+    field_0x307e = mpHIO->mCut.m.mComboDuration;
+
+    if (finisher) {
+        // procCutFinishInit()'s non-combo-hit params: stronger hit.
+        setSwordAtParam(dCcG_At_Spl_UNK_1, 3, dCcD_SE_SWORD, 3, mpHIO->mCut.m.mSwordLength,
+                        mpHIO->mCut.m.mSwordRadius);
+    } else {
+        setSwordAtParam(dCcG_At_Spl_UNK_0, 1, dCcD_SE_SWORD, 2, mpHIO->mCut.m.mSwordLength,
+                        mpHIO->mCut.m.mSwordRadius);
+    }
+}
+
+// End of a physical swing: clear the injected cut type so enemies stop seeing
+// an attack in progress. The game only clears mCutType on its own when a new
+// proc starts, and no proc changes for a physical swing. Left alone if a real
+// sword attack has since taken over.
+void daAlink_c::endVrPhysicalSwordCut() {
+    if (s_vrPhysicalCutType == CUT_TYPE_NONE) {
+        return;
+    }
+    if (mCutType == s_vrPhysicalCutType && mProcID != PROC_CUT_NORMAL && mProcID != PROC_CUT_FINISH) {
+        setCutType(CUT_TYPE_NONE);
+    }
+    s_vrPhysicalCutType = CUT_TYPE_NONE;
+}
+
 void daAlink_c::setSwordPos() {
     static Vec const swordMoveLocal0 = {0.0f, 0.0f, -1.0f};
     static Vec const swordMoveLocal1 = {0.0f, 0.0f, 1.0f};
@@ -5901,18 +5994,28 @@ void daAlink_c::setSwordPos() {
 
     field_0x34b0 = mSwordTopPos;
     field_0x34bc = field_0x3498;
-    mDoMtx_multVecZero(mSwordModel->getBaseTRMtx(), &field_0x3498);
+
+    // VR physical sword: the blade position (and so the attack hitbox that
+    // setSwordAtCollision() builds from it) comes from the sword as it's
+    // actually drawn in the tracked hand, not from Link's animated hand joint.
+    MtxP swordMtx = mSwordModel->getBaseTRMtx();
+    Mtx vrSwordMtx;
+    if (checkVrPhysicalSword() && dusk::vr::getTrackedSwordMtx(vrSwordMtx)) {
+        swordMtx = vrSwordMtx;
+    }
+
+    mDoMtx_multVecZero(swordMtx, &field_0x3498);
 
     if (mCutType == CUT_TYPE_TWIRL || mCutType == CUT_TYPE_FINISH_RIGHT) {
-        mDoMtx_multVecSR(mSwordModel->getBaseTRMtx(), &swordMoveLocal1, &field_0x34a4);
+        mDoMtx_multVecSR(swordMtx, &swordMoveLocal1, &field_0x34a4);
     } else {
-        mDoMtx_multVecSR(mSwordModel->getBaseTRMtx(), &swordMoveLocal0, &field_0x34a4);
+        mDoMtx_multVecSR(swordMtx, &swordMoveLocal0, &field_0x34a4);
     }
 
     if (checkMasterSwordEquip()) {
-        mDoMtx_multVec(mSwordModel->getBaseTRMtx(), &l_swordTopLocalM, &mSwordTopPos);
+        mDoMtx_multVec(swordMtx, &l_swordTopLocalM, &mSwordTopPos);
     } else {
-        mDoMtx_multVec(mSwordModel->getBaseTRMtx(), &l_swordTopLocalN, &mSwordTopPos);
+        mDoMtx_multVec(swordMtx, &l_swordTopLocalN, &mSwordTopPos);
     }
 
     if (mEquipItem == 0x10B) {
@@ -6608,6 +6711,33 @@ void daAlink_c::setAtCollision() {
             mAtSph.ResetAtHit();
             field_0x1778.ResetAtHit();
         }
+    }
+
+    // VR physical sword: while the tracked sword hand is swinging fast and no
+    // real sword attack is running, arm the sword's own attack hitbox exactly
+    // the way a normal attack does during its active frames (RFLG0_UNK_2 is
+    // only read below). Damage/type = the basic one-hit slash (same params as
+    // procCutNormalInit; the 4th combo hit uses the finisher's params -- see
+    // startVrPhysicalSwordCut()). No animation plays; the hitbox is the tracked
+    // blade (see setSwordPos()) and turns off again once the hand slows down.
+    // Procs with their own non-blade attack shape below (spin attacks, the
+    // jump-finish uppercut, shield bash) are left alone.
+    const bool vrPhysicalSwing = checkVrPhysicalSword() && dusk::vr::isPhysicalSwordSwingActive();
+    if (!vrPhysicalSwing) {
+        endVrPhysicalSwordCut();
+    }
+
+    if (!checkResetFlg0(RFLG0_UNK_2) && vrPhysicalSwing &&
+        mProcID != PROC_GUARD_ATTACK && mProcID != PROC_CUT_TURN &&
+        mProcID != PROC_CUT_LARGE_JUMP_LAND && mProcID != PROC_BOARD_CUT_TURN &&
+        mProcID != PROC_HORSE_CUT_TURN && mProcID != PROC_CUT_FINISH_JUMP_UP)
+    {
+        if (!checkNoResetFlg0(FLG0_CUT_AT_FLG)) {
+            startVrPhysicalSwordCut();
+        }
+        // Same global "player is attacking" status bit the real cut procs set.
+        dComIfGp_setPlayerStatus0(0, 0x8000);
+        onResetFlg0(RFLG0_UNK_2);
     }
 
     if (checkResetFlg0(RFLG0_UNK_2)) {

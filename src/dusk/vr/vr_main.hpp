@@ -335,9 +335,6 @@ bool isPhysicalSwordSwingActive();
 // Physical sword: the tracked (hand-attached) sword's current base transform,
 // as last drawn. False if the sword isn't following the tracked hand.
 bool getTrackedSwordMtx(float (*outMtx)[4]);
-// TEMP DIAGNOSTIC: logs which cut type a physical swing registered as.
-void logPhysicalSwordCut(const char* typeName, int comboCount, float forward, float lateral,
-                         float vertical);
 
 // Real right-controller-pointing aim yaw/pitch (same s16 BAMS unit as
 // daAlink_c::shape_angle.y / mBodyAngle.x), for first-person item aiming

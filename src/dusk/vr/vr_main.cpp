@@ -623,17 +623,6 @@ bool getTrackedSwordMtx(float (*outMtx)[4]) {
     return vr_link::getTrackedSwordMtx(outMtx);
 }
 
-// TEMP DIAGNOSTIC (physical sword): one line per swing. Remove once the
-// left/right mapping is confirmed.
-void logPhysicalSwordCut(const char* typeName, int comboCount, float forward, float lateral,
-                         float vertical) {
-    char msg[192];
-    duskVrSnprintf(msg, sizeof(msg),
-                   "[dusk::vr::physsword] cut=%s combo=%d  blade move: fwd=%.1f lat(+left)=%.1f "
-                   "up=%.1f\n",
-                   typeName, comboCount, forward, lateral, vertical);
-    duskVrLog(msg);
-}
 
 void getControllerAimAngles(s16* outYawS, s16* outPitchS) {
     *outYawS = g_controllerAimYawS;

@@ -2,7 +2,7 @@
   <img src="res/logo.png?v=2" alt="Logo" width="640">
 
   <p align="center">
-    <a href="https://discord.gg/CxQJ9PjnjA">Join the Discord</a>
+    <a href="https://discord.gg/CxQJ9PjnjA">Join the Discord</a> • <a href="https://www.patreon.com/cw/JoeyAW">Sub to my Patreon</a>
   </p>
 </div>
 

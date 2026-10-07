@@ -156,6 +156,7 @@ public:
     int getDispType() const;
     void _move(f32, f32, int, f32);
     void _draw();
+    virtual void draw();
 #if TARGET_PC
     bool refreshTextureSize();
 #endif

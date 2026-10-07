@@ -2943,10 +2943,10 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     if (captureThisFrame) {
         mDoGph_gInf_c::captureHudBillboard();
     }
-    // The minimap render is the single most expensive thing on the Quest's
-    // GPU after the scene itself (aurora GPU profiler, 2026-09-20: ~4ms per
-    // render at the old 3x size, 843 draws) and in VR it's a small element
-    // on the HUD billboard: re-render it on every OTHER sim tick (15Hz).
+    // The minimap is expensive on Quest (843 draws, ~1.2ms at 324x324), so
+    // capture attempts remain capped at 15Hz. dMap_c::draw() skips unchanged
+    // HUD-map images and forces a refresh every four capture attempts for
+    // save-derived changes that are not directly represented in its key.
     static uint32_t s_mapCaptureTicks = 0;
     const bool captureMapThisFrame = captureThisFrame && ((s_mapCaptureTicks++ & 1u) == 0u);
 

@@ -14,9 +14,104 @@
 #include "d/actor/d_a_player.h"
 #include "d/d_com_inf_game.h"
 #if TARGET_PC
+#include "dusk/settings.h"
+#include "dusk/vr/vr_main.hpp"
 #include <dolphin/gx/GXExtra.h>
 #endif
 #include <cstring>
+#if TARGET_PC
+namespace {
+u64 minimap_render_signature(const dMap_c& map) {
+    // FNV-1a keeps the per-capture check allocation-free; the four-capture
+    // safety refresh bounds untracked save-state changes and hash collisions.
+    u64 signature = 14695981039346656037ull;
+    const auto mixBytes = [&signature](const void* data, u32 size) {
+        const u8* bytes = static_cast<const u8*>(data);
+        for (u32 i = 0; i < size; ++i) {
+            signature = (signature ^ bytes[i]) * 1099511628211ull;
+        }
+    };
+    const auto mix = [&mixBytes](const auto& value) { mixBytes(&value, sizeof(value)); };
+
+    const dMap_c* mapPointer = &map;
+    mix(mapPointer);
+    mix(dMpath_c::mLayerList);
+    const char* stageName = dComIfGp_getStartStageName();
+    mix(stageName != nullptr);
+    if (stageName != nullptr) {
+        do {
+            mix(*stageName);
+        } while (*stageName++ != '\0');
+    }
+
+    mix(map.mCenterX);
+    mix(map.mCenterZ);
+    mix(map.field_0x58);
+    mix(map.mPackX);
+    mix(map.mPackZ);
+    mix(map.field_0x64);
+    mix(map.mPackPlusZ);
+    mix(map.mRightEdgePlus);
+    mix(map.mTopEdgePlus);
+    mix(map.mPosX);
+    mix(map.mPosZ);
+    mix(map.mCmPerTexel);
+    mix(map.field_0x8);
+    mix(map.field_0xc);
+    mix(map.mTexWidth);
+    mix(map.mTexHeight);
+    mix(map.field_0x20);
+    mix(map.field_0x22);
+    mix(map.field_0x74);
+    mix(map.mStayRoomNo);
+    mix(map.mRoomNo);
+    mix(map.mRoomNoSingle);
+    mix(map.mRenderedFloor);
+    mix(map.field_0x80);
+    mix(map.field_0x84);
+    mix(map.field_0x88);
+    mix(map.field_0x8c);
+    mix(map.field_0x8d);
+    mix(map.field_0x8e);
+    mix(map.field_0x8f);
+    mix(map.field_0x90);
+    mix(dComIfGp_roomControl_getStayNo());
+    mix(map.getDispType());
+    mix(dMapInfo_n::chkGetMap());
+    mix(dMapInfo_n::chkGetCompass());
+    mix(dMpath_c::isExistMapPathData());
+    mix(dComIfGs_isSaveDunSwitch(0x32));
+    mix(dComIfGp_isLightDropMapVisible());
+    mix(dComIfGp_getStartStageDarkArea());
+    mix(dComIfGs_isStageBossEnemy());
+    mix(dComIfGs_isEventBit(dSv_event_flag_c::saveBitLabels[119]));
+    mix(dComIfGs_getRestartRoomNo());
+    const Vec playerPosition = dMapInfo_n::getMapPlayerPos();
+    mix(playerPosition.x);
+    mix(playerPosition.y);
+    mix(playerPosition.z);
+    mix(dMapInfo_n::getMapPlayerAngleY());
+    const Vec restartPosition = dMapInfo_n::getMapRestartPos();
+    mix(restartPosition.x);
+    mix(restartPosition.y);
+    mix(restartPosition.z);
+    mix(dMapInfo_n::getMapRestartAngleY());
+
+    const auto& settings = dusk::getSettings().game;
+    mix(settings.enableMirrorMode);
+    mix(settings.enableMapBackground);
+    mix(settings.hudScale.getValue());
+    mix(map.m_res);
+    if (map.m_res != nullptr) {
+        mixBytes(map.m_res, sizeof(*map.m_res));
+    }
+    return signature;
+}
+
+// Four captures at the existing 15Hz schedule bound unkeyed changes to eight sim ticks.
+constexpr u32 kMinimapSafetyRefreshCaptures = 4;
+}  // namespace
+#endif
 
 #if DEBUG
 void dMap_HIO_c::genMessage(JORMContext* mctx) {
@@ -1925,6 +2020,26 @@ void dMap_c::_draw() {
         field_0x91 = 0;
 #endif
     }
+}
+void dMap_c::draw() {
+#if TARGET_PC
+    // Full-map menus use a different draw class and retain their flash/palette
+    // updates. Eye-pass draws also stay untouched; renderingMap() skips them.
+    if (dusk::vr::isRenderingToHeadset() && !dusk::vr::isEyePassOpen()) {
+        static u64 lastSignature = 0;
+        static u32 capturesSinceRender = 0;
+        static bool lastSignatureValid = false;
+        const u64 signature = minimap_render_signature(*this);
+        if (isDraw() && lastSignatureValid && signature == lastSignature &&
+            ++capturesSinceRender < kMinimapSafetyRefreshCaptures) {
+            return;
+        }
+        lastSignature = signature;
+        capturesSinceRender = 0;
+        lastSignatureValid = true;
+    }
+#endif
+    renderingDAmap_c::draw();
 }
 
 dTres_c::typeGroupData_c* dMap_c::getFirstData(u8 param_0) {

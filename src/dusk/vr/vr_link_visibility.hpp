@@ -910,6 +910,7 @@ inline bool isRealCutsceneRunning();
 inline bool isFirstPerson(daAlink_c* link) {
     if (!link || link->checkWolf()) return false;
 
+    if (dusk::getSettings().game.vrScreenMode.getValue()) return false;
     // "Third Person" VR setting (added 2026-08-18, explicit user request:
     // "add a third person option that shows link's body and puts the
     // entire game in third person"). Forcing this single choke point to
@@ -1035,6 +1036,7 @@ inline bool isFirstPerson(daAlink_c* link) {
 // third person," wolf included, not "except when riding as a wolf."
 inline bool isWolfFirstPersonView(daAlink_c* link) {
     if (!link || !link->checkWolf()) return false;
+    if (dusk::getSettings().game.vrScreenMode.getValue()) return false;
     if (dusk::getSettings().game.vrThirdPerson.getValue()) return false;
     if (link->checkEventRun()) return false;
     return true;

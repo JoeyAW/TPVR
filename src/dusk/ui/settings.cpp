@@ -938,11 +938,40 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
         auto& leftPane = add_child<Pane>(content, Pane::Type::Controlled);
         auto& rightPane = add_child<Pane>(content, Pane::Type::Uncontrolled);
 
+        leftPane.add_section("Display");
+        config_bool_select(leftPane, rightPane, getSettings().game.vrScreenMode,
+            {
+                .key = "Giant Screen Mode",
+                .helpText = "Shows flat-camera gameplay on a large 16:9 screen about 5.3 m wide and 4.5 m away. "
+                            "The screen follows your head; the room stays black. Switches live."
+            });
+        config_bool_select(leftPane, rightPane, getSettings().game.vrScreenModeStereo,
+            {
+                .key = "Stereoscopic 3D Screen",
+                .helpText = "When Giant Screen Mode is active, renders stereoscopic 3D onto the virtual display "
+                            "with depth converging on Link (like GalaxyQuest / 3D cinema). Turn off for 2D flat display.",
+                .isDisabled = [] { return !dusk::getSettings().game.vrScreenMode.getValue(); }
+            });
+        config_percent_select(leftPane, rightPane, getSettings().game.vrScreenModeDepth,
+            "3D Screen Depth",
+            "Amount of 3D depth on the virtual screen (50% .. 200%). Higher values make background scenery "
+            "recede farther into the screen and Link pop out toward you.",
+            20, 200, 10,
+            [] { return !dusk::getSettings().game.vrScreenMode.getValue() || !dusk::getSettings().game.vrScreenModeStereo.getValue(); });
+        config_percent_select(leftPane, rightPane, getSettings().game.vrScreenModeDistance,
+            "Screen Distance",
+            "Distance to the virtual screen (meters). 100% = 4.5m default; lower is closer, higher is farther.",
+            50, 200, 10,
+            [] { return !dusk::getSettings().game.vrScreenMode.getValue(); });
+        config_percent_select(leftPane, rightPane, getSettings().game.vrScreenModeWidth,
+            "Screen Size",
+            "Virtual screen display size. 100% = 5.3m default theater width; adjust for personal comfort.",
+            50, 200, 10,
+            [] { return !dusk::getSettings().game.vrScreenMode.getValue(); });
 #if !VR_SETTINGS_STANDALONE
         // Standalone (Quest) has no desktop window to mirror to. The setting itself stays
         // registered and defaults ON there -- the mirror path also drives the Dusklight overlay's
         // scaling -- it's just not user-facing.
-        leftPane.add_section("Display");
         config_bool_select(leftPane, rightPane, getSettings().game.vrDesktopMirror,
             {
                 .key = "VR Desktop Mirror",
@@ -1172,6 +1201,15 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
             "more GPU headroom on the standalone headset -- 90% cuts the pixel count "
             "by a fifth. Takes effect the next time the game starts.",
             50, 100, 5);
+#if VR_SETTINGS_STANDALONE
+        config_bool_select(leftPane, rightPane, getSettings().game.vrSuperResolution,
+            {
+                .key = "Super Resolution (Sharpening)",
+                .helpText = "Uses Meta Quest Super Resolution (XR_FB_composition_layer_settings) to apply "
+                            "hardware edge-adaptive sharpening to the headset display. Makes distant scenery "
+                            "and textures significantly crisper. On by default."
+            });
+#endif
 
 #if !VR_SETTINGS_STANDALONE
         // Standalone renders through the native Quest runtime -- no SteamVR / Virtual Desktop /

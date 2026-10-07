@@ -24,11 +24,9 @@ void dDlst_snapShot_c::draw() {
     // offscreen-eye-pass bug as retry_captue_frame and postRenderingMap,
     // just with a much more specific/rare trigger (once per save, not every
     // frame), which is why it survived those two fixes. Skip the capture
-    // while actually rendering stereo eyes -- the save icon just won't be
-    // refreshed with an in-VR screenshot, same acceptable tradeoff as the
-    // other guarded captures.
+    // during immersive VR; screen mode uses this normal flat-camera capture.
 #ifdef TARGET_PC
-    if (dusk::vr::isRenderingToHeadset()) {
+    if (dusk::vr::isImmersiveVr()) {
         return;
     }
 #endif

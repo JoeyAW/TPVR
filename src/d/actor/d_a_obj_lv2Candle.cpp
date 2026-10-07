@@ -270,7 +270,7 @@ int daLv2Candle_c::Execute() {
         // VR in d_a_ep.cpp's torch actor -- that disable only covers
         // ep_class, not this actor. See CLAUDE.md section 3.
 #ifdef TARGET_PC
-        if (!dusk::vr::isRenderingToHeadset())
+    if (!dusk::vr::isImmersiveVr())
 #endif
         dComIfGp_particle_setSimple(0x103, &mTorchPos, 0xff,
                                     g_whiteColor, g_whiteColor, 0, 0.0f);

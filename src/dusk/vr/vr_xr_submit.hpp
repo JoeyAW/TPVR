@@ -36,6 +36,7 @@
 #include "../../../extern/aurora/lib/webgpu/gpu_prof.hpp"  // aurora::webgpu::gpu_prof::Zone (GPU timing of the hand-off)
 #include <openxr/openxr.h>
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstdarg>
@@ -460,7 +461,7 @@ struct GammaComputeParams {
     uint32_t rowWords;    // res.bytesPerRow / 4 -- destination row stride in u32 texels
     uint32_t swapRB;
     float gammaExponent;
-    uint32_t _pad0 = 0;
+    uint32_t uiAlphaMode = 0; // 0: scene, 1: HUD luma key, 2: premultiplied RmlUi
     uint32_t _pad1 = 0;
     uint32_t _pad2 = 0;
 };
@@ -480,6 +481,7 @@ struct Params {
     rowWords: u32,
     swapRB: u32,
     gammaExponent: f32,
+  uiAlphaMode: u32,
 };
 
 @group(0) @binding(0) var srcTex: texture_2d<f32>;
@@ -492,7 +494,27 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    let texel = textureLoad(srcTex, vec2<i32>(i32(gid.x), i32(gid.y)), 0);
+    var texel: vec4<f32>;
+    if (params.uiAlphaMode != 0u &&
+        any(textureDimensions(srcTex) != vec2<u32>(params.width, params.height))) {
+        let size = vec2<i32>(textureDimensions(srcTex));
+        let pos = (vec2<f32>(gid.xy) + 0.5) * vec2<f32>(size) /
+                  vec2<f32>(f32(params.width), f32(params.height)) - 0.5;
+        let lo = vec2<i32>(floor(pos));
+        let hi = lo + vec2<i32>(1);
+        let weight = fract(pos);
+        let a = textureLoad(srcTex, clamp(lo, vec2<i32>(0), size - 1), 0);
+        let b = textureLoad(srcTex, clamp(vec2<i32>(hi.x, lo.y), vec2<i32>(0), size - 1), 0);
+        let c = textureLoad(srcTex, clamp(vec2<i32>(lo.x, hi.y), vec2<i32>(0), size - 1), 0);
+        let d = textureLoad(srcTex, clamp(hi, vec2<i32>(0), size - 1), 0);
+        texel = mix(mix(a, b, weight.x), mix(c, d, weight.x), weight.y);
+    } else {
+        texel = textureLoad(srcTex, vec2<i32>(gid.xy), 0);
+    }
+    if (params.uiAlphaMode == 1u) {
+        // Match drawHudBillboard's saturating R+G+B TEV alpha, not EFB alpha.
+        texel.a = clamp(texel.r + texel.g + texel.b, 0.0, 1.0);
+    }
     let r = pow(clamp(texel.r, 0.0, 1.0), params.gammaExponent);
     let g = pow(clamp(texel.g, 0.0, 1.0), params.gammaExponent);
     let b = pow(clamp(texel.b, 0.0, 1.0), params.gammaExponent);
@@ -1009,6 +1031,103 @@ public:
         };
         cpuCopyTaskId_ = aurora::gfx::register_encoder_task_type(desc);
     }
+
+    // Used only by the UI transport Session. Its XR session, spaces, instance,
+    // and graphics device are borrowed from the scene Session; its swapchain
+    // and staging resources are independent. Never begin/end an XR session here.
+    void registerUiCopyEncoderTask() {
+        cpuCopyBuffers_.resize(2);
+        aurora::gfx::EncoderTaskDescriptor desc{
+            .label = "vr_screen_ui_copy",
+            .callback = &Session::uiCopyTaskCallback,
+            .userdata = this,
+        };
+        uiCopyTaskId_ = aurora::gfx::register_encoder_task_type(desc);
+    }
+
+    bool encodeUiCopy(const wgpu::Texture& source, uint32_t uiIndex, uint32_t swapchainIndex,
+                      uint32_t width, uint32_t height, uint32_t dstX, bool hud) {
+        assert(uiIndex < 2 && source && width != 0 && height != 0);
+        const bool resized = cpuCopyBuffers_[uiIndex].width != width ||
+                             cpuCopyBuffers_[uiIndex].height != height;
+        ensureCpuCopyBuffers(uiIndex, width, height, aurora::gfx::color_format());
+        auto& res = cpuCopyBuffers_[uiIndex];
+        // The packed 10-bit CPU fallback still needs UI resampling/keying.
+        if (!res.gammaStorage || (!useGammaComputePath_ && resized)) {
+            ensureGammaComputeResources();
+            wgpu::BufferDescriptor desc{};
+            desc.size = static_cast<uint64_t>(res.bytesPerRow) * height;
+            desc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc;
+            res.gammaStorage = aurora::webgpu::g_device.CreateBuffer(&desc);
+            desc.size = sizeof(GammaComputeParams);
+            desc.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
+            res.gammaUniform = aurora::webgpu::g_device.CreateBuffer(&desc);
+        }
+        uiCopySources_[uiIndex] = source;
+        UiCopyPayload payload{uiIndex, swapchainIndex, width, height, dstX, hud ? 1u : 2u};
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+        payload.sharedSlot = sharedFrameSlot_;
+#endif
+        static_assert(sizeof(payload) <= aurora::gfx::InlineDrawPayloadSize);
+        return aurora::gfx::push_encoder_task(uiCopyTaskId_, &payload, sizeof(payload));
+    }
+
+private:
+    struct UiCopyPayload {
+        uint32_t uiIndex;
+        uint32_t swapchainIndex;
+        uint32_t width;
+        uint32_t height;
+        uint32_t dstX;
+        uint32_t alphaMode;
+        uint32_t sharedSlot = 0;
+    };
+    aurora::gfx::EncoderTaskId uiCopyTaskId_ = aurora::gfx::InvalidEncoderTask;
+    wgpu::Texture uiCopySources_[2];
+
+    static void uiCopyTaskCallback(const aurora::gfx::EncoderTaskContext& ctx,
+                                   const wgpu::CommandEncoder& encoder, const void* payload,
+                                   size_t /*payloadSize*/, void* userdata) {
+        auto* self = static_cast<Session*>(userdata);
+        const auto& p = *static_cast<const UiCopyPayload*>(payload);
+        auto& res = self->cpuCopyBuffers_[p.uiIndex];
+        // CPU packed-format conversion expects the original Aurora byte order.
+        const bool bgra = self->useGammaComputePath_
+            ? self->swapchainIsBgra_
+            : aurora::gfx::color_format() == wgpu::TextureFormat::BGRA8Unorm;
+        const GammaComputeParams params{
+            p.width, p.height, res.bytesPerRow / 4, bgra ? 0u : 1u,
+            self->useGammaComputePath_ ? self->effectiveGammaExponent() : 1.0f, p.alphaMode};
+        ctx.queue.WriteBuffer(res.gammaUniform, 0, &params, sizeof(params));
+        wgpu::BindGroupEntry entries[3]{};
+        entries[0].binding = 0;
+        entries[0].textureView = self->uiCopySources_[p.uiIndex].CreateView();
+        entries[1].binding = 1;
+        entries[1].buffer = res.gammaStorage;
+        entries[1].size = static_cast<uint64_t>(res.bytesPerRow) * p.height;
+        entries[2].binding = 2;
+        entries[2].buffer = res.gammaUniform;
+        entries[2].size = sizeof(params);
+        wgpu::BindGroupDescriptor desc{};
+        desc.layout = self->gammaBindGroupLayout_;
+        desc.entryCount = 3;
+        desc.entries = entries;
+        const auto bindings = aurora::webgpu::g_device.CreateBindGroup(&desc);
+        wgpu::CommandEncoder cmd = encoder;
+        auto pass = cmd.BeginComputePass();
+        pass.SetPipeline(self->gammaPipeline_);
+        pass.SetBindGroup(0, bindings);
+        pass.DispatchWorkgroups((p.width + 7) / 8, (p.height + 7) / 8, 1);
+        pass.End();
+        if (!self->recordCopyToFrameTarget(cmd, res.gammaStorage, res.bytesPerRow,
+                                          p.width, p.height, p.dstX, 0,
+                                          p.swapchainIndex, p.sharedSlot)) {
+            cmd.CopyBufferToBuffer(res.gammaStorage, 0, res.readback, 0,
+                                  static_cast<uint64_t>(res.bytesPerRow) * p.height);
+        }
+    }
+
+public:
 
     // Call once per eye, immediately after endEye(), while still inside the
     // active render pass (push_encoder_task requires that -- see gfx.hpp).
@@ -3041,7 +3160,7 @@ public:
     // part IS correctly shared between both eyes (single double-wide
     // image), only offset differently via dstXOffset.
     void readbackEyeCopy(uint32_t eyeIndex, uint32_t swapchainIndex, uint32_t eyeWidth, uint32_t eyeHeight,
-                          uint32_t dstXOffset, wgpu::TextureFormat format) {
+                         uint32_t dstXOffset, wgpu::TextureFormat format, bool preserveExisting = false) {
         // Defensive, belt-and-suspenders (vr_main.cpp's submitFrame() is
         // also expected to skip calling this entirely when
         // usesGpuDirectSwapchainCopy() -- see that flag's comment): if
@@ -3240,21 +3359,18 @@ public:
         colorRange.layerCount = 1;
 
         VkImageMemoryBarrier toDst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-        toDst.srcAccessMask = 0;
+        toDst.srcAccessMask = preserveExisting ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT : 0;
         toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        // UNDEFINED as oldLayout is deliberate, not "don't know the real
-        // layout" laziness -- we're about to overwrite the whole image via
-        // copy anyway, so discarding whatever it held is correct and is
-        // the standard Vulkan idiom for a copy-destination transition (same
-        // role D3D12_RESOURCE_STATE_COMMON plays as the D3D12 branch's
-        // resting state below).
-        toDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        // A UI atlas's second CPU upload preserves the first rectangle.
+        toDst.oldLayout = preserveExisting ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
         toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         toDst.image = dstImage;
         toDst.subresourceRange = colorRange;
-        vkCmdPipelineBarrier(copyCmdBuf_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        vkCmdPipelineBarrier(copyCmdBuf_,
+                             preserveExisting ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                                              : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                               VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toDst);
 
         VkBufferImageCopy region{};
@@ -3386,20 +3502,188 @@ public:
     }
 
 private:
+    // Screen-mode back-generation buffers alternate with cpuCopyBuffers_[eye].gammaStorage.
+    // They keep the published stereo pair immutable while the next pair is rendered.
+    wgpu::Buffer screenModeBackStorage_[2];
+    uint32_t screenModeBackWidth_ = 0;
+    uint32_t screenModeBackHeight_ = 0;
+
+    enum class CpuCopyMode : uint32_t {
+        RenderAndCopy,
+        RenderOnly,
+        CopyCached,
+    };
+
     struct CpuCopyTaskPayload {
         uint32_t eyeIndex;
         uint32_t eyeWidth;
         uint32_t eyeHeight;
-        // Only consulted when sameDeviceAsAurora_/usesGpuDirectSwapchainCopy()
-        // -- unused (left zero-initialized by encodeEyeCopy()'s payload) on
-        // the plain CPU-copy path, harmless either way.
         uint32_t swapchainIndex = 0;
         uint32_t dstXOffset = 0;
-        // Vulkan shared-image path only: which double-buffer slot this
-        // frame's copies target (see SharedImageSlot) -- captured at push time so
-        // the worker-thread callback can't observe a later frame's slot.
         uint32_t sharedSlot = 0;
+        CpuCopyMode mode = CpuCopyMode::RenderAndCopy;
+        bool screenCache = false;
+        uint32_t screenGeneration = 0;
     };
+
+public:
+    bool supportsScreenModeCache() const {
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+        return usesSharedImageGpuDirect();
+#else
+        return usesGpuDirectSwapchainCopy();
+#endif
+    }
+
+    // Vulkan copies target this frame's shared-image slot; D3D12 has no slots.
+    uint32_t frameSharedSlot() const {
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+        return sharedFrameSlot_;
+#else
+        return 0;
+#endif
+    }
+
+    float screenModeGammaExponent() const { return effectiveGammaExponent(); }
+
+    bool prepareScreenModeCache(uint32_t width, uint32_t height, bool stereo, wgpu::TextureFormat format) {
+        if (!supportsScreenModeCache() || width == 0 || height == 0) {
+            return false;
+        }
+        const uint32_t eyeCount = stereo ? 2u : 1u;
+        for (uint32_t eye = 0; eye < eyeCount; ++eye) {
+            ensureCpuCopyBuffers(eye, width, height, format);
+            const auto& res = cpuCopyBuffers_[eye];
+            if (!res.gammaStorage || !res.gammaUniform || res.width != width || res.height != height) {
+                return false;
+            }
+        }
+        if (!stereo) {
+            return true;
+        }
+        if (screenModeBackWidth_ != width || screenModeBackHeight_ != height ||
+            !screenModeBackStorage_[0] || !screenModeBackStorage_[1]) {
+            screenModeBackStorage_[0] = {};
+            screenModeBackStorage_[1] = {};
+            const uint64_t bytes = static_cast<uint64_t>(align256(width * 4)) * height;
+            wgpu::BufferDescriptor desc{};
+            desc.size = bytes;
+            desc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopySrc;
+            screenModeBackStorage_[0] = aurora::webgpu::g_device.CreateBuffer(&desc);
+            screenModeBackStorage_[1] = aurora::webgpu::g_device.CreateBuffer(&desc);
+            if (!screenModeBackStorage_[0] || !screenModeBackStorage_[1]) {
+                screenModeBackWidth_ = screenModeBackHeight_ = 0;
+                return false;
+            }
+            screenModeBackWidth_ = width;
+            screenModeBackHeight_ = height;
+        }
+        return true;
+    }
+
+    bool canCopyScreenModeEye(uint32_t eyeIndex, uint32_t generation, uint32_t width, uint32_t height) const {
+        if (!supportsScreenModeCache() || eyeIndex > 1 || generation > 1 || cpuCopyBuffers_.size() <= eyeIndex) {
+            return false;
+        }
+        const auto& res = cpuCopyBuffers_[eyeIndex];
+        if (!res.gammaStorage || res.width != width || res.height != height) {
+            return false;
+        }
+        return generation == 0 ||
+               (screenModeBackStorage_[eyeIndex] && screenModeBackWidth_ == width && screenModeBackHeight_ == height);
+    }
+
+    bool encodeScreenModeEyeRender(const wgpu::Texture& srcTexture, uint32_t eyeIndex, uint32_t generation,
+                                   uint32_t swapchainIndex, uint32_t width, uint32_t height, uint32_t dstX,
+                                   wgpu::TextureFormat format) {
+        if (!srcTexture || !prepareScreenModeCache(width, height, eyeIndex == 1, format) ||
+            !canCopyScreenModeEye(eyeIndex, generation, width, height)) {
+            return false;
+        }
+        if (pendingCopySrc_.size() <= eyeIndex) {
+            pendingCopySrc_.resize(eyeIndex + 1);
+        }
+        pendingCopySrc_[eyeIndex] = srcTexture;
+        const CpuCopyTaskPayload payload{
+            .eyeIndex = eyeIndex,
+            .eyeWidth = width,
+            .eyeHeight = height,
+            .swapchainIndex = swapchainIndex,
+            .dstXOffset = dstX,
+            .sharedSlot = frameSharedSlot(),
+            .mode = CpuCopyMode::RenderOnly,
+            .screenCache = true,
+            .screenGeneration = generation,
+        };
+        static_assert(sizeof(CpuCopyTaskPayload) <= aurora::gfx::InlineDrawPayloadSize,
+                      "CpuCopyTaskPayload too large for inline encoder task payload");
+        aurora::gfx::push_encoder_task(cpuCopyTaskId_, &payload, sizeof(payload));
+        return true;
+    }
+
+    bool encodeScreenModeEyeCopy(uint32_t eyeIndex, uint32_t generation, uint32_t swapchainIndex,
+                                 uint32_t width, uint32_t height, uint32_t dstX) {
+        if (!canCopyScreenModeEye(eyeIndex, generation, width, height)) {
+            return false;
+        }
+        const CpuCopyTaskPayload payload{
+            .eyeIndex = eyeIndex,
+            .eyeWidth = width,
+            .eyeHeight = height,
+            .swapchainIndex = swapchainIndex,
+            .dstXOffset = dstX,
+            .sharedSlot = frameSharedSlot(),
+            .mode = CpuCopyMode::CopyCached,
+            .screenCache = true,
+            .screenGeneration = generation,
+        };
+        static_assert(sizeof(CpuCopyTaskPayload) <= aurora::gfx::InlineDrawPayloadSize,
+                      "CpuCopyTaskPayload too large for inline encoder task payload");
+        aurora::gfx::push_encoder_task(cpuCopyTaskId_, &payload, sizeof(payload));
+        return true;
+    }
+
+    bool recordCopyToFrameTarget(const wgpu::CommandEncoder& encoder, const wgpu::Buffer& source,
+                                 uint32_t bytesPerRow, uint32_t width, uint32_t height,
+                                 uint32_t dstX, uint32_t dstY, uint32_t swapchainIndex,
+                                 uint32_t sharedSlot) const {
+        wgpu::Texture target;
+#if DUSK_VR_XR_GRAPHICS_VULKAN
+        if (!usesSharedImageGpuDirect() || !sharedFrameSlotValid_ || sharedSlot >= kSharedSlotCount) {
+            return false;
+        }
+        target = sharedSlots_[sharedSlot].texture;
+        (void)swapchainIndex;
+#else
+        if (!usesGpuDirectSwapchainCopy()) {
+            return false;
+        }
+        (void)sharedSlot;
+        if (usesIntermediateSwapchainCopy()) {
+            target = intermediateTexture_;
+        } else if (swapchainIndex < swapchainTextures_.size()) {
+            target = swapchainTextures_[swapchainIndex];
+        }
+#endif
+        if (!target || !source || width == 0 || height == 0) {
+            return false;
+        }
+        wgpu::TexelCopyBufferInfo src{};
+        src.buffer = source;
+        src.layout.offset = 0;
+        src.layout.bytesPerRow = bytesPerRow;
+        src.layout.rowsPerImage = height;
+        wgpu::TexelCopyTextureInfo dst{};
+        dst.texture = target;
+        dst.origin = {dstX, dstY, 0};
+        dst.aspect = wgpu::TextureAspect::All;
+        const wgpu::Extent3D extent{width, height, 1};
+        wgpu::CommandEncoder mutableEncoder = encoder;
+        mutableEncoder.CopyBufferToTexture(&src, &dst, &extent);
+        return true;
+    }
+
+private:
 
     // Runs on the render worker thread, positioned between render passes on
     // the frame's real encoder -- see gfx.hpp's EncoderTaskCallback contract
@@ -3410,9 +3694,22 @@ private:
         auto* self = static_cast<Session*>(userdata);
         const auto& p = *static_cast<const CpuCopyTaskPayload*>(payload);
         auto& res = self->cpuCopyBuffers_[p.eyeIndex];
-        const wgpu::Texture& srcTexture = self->pendingCopySrc_[p.eyeIndex];
+        wgpu::Buffer targetStorage = res.gammaStorage;
+        if (p.screenCache && p.screenGeneration == 1) {
+            targetStorage = self->screenModeBackStorage_[p.eyeIndex];
+        }
 
         wgpu::CommandEncoder mutableCmd = cmd; // several calls below are non-const on CommandEncoder
+        if (p.mode == CpuCopyMode::CopyCached) {
+            if (!self->recordCopyToFrameTarget(mutableCmd, targetStorage, res.bytesPerRow,
+                                               p.eyeWidth, p.eyeHeight, p.dstXOffset, 0,
+                                               p.swapchainIndex, p.sharedSlot)) {
+                mutableCmd.CopyBufferToBuffer(targetStorage, 0, res.readback, 0,
+                                              static_cast<uint64_t>(res.bytesPerRow) * p.eyeHeight);
+            }
+            return;
+        }
+        const wgpu::Texture& srcTexture = self->pendingCopySrc_[p.eyeIndex];
         // GPU profiler zone (aurora gpu_prof, log mode on Android): the whole
         // hand-off -- gamma compute + buffer->texture copy -- as one zone.
         const aurora::webgpu::gpu_prof::Zone gpuZone{cmd, "VR swapchain handoff"};
@@ -3460,7 +3757,7 @@ private:
             entries[0].binding = 0;
             entries[0].textureView = srcView;
             entries[1].binding = 1;
-            entries[1].buffer = res.gammaStorage;
+            entries[1].buffer = targetStorage;
             entries[1].size = static_cast<uint64_t>(res.bytesPerRow) * p.eyeHeight;
             entries[2].binding = 2;
             entries[2].buffer = res.gammaUniform;
@@ -3477,6 +3774,9 @@ private:
             pass.SetBindGroup(0, bindGroup);
             pass.DispatchWorkgroups((p.eyeWidth + 7) / 8, (p.eyeHeight + 7) / 8, 1);
             pass.End();
+            if (p.mode == CpuCopyMode::RenderOnly) {
+                return;
+            }
 
 #if !DUSK_VR_XR_GRAPHICS_VULKAN
             // GPU-DIRECT PATH (2026-09-16, see sameDeviceAsAurora_'s comment):

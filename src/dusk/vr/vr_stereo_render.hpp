@@ -78,6 +78,7 @@ wgpu::Texture ensure_external_copy_texture(const void* dest, uint32_t width, uin
 #include "m_Do/m_Do_mtx.h"         // mDoMtx_multVec() -- drawAimCrosshair()
 #include <dolphin/mtx.h>           // C_MTXPerspective, mDoMtx_lookAt (or equivalent)
 #include <dolphin/gx.h>            // GXBegin/GXEnd/etc. -- drawHudBillboard()
+#include "m_Do/m_Do_graphic.h" // FB_WIDTH/HEIGHT for the flat-screen composition.
 #include <JSystem/J3DGraphBase/J3DSys.h> // j3dSys.setViewMtx()
 
 #include <algorithm>
@@ -633,6 +634,38 @@ inline aurora::gfx::ResolvedTargets endEye() {
     // Pass it to vr_xr_submit::submitEye() once that file is written.
 }
 
+// The screen-mode scene uses one protected 16:9 game-camera pass, then shares
+// its resolved image between the two eye billboards.
+inline uint64_t g_screenModePassId = 0;
+inline wgpu::TextureView g_screenModePassColorView;
+
+inline bool beginScreenModePass(uint32_t width, uint32_t height) {
+    AuroraGXSync();
+    aurora::gfx::set_offscreen_uses_native_logical_size(true);
+    const bool ok = aurora::gfx::create_pass(width, height);
+    assert(ok && "VR screen mode: create_pass failed");
+    if (!ok) {
+        aurora::gfx::set_offscreen_uses_native_logical_size(false);
+        return false;
+    }
+
+    g_screenModePassId = aurora::gfx::current_pass_id();
+    g_screenModePassColorView = aurora::gfx::current_pass_color_view();
+    aurora::gfx::set_protected_offscreen_pass(g_screenModePassId);
+    return true;
+}
+
+inline aurora::gfx::ResolvedTargets endScreenModePass() {
+    aurora::gfx::ResolvedTargets targets;
+    const bool ok = aurora::gfx::resolve_pass_checked(
+        {.color = true, .depth = false}, targets, g_screenModePassId, g_screenModePassColorView);
+    aurora::gfx::set_offscreen_uses_native_logical_size(false);
+    aurora::gfx::clear_protected_offscreen_pass();
+    g_screenModePassId = 0;
+    g_screenModePassColorView = nullptr;
+    return ok ? targets : aurora::gfx::ResolvedTargets{};
+}
+
 // ---------------------------------------------------------------------------
 // Single-pass stereo (VR_SINGLE_PASS_STEREO_PLAN.md, 2026-09-20)
 //
@@ -1166,6 +1199,10 @@ inline void drawHudBillboard(TGXTexObj* hudTex) {
 inline constexpr float kMenuBillboardDistanceMeters = 0.9f; // 1.2 -> 0.9, see kHudDistanceMeters
 inline constexpr float kMenuBillboardWidthMeters = 1.0f;
 
+inline constexpr float kScreenModeDistanceMeters = 4.5f;
+inline constexpr float kScreenModeWidthMeters = 5.3f;
+
+
 // Height is NOT a compile-time constant like HUD's fixed 608:448 aspect --
 // RmlUi's canvas is OS-window-sized (any aspect, can change on resize), so
 // this is computed at draw time from the real render-target dimensions
@@ -1441,6 +1478,7 @@ inline void ensureAndCopyMenuBillboardTexture() {
     }
     aurora::gfx::push_encoder_task(menu_billboard_detail::s_copyTaskId, nullptr, 0);
 }
+
 
 // ---------------------------------------------------------------------------
 // World-space aim-point marker ("physical crosshair")

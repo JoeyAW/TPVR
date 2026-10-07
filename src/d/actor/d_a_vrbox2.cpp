@@ -309,7 +309,7 @@ static int daVrbox2_color_set(vrbox2_class* i_this) {
     // the (invisible, in VR) chase camera turns. In VR use a fixed direction
     // perpendicular to the wind: steady drift at the speed flatscreen shows
     // when looking across the wind.
-    if (dusk::vr::isRenderingToHeadset()) {
+    if (dusk::vr::isImmersiveVr()) {
         cXyz windXZ(wind_vec.x, 0.0f, wind_vec.z);
         if (windXZ.abs() > 0.0001f) {
             windXZ = windXZ.normZP();

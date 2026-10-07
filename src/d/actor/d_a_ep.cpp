@@ -521,7 +521,7 @@ static void ep_move(ep_class* i_this) {
                 // disabled. Skip spawning this one specifically for VR;
                 // leave the actual fire particles (A/B above) untouched.
 #ifdef TARGET_PC
-                if (!dusk::vr::isRenderingToHeadset())
+    if (!dusk::vr::isImmersiveVr())
 #endif
                 dComIfGp_particle_setSimple(l_particle_kagerou[i_this->field_0x60c],
                     &sp1C, 0xff, g_whiteColor, g_whiteColor,

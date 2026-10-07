@@ -20,6 +20,7 @@ More on why it uses AI generated code below.
 - Physical sword swinging, shield bashing and aiming (aim with the right hand)
 - Quest 2/3 controller bindings; other headsets are untested
 - The ability to play the game in flatscreen for parts you want to skip in VR
+- Giant Screen mode: the GameCube HUD and Dusklight menus are separate OpenXR layers over the room-fixed screen, so their sharpness does not follow the game image resolution. The HUD keeps the immersive HUD's color-keyed transparency; menus keep their own alpha. When "Super Resolution (Sharpening)" is enabled on runtimes that advertise `XR_FB_composition_layer_settings` (standalone Quest), the game layer requests sharpening and the UI layers request supersampling.
 # Quest 2/3 Controller binds
 <div align="center">
 <img src="Controller binding.png" alt="Logo" width="400">

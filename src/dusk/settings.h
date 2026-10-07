@@ -302,6 +302,12 @@ struct UserSettings {
         // Read once at VR startup (sizes the swapchain), so it takes effect
         // on the next launch.
         ConfigVar<float> vrRenderScale;
+        // Display refresh rate requested on standalone Quest
+        // (XR_FB_display_refresh_rate), in Hz. The headset gets the highest
+        // rate it supports at or below this value; 72 is the runtime default.
+        // Applied live. Ignored where the runtime doesn't advertise the
+        // extension.
+        ConfigVar<int> vrDisplayRefreshRate;
         // Application SpaceWarp (XR_FB_space_warp, standalone Quest only):
         // the app submits per-eye motion vectors + depth alongside the
         // color image and the runtime synthesizes every other frame,

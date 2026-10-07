@@ -125,6 +125,13 @@ struct Bootstrap {
     // the recommended motion-vector image size) and Session's space-warp
     // path (vr_xr_submit.hpp). Never true on the D3D12/PC branch.
     bool hasSpaceWarp = false;
+    // XR_FB_display_refresh_rate (Meta standalone): enabled only if
+    // advertised. Lets vr_main.cpp request game.vrDisplayRefreshRate
+    // instead of the runtime's 72Hz default. Never true on the D3D12/PC
+    // branch.
+    bool hasDisplayRefreshRate = false;
+    PFN_xrEnumerateDisplayRefreshRatesFB xrEnumerateDisplayRefreshRatesFB_ = nullptr;
+    PFN_xrRequestDisplayRefreshRateFB xrRequestDisplayRefreshRateFB_ = nullptr;
     PFN_xrPerfSettingsSetPerformanceLevelEXT xrPerfSettingsSetPerformanceLevelEXT_ = nullptr;
 #if DUSK_VR_PLATFORM_ANDROID
     PFN_xrSetAndroidApplicationThreadKHR xrSetAndroidApplicationThreadKHR_ = nullptr;
@@ -259,6 +266,14 @@ inline Bootstrap initialize() {
     if (boot.hasSpaceWarp) {
         enabledExtensions.push_back(XR_FB_SPACE_WARP_EXTENSION_NAME);
     }
+#if DUSK_VR_PLATFORM_ANDROID
+    // Standalone only: on PC the runtime / streamer owns the refresh rate,
+    // and requesting the 72Hz default there would lower it.
+    boot.hasDisplayRefreshRate = instanceExtensionAvailable(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+    if (boot.hasDisplayRefreshRate) {
+        enabledExtensions.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+    }
+#endif
 
     XrInstanceCreateInfo instanceInfo{XR_TYPE_INSTANCE_CREATE_INFO};
 #if DUSK_VR_PLATFORM_ANDROID
@@ -324,6 +339,17 @@ inline Bootstrap initialize() {
         boot.xrSetAndroidApplicationThreadKHR_ = nullptr;
     }
 #endif
+    if (boot.hasDisplayRefreshRate &&
+        (XR_FAILED(xrGetInstanceProcAddr(
+             boot.instance, "xrEnumerateDisplayRefreshRatesFB",
+             reinterpret_cast<PFN_xrVoidFunction*>(&boot.xrEnumerateDisplayRefreshRatesFB_))) ||
+         XR_FAILED(xrGetInstanceProcAddr(
+             boot.instance, "xrRequestDisplayRefreshRateFB",
+             reinterpret_cast<PFN_xrVoidFunction*>(&boot.xrRequestDisplayRefreshRateFB_))))) {
+        boot.hasDisplayRefreshRate = false;
+        boot.xrEnumerateDisplayRefreshRatesFB_ = nullptr;
+        boot.xrRequestDisplayRefreshRateFB_ = nullptr;
+    }
 
     checkResult(
         boot.xrGetVulkanGraphicsRequirements2KHR_(boot.instance, boot.systemId,

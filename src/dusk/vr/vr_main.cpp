@@ -94,6 +94,13 @@ extern "C" bool g_duskVREyePassOpen = false;
 static uint32_t g_eyeImageWidth = 0;
 static uint32_t g_eyeImageHeight = 0;
 
+// XR_FB_display_refresh_rate entry points, copied from the Bootstrap in
+// startup() (nullptr when the runtime doesn't advertise the extension), and
+// the game.vrDisplayRefreshRate value last applied (-1 = not yet).
+static PFN_xrEnumerateDisplayRefreshRatesFB g_enumerateDisplayRefreshRates = nullptr;
+static PFN_xrRequestDisplayRefreshRateFB g_requestDisplayRefreshRate = nullptr;
+static int g_appliedDisplayRefreshRateSetting = -1;
+
 namespace dusk::vr {
 
 namespace {
@@ -884,6 +891,15 @@ bool startup() {
 #endif  // DUSK_VR_PLATFORM_ANDROID
 #endif
 
+        // 3. XR_FB_display_refresh_rate: tick() requests
+        //    game.vrDisplayRefreshRate once the session is running and
+        //    again whenever the setting changes.
+        if (boot.hasDisplayRefreshRate) {
+            g_enumerateDisplayRefreshRates = boot.xrEnumerateDisplayRefreshRatesFB_;
+            g_requestDisplayRefreshRate = boot.xrRequestDisplayRefreshRateFB_;
+            g_appliedDisplayRefreshRateSetting = -1;
+        }
+
         // FIXED this session: g_rightGripSpace/g_leftGripSpace had the exact
         // same problem as g_viewSpace did before it (see above) -- nothing
         // ever created an action set, let alone attached it or created
@@ -1450,6 +1466,43 @@ static bool spaceWarpEncodeFrame(const vr_render::StereoParams& sp, const aurora
 #endif  // DUSK_VR_XR_GRAPHICS_VULKAN
 }  // namespace
 
+// Requests the highest refresh rate the headset supports at or below
+// game.vrDisplayRefreshRate. Runs every tick but only calls into the
+// runtime when the setting changed, so changing it in the menu applies live.
+static void applyDisplayRefreshRate(XrSession session) {
+    if (g_requestDisplayRefreshRate == nullptr) {
+        return;
+    }
+    const int wanted = dusk::getSettings().game.vrDisplayRefreshRate.getValue();
+    if (wanted == g_appliedDisplayRefreshRateSetting) {
+        return;
+    }
+    g_appliedDisplayRefreshRateSetting = wanted;
+
+    uint32_t count = 0;
+    if (XR_FAILED(g_enumerateDisplayRefreshRates(session, 0, &count, nullptr)) || count == 0) {
+        return;
+    }
+    std::vector<float> rates(count);
+    if (XR_FAILED(g_enumerateDisplayRefreshRates(session, count, &count, rates.data()))) {
+        return;
+    }
+    float best = 0.f;
+    for (const float rate : rates) {
+        if (rate <= static_cast<float>(wanted) + 0.5f && rate > best) {
+            best = rate;
+        }
+    }
+    if (best == 0.f) {
+        return;
+    }
+    const XrResult res = g_requestDisplayRefreshRate(session, best);
+    char msg[128];
+    std::snprintf(msg, sizeof(msg), "[dusk::vr] display refresh rate: setting %d Hz -> requested %.0f Hz res=%d\n",
+                  wanted, best, static_cast<int>(res));
+    duskVrLog(msg);
+}
+
 void tick(const dusk::game_clock::FrameTiming& pacing) {
     g_perfTickStart = PerfClock::now();
     g_perfAfterAcquire = g_perfTickStart;
@@ -1572,6 +1625,9 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
                         XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
                     g_sessionRunning =
                         XR_SUCCEEDED(xrBeginSession(g_session->session(), &resumeInfo));
+                    // The runtime may drop the requested rate across a
+                    // stop/start; ask again on the next tick.
+                    g_appliedDisplayRefreshRateSetting = -1;
                 }
             } else if (stateEvent.state == XR_SESSION_STATE_EXITING ||
                        stateEvent.state == XR_SESSION_STATE_LOSS_PENDING) {
@@ -1598,6 +1654,8 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         logTickReasonOnChange("session-not-running");
         return;
     }
+
+    applyDisplayRefreshRate(g_session->session());
 
     // --- wait for the runtime to tell us the predicted display time for this frame ---
     XrFrameWaitInfo waitInfo{XR_TYPE_FRAME_WAIT_INFO};

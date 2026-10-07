@@ -1172,6 +1172,16 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
             "more GPU headroom on the standalone headset -- 90% cuts the pixel count "
             "by a fifth. Takes effect the next time the game starts.",
             50, 100, 5);
+#if VR_SETTINGS_STANDALONE
+        config_int_select(leftPane, rightPane, getSettings().game.vrDisplayRefreshRate,
+            "VR Refresh Rate",
+            "The headset's display refresh rate. The headset uses the highest rate it "
+            "supports at or below this value (72, 80 or 90 Hz; 120 Hz only if it is enabled "
+            "in the headset's own display settings). Higher rates look smoother but every "
+            "frame must render faster; if the game can't keep up the picture judders, so "
+            "only raise it if your area runs steadily. Applies immediately.",
+            72, 120, 2, {}, {}, " Hz");
+#endif
 
 #if !VR_SETTINGS_STANDALONE
         // Standalone renders through the native Quest runtime -- no SteamVR / Virtual Desktop /

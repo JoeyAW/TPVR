@@ -1053,7 +1053,7 @@ void dKyw_wether_draw() {
     // IndScreen.
 #ifdef TARGET_PC
     if (strcmp(dComIfGp_getStartStageName(), "Name") && g_env_light.mSunInitialized &&
-        !dusk::vr::isRenderingToHeadset()) {
+        !dusk::vr::isImmersiveVr()) {
 #else
     if (strcmp(dComIfGp_getStartStageName(), "Name") && g_env_light.mSunInitialized) {
 #endif

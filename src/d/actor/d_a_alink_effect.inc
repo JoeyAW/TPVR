@@ -2283,7 +2283,7 @@ void daAlink_sight_c::draw() {
     // see vr-mod-notes) and would otherwise still show up center-screen in
     // the head-locked HUD billboard regardless of where the player is
     // actually looking. Flatscreen (non-VR) play is unaffected.
-    if (dusk::vr::isRenderingToHeadset()) {
+    if (dusk::vr::isImmersiveVr()) {
         return;
     }
 

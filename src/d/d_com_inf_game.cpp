@@ -21,6 +21,7 @@
 #include "f_op/f_op_scene_mng.h"
 #include "m_Do/m_Do_Reset.h"
 #include "m_Do/m_Do_controller_pad.h"
+#include "dusk/vr/vr_main.hpp"
 #include "m_Do/m_Do_graphic.h"
 #include <cstdio>
 #include <cstring>
@@ -3041,11 +3042,8 @@ DUSK_GAME_DATA GXColor g_saftyWhiteColor = {160, 160, 160, 255};
 // RenderDoc that skipping this draw entirely (via the existing, previously
 // player-facing-only "Disable Water Refraction" ImGui toggle) leaves the
 // clean underlying water/lakebed visible instead. Baking that in
-// permanently for VR, rather than requiring the manual toggle every
-// session -- see g_duskVRRenderingToHeadset's other call sites (e.g.
-// d_drawlist.cpp's shadow guard) for the same extern-bool pattern used to
-// avoid pulling VR headers into this file.
-extern "C" bool g_duskVRRenderingToHeadset;
+// disabled during immersive VR instead of requiring a manual toggle every
+// session.
 
 dSv_info_c* dComIfGs_getSaveInfo() {
     return &g_dComIfG_gameInfo.info;
@@ -6369,7 +6367,7 @@ view_class* dComIfGd_getView() {
 void dComIfGd_getReflectionFovAspect(f32* o_fovy, f32* o_aspect) {
     *o_fovy = dComIfGd_getView()->fovy;
     *o_aspect = dComIfGd_getView()->aspect;
-    if (dusk::vr::isRenderingToHeadset()) {
+    if (dusk::vr::isImmersiveVr()) {
         dusk::vr::getEyeSymmetricFov(o_fovy, o_aspect);
     }
 }
@@ -6664,14 +6662,14 @@ void dComIfGd_setListCursor() {
 
 void dComIfGd_drawXluListInvisible() {
     ZoneScoped;
-    if (!dusk::getSettings().game.disableWaterRefraction && !g_duskVRRenderingToHeadset) {
+    if (!dusk::getSettings().game.disableWaterRefraction && !dusk::vr::isImmersiveVr()) {
         g_dComIfG_gameInfo.drawlist.drawXluListInvisible();
     }
 }
 
 void dComIfGd_drawOpaListInvisible() {
     ZoneScoped;
-    if (!dusk::getSettings().game.disableWaterRefraction && !g_duskVRRenderingToHeadset) {
+    if (!dusk::getSettings().game.disableWaterRefraction && !dusk::vr::isImmersiveVr()) {
         g_dComIfG_gameInfo.drawlist.drawOpaListInvisible();
     }
 }

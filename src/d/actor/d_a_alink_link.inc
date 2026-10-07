@@ -129,7 +129,7 @@ BOOL daAlink_c::setBodyAngleToCamera() {
         // gyro/touch branches below already apply, kept for consistency
         // even though an absolute controller-driven pitch is less likely
         // to need it in practice.
-        if (dusk::vr::isRenderingToHeadset()) {
+    if (dusk::vr::isImmersiveVr()) {
             s16 aimYawS, aimPitchS;
             // "Third Person" VR setting (2026-08-19 follow-up, explicit
             // user request: "tie the reticle aim location to the hmd
@@ -180,7 +180,7 @@ BOOL daAlink_c::setBodyAngleToCamera() {
         // Guarded off in VR -- see the isRenderingToHeadset() branch above,
         // which fully replaces stick/gyro/mouse/touch aim rather than
         // layering on top of them.
-        if (!dusk::vr::isRenderingToHeadset() &&
+    if (!dusk::vr::isImmersiveVr() &&
             (dusk::getSettings().game.enableGyroAim ||
              dusk::getSettings().game.enableMouseAim) &&
              checkAimInputContext())
@@ -215,7 +215,7 @@ BOOL daAlink_c::setBodyAngleToCamera() {
             }
         }
 
-        if (!dusk::vr::isRenderingToHeadset() &&
+    if (!dusk::vr::isImmersiveVr() &&
             dusk::getSettings().game.enableTouchControls && checkAimInputContext()) {
             f32 touchYawDp = 0.0f;
             f32 touchPitchDp = 0.0f;
@@ -464,7 +464,7 @@ MtxP daAlink_c::getLeftItemMatrix() {
     // is gated on first-person specifically. Static storage: the caller
     // expects a stable MtxP (pointer into a persistent buffer), same
     // contract mpLinkModel->getAnmMtx() itself provides.
-    if (dusk::vr::isRenderingToHeadset()) {
+    if (dusk::vr::isImmersiveVr()) {
         static Mtx s_vrTrackedLeftItemMtx;
         if (dusk::vr::getTrackedItemJointMtx(true, s_vrTrackedLeftItemMtx)) {
             return s_vrTrackedLeftItemMtx;
@@ -499,7 +499,7 @@ void daAlink_c::onSceneChangeArea(u8 i_exitID, u8 i_exitDirection, fopAc_ac_c* i
 MtxP daAlink_c::getRightItemMatrix() {
 #if TARGET_PC
     // See getLeftItemMatrix()'s comment above -- same reasoning, mirrored.
-    if (dusk::vr::isRenderingToHeadset()) {
+    if (dusk::vr::isImmersiveVr()) {
         static Mtx s_vrTrackedRightItemMtx;
         if (dusk::vr::getTrackedItemJointMtx(false, s_vrTrackedRightItemMtx)) {
             return s_vrTrackedRightItemMtx;

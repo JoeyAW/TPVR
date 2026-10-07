@@ -78,6 +78,7 @@ wgpu::Texture ensure_external_copy_texture(const void* dest, uint32_t width, uin
 #include "m_Do/m_Do_mtx.h"         // mDoMtx_multVec() -- drawAimCrosshair()
 #include <dolphin/mtx.h>           // C_MTXPerspective, mDoMtx_lookAt (or equivalent)
 #include <dolphin/gx.h>            // GXBegin/GXEnd/etc. -- drawHudBillboard()
+#include "m_Do/m_Do_graphic.h" // FB_WIDTH/HEIGHT for the flat-screen composition.
 #include <JSystem/J3DGraphBase/J3DSys.h> // j3dSys.setViewMtx()
 
 #include <algorithm>
@@ -633,6 +634,38 @@ inline aurora::gfx::ResolvedTargets endEye() {
     // Pass it to vr_xr_submit::submitEye() once that file is written.
 }
 
+// The screen-mode scene uses one protected 16:9 game-camera pass, then shares
+// its resolved image between the two eye billboards.
+inline uint64_t g_screenModePassId = 0;
+inline wgpu::TextureView g_screenModePassColorView;
+
+inline bool beginScreenModePass(uint32_t width, uint32_t height) {
+    AuroraGXSync();
+    aurora::gfx::set_offscreen_uses_native_logical_size(true);
+    const bool ok = aurora::gfx::create_pass(width, height);
+    assert(ok && "VR screen mode: create_pass failed");
+    if (!ok) {
+        aurora::gfx::set_offscreen_uses_native_logical_size(false);
+        return false;
+    }
+
+    g_screenModePassId = aurora::gfx::current_pass_id();
+    g_screenModePassColorView = aurora::gfx::current_pass_color_view();
+    aurora::gfx::set_protected_offscreen_pass(g_screenModePassId);
+    return true;
+}
+
+inline aurora::gfx::ResolvedTargets endScreenModePass() {
+    aurora::gfx::ResolvedTargets targets;
+    const bool ok = aurora::gfx::resolve_pass_checked(
+        {.color = true, .depth = false}, targets, g_screenModePassId, g_screenModePassColorView);
+    aurora::gfx::set_offscreen_uses_native_logical_size(false);
+    aurora::gfx::clear_protected_offscreen_pass();
+    g_screenModePassId = 0;
+    g_screenModePassColorView = nullptr;
+    return ok ? targets : aurora::gfx::ResolvedTargets{};
+}
+
 // ---------------------------------------------------------------------------
 // Single-pass stereo (VR_SINGLE_PASS_STEREO_PLAN.md, 2026-09-20)
 //
@@ -1166,6 +1199,10 @@ inline void drawHudBillboard(TGXTexObj* hudTex) {
 inline constexpr float kMenuBillboardDistanceMeters = 0.9f; // 1.2 -> 0.9, see kHudDistanceMeters
 inline constexpr float kMenuBillboardWidthMeters = 1.0f;
 
+inline constexpr float kScreenModeDistanceMeters = 4.5f;
+inline constexpr float kScreenModeWidthMeters = 5.3f;
+
+
 // Height is NOT a compile-time constant like HUD's fixed 608:448 aspect --
 // RmlUi's canvas is OS-window-sized (any aspect, can change on resize), so
 // this is computed at draw time from the real render-target dimensions
@@ -1195,6 +1232,12 @@ inline u8 g_menuBillboardTexKey[4]{};
 inline TGXTexObj g_menuBillboardTexObj{};
 inline uint32_t g_menuBillboardTexWidth = 0;
 inline uint32_t g_menuBillboardTexHeight = 0;
+
+inline u8 g_screenModeTexKey[2][4]{};
+inline TGXTexObj g_screenModeTexObj[2]{};
+inline wgpu::Texture g_screenModeCopyTexture[2];
+inline uint32_t g_screenModeTexWidth = 0;
+inline uint32_t g_screenModeTexHeight = 0;
 
 // Solid opaque backdrop drawn directly behind the menu billboard --
 // 2026-08-20 follow-up ("darken the background... so it is readable"),
@@ -1440,6 +1483,155 @@ inline void ensureAndCopyMenuBillboardTexture() {
         menu_billboard_detail::s_copyTaskId = aurora::gfx::register_encoder_task_type(desc);
     }
     aurora::gfx::push_encoder_task(menu_billboard_detail::s_copyTaskId, nullptr, 0);
+}
+
+namespace screen_mode_detail {
+inline wgpu::Texture s_pendingCopySrc;
+inline wgpu::Texture s_pendingCopyDst;
+inline uint32_t s_pendingCopyWidth = 0;
+inline uint32_t s_pendingCopyHeight = 0;
+inline aurora::gfx::EncoderTaskId s_copyTaskId = aurora::gfx::InvalidEncoderTask;
+
+inline void copyEncoderTaskCallback(const aurora::gfx::EncoderTaskContext& /*ctx*/,
+                                     const wgpu::CommandEncoder& cmd, const void* /*payload*/,
+                                     size_t /*payloadSize*/, void* /*userdata*/) {
+    if (!s_pendingCopySrc || !s_pendingCopyDst) {
+        return;
+    }
+    wgpu::CommandEncoder mutableCmd = cmd;
+
+    wgpu::TexelCopyTextureInfo srcCopy{};
+    srcCopy.texture = s_pendingCopySrc;
+    srcCopy.aspect = wgpu::TextureAspect::All;
+
+    wgpu::TexelCopyTextureInfo dstCopy{};
+    dstCopy.texture = s_pendingCopyDst;
+    dstCopy.aspect = wgpu::TextureAspect::All;
+
+    wgpu::Extent3D extent{s_pendingCopyWidth, s_pendingCopyHeight, 1};
+    mutableCmd.CopyTextureToTexture(&srcCopy, &dstCopy, &extent);
+}
+} // namespace screen_mode_detail
+
+inline bool copyScreenModeTexture(const aurora::gfx::ResolvedTargets& targets, uint32_t width,
+                                  uint32_t height, int eye = 0) {
+    if (!targets.colorTexture || width == 0 || height == 0) {
+        return false;
+    }
+    const int slot = (eye == 1) ? 1 : 0;
+
+    if (!g_screenModeCopyTexture[slot] || g_screenModeTexWidth != width || g_screenModeTexHeight != height) {
+        AuroraGXSync();
+        g_screenModeCopyTexture[slot] =
+            aurora::gx::ensure_external_copy_texture(g_screenModeTexKey[slot], width, height, GX_TF_RGBA8);
+        if (!g_screenModeCopyTexture[slot]) {
+            return false;
+        }
+        GXInitTexObj(&g_screenModeTexObj[slot], g_screenModeTexKey[slot], width, height, GX_TF_RGBA8,
+                     GX_CLAMP, GX_CLAMP, GX_FALSE);
+        g_screenModeTexWidth = width;
+        g_screenModeTexHeight = height;
+    }
+
+    screen_mode_detail::s_pendingCopySrc = targets.colorTexture;
+    screen_mode_detail::s_pendingCopyDst = g_screenModeCopyTexture[slot];
+    screen_mode_detail::s_pendingCopyWidth = width;
+    screen_mode_detail::s_pendingCopyHeight = height;
+    if (screen_mode_detail::s_copyTaskId == aurora::gfx::InvalidEncoderTask) {
+        aurora::gfx::EncoderTaskDescriptor desc{
+            .label = "vr_screen_mode_copy",
+            .callback = &screen_mode_detail::copyEncoderTaskCallback,
+            .userdata = nullptr,
+        };
+        screen_mode_detail::s_copyTaskId = aurora::gfx::register_encoder_task_type(desc);
+    }
+    aurora::gfx::push_encoder_task(screen_mode_detail::s_copyTaskId, nullptr, 0);
+    return true;
+}
+
+inline void drawScreenModeBillboard(int eye = 0) {
+    if (g_screenModeTexWidth == 0 || g_screenModeTexHeight == 0) {
+        return;
+    }
+    const int slot = (eye == 1 && g_screenModeCopyTexture[1]) ? 1 : 0;
+    TGXTexObj* activeTex = &g_screenModeTexObj[slot];
+
+    view_class* view = dComIfGd_getView();
+    assert(view != nullptr && "VR screen mode: no active view_class");
+    GXSetProjection(view->projMtx, GX_PERSPECTIVE);
+    GXLoadPosMtxImm(cMtx_getIdentity(), GX_PNMTX0);
+    GXSetCurrentMtx(GX_PNMTX0);
+    GXClearVtxDesc();
+    GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
+    GXSetVtxDesc(GX_VA_TEX0, GX_DIRECT);
+    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
+    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
+    GXSetNumChans(0);
+    GXSetNumTexGens(1);
+    GXSetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, 0x3C);
+    GXSetNumTevStages(1);
+    GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR_NULL);
+    GXSetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_TEXC);
+    GXSetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+    GXSetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_TEXA);
+    GXSetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+    GXSetBlendMode(GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_SET);
+    GXSetZMode(GX_DISABLE, GX_ALWAYS, GX_DISABLE);
+    GXSetCullMode(GX_CULL_NONE);
+    GXSetAlphaCompare(GX_ALWAYS, 0, GX_AOP_OR, GX_ALWAYS, 0);
+    GXLoadTexObj(activeTex, GX_TEXMAP0);
+
+    const float halfW = kScreenModeWidthMeters * 0.5f * kHudUnitsPerMetre;
+    const float halfH = halfW * (9.0f / 16.0f);
+    const HudQuadCorners c = computeBillboardPose(
+        g_hudSmoothedWorldForward, kScreenModeDistanceMeters * kHudUnitsPerMetre, halfW, halfH);
+    GXBegin(GX_QUADS, GX_VTXFMT0, 4);
+    GXPosition3f32(c.x[0], c.y[0], c.z[0]); GXTexCoord2f32(0.0f, 0.0f);
+    GXPosition3f32(c.x[1], c.y[1], c.z[1]); GXTexCoord2f32(1.0f, 0.0f);
+    GXPosition3f32(c.x[2], c.y[2], c.z[2]); GXTexCoord2f32(1.0f, 1.0f);
+    GXPosition3f32(c.x[3], c.y[3], c.z[3]); GXTexCoord2f32(0.0f, 1.0f);
+    GXEnd();
+}
+
+inline void drawMenuScreenOverlay() {
+    if (g_menuBillboardTexWidth == 0 || g_menuBillboardTexHeight == 0) {
+        return;
+    }
+
+    Mtx44 projection;
+    C_MTXOrtho(projection, 0.0f, static_cast<float>(FB_HEIGHT), 0.0f,
+               static_cast<float>(FB_WIDTH), 0.0f, -1.0f);
+    GXSetProjection(projection, GX_ORTHOGRAPHIC);
+    GXLoadPosMtxImm(cMtx_getIdentity(), GX_PNMTX0);
+    GXSetCurrentMtx(GX_PNMTX0);
+    GXSetViewport(0.0f, 0.0f, FB_WIDTH, FB_HEIGHT, 0.0f, 1.0f);
+    GXSetScissor(0, 0, FB_WIDTH, FB_HEIGHT);
+    GXClearVtxDesc();
+    GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
+    GXSetVtxDesc(GX_VA_TEX0, GX_DIRECT);
+    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
+    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
+    GXSetNumChans(0);
+    GXSetNumTexGens(1);
+    GXSetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, 0x3C);
+    GXSetNumTevStages(1);
+    GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR_NULL);
+    GXSetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_TEXC);
+    GXSetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+    GXSetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_TEXA);
+    GXSetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+    GXSetBlendMode(GX_BM_BLEND, GX_BL_ONE, GX_BL_INVSRCALPHA, GX_LO_SET);
+    GXSetZMode(GX_DISABLE, GX_ALWAYS, GX_DISABLE);
+    GXSetCullMode(GX_CULL_NONE);
+    GXSetAlphaCompare(GX_ALWAYS, 0, GX_AOP_OR, GX_ALWAYS, 0);
+    GXLoadTexObj(&g_menuBillboardTexObj, GX_TEXMAP0);
+    GXBegin(GX_QUADS, GX_VTXFMT0, 4);
+    GXPosition3f32(0.0f, 0.0f, 0.0f); GXTexCoord2f32(0.0f, 0.0f);
+    GXPosition3f32(static_cast<float>(FB_WIDTH), 0.0f, 0.0f); GXTexCoord2f32(1.0f, 0.0f);
+    GXPosition3f32(static_cast<float>(FB_WIDTH), static_cast<float>(FB_HEIGHT), 0.0f);
+    GXTexCoord2f32(1.0f, 1.0f);
+    GXPosition3f32(0.0f, static_cast<float>(FB_HEIGHT), 0.0f); GXTexCoord2f32(0.0f, 1.0f);
+    GXEnd();
 }
 
 // ---------------------------------------------------------------------------

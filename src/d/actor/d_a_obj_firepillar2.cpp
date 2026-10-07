@@ -24,7 +24,7 @@
 // in VR; flatscreen spawns everything, as the base game does.
 static bool fpillar2_skipParticle(u16 id) {
 #ifdef TARGET_PC
-    return dusk::vr::isRenderingToHeadset() && dPa_control_c::checkResUsesTexture(id, "dummy");
+    return dusk::vr::isImmersiveVr() && dPa_control_c::checkResUsesTexture(id, "dummy");
 #else
     return false;
 #endif

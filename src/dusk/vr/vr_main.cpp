@@ -368,6 +368,7 @@ XrAction g_menuClickAction = XR_NULL_HANDLE;
 // PAD_BUTTON_START in tick() below -- see vr_xr_bootstrap.hpp's
 // HandActions::stickClickAction.
 XrAction g_stickClickAction = XR_NULL_HANDLE;
+XrAction g_hapticAction = XR_NULL_HANDLE;
 XrPath g_leftHandPath = XR_NULL_PATH;
 XrPath g_rightHandPath = XR_NULL_PATH;
 
@@ -905,6 +906,7 @@ bool startup() {
         g_secondaryClickAction = handActions.secondaryClickAction;
         g_menuClickAction = handActions.menuClickAction;
         g_stickClickAction = handActions.stickClickAction;
+        g_hapticAction = handActions.hapticAction;
         g_leftHandPath = handActions.leftHandPath;
         g_rightHandPath = handActions.rightHandPath;
 
@@ -2637,6 +2639,32 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         PADSetVirtualStatus(kVrPadPort, &padStatus);
     } else {
         PADClearVirtualStatus(kVrPadPort);
+    }
+
+    // Game rumble (port 0 motor, toggled per game frame by rumble patterns)
+    // -> both Touch controllers. Each pulse lasts about one refresh and is
+    // renewed while the motor stays on, so pattern gaps still read as gaps.
+    {
+        static bool s_hapticOn = false;
+        const bool on = JUTGamePad::CRumble::mStatus[kVrPadPort] != 0;
+        if (on || s_hapticOn) {
+            for (const XrPath hand : {g_leftHandPath, g_rightHandPath}) {
+                XrHapticActionInfo info{XR_TYPE_HAPTIC_ACTION_INFO};
+                info.action = g_hapticAction;
+                info.subactionPath = hand;
+                if (on) {
+                    XrHapticVibration vib{XR_TYPE_HAPTIC_VIBRATION};
+                    vib.duration = 25'000'000;  // ns
+                    vib.frequency = XR_FREQUENCY_UNSPECIFIED;
+                    vib.amplitude = 0.6f;
+                    xrApplyHapticFeedback(g_session->session(), &info,
+                                          reinterpret_cast<const XrHapticBaseHeader*>(&vib));
+                } else {
+                    xrStopHapticFeedback(g_session->session(), &info);
+                }
+            }
+        }
+        s_hapticOn = on;
     }
 
     // --- Link head hide + hand matrix mapping ---

@@ -99,6 +99,13 @@ void mDoCPd_c::read() {
     }
 #endif
     JUTGamePad::read();
+#if TARGET_PC
+    // VR routes port-0 rumble to the Touch controllers (vr_main.cpp), so the
+    // game's vibration option and motor calls must see port 0 as capable.
+    if (g_duskVRSessionActive) {
+        JUTGamePad::sRumbleSupported |= PAD_CHAN0_BIT;
+    }
+#endif
 
     if (!mDoRst::isReset() && mDoRst::is3ButtonReset()) {
         if (!JUTGamePad::getGamePad(mDoRst::get3ButtonResetPort())->isPushing3ButtonReset()) {

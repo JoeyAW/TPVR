@@ -817,6 +817,9 @@ struct HandActions {
     // click -> pause, left click -> D-pad right (added same day, see
     // vr_main.cpp's tick()).
     XrAction stickClickAction = XR_NULL_HANDLE;     // BOOL: thumbstick click, both hands
+    // Touch controller vibration, both hands; driven from the game's rumble
+    // motor state (JUTGamePad::CRumble::mStatus) in vr_main.cpp's tick().
+    XrAction hapticAction = XR_NULL_HANDLE;         // VIBRATION_OUTPUT, both hands
 
     XrPath leftHandPath = XR_NULL_PATH;
     XrPath rightHandPath = XR_NULL_PATH;
@@ -889,6 +892,7 @@ inline HandActions createHandActionSet(XrInstance instance) {
     createAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "secondary_click", "Secondary Button", &actions.secondaryClickAction);
     createAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "menu_click", "Menu", &actions.menuClickAction);
     createAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "stick_click", "Stick Click", &actions.stickClickAction);
+    createAction(XR_ACTION_TYPE_VIBRATION_OUTPUT, "haptic", "Rumble", &actions.hapticAction);
 
     XrPath leftBindingPath = XR_NULL_PATH;
     XrPath rightBindingPath = XR_NULL_PATH;
@@ -957,6 +961,9 @@ inline HandActions createHandActionSet(XrInstance instance) {
     xrStringToPath(instance, "/user/hand/left/input/menu/click", &leftMenuClickPath);
     xrStringToPath(instance, "/user/hand/right/input/thumbstick/click", &rightStickClickPath);
     xrStringToPath(instance, "/user/hand/left/input/thumbstick/click", &leftStickClickPath);
+    XrPath leftHapticPath = XR_NULL_PATH, rightHapticPath = XR_NULL_PATH;
+    xrStringToPath(instance, "/user/hand/left/output/haptic", &leftHapticPath);
+    xrStringToPath(instance, "/user/hand/right/output/haptic", &rightHapticPath);
 
     XrActionSuggestedBinding touchBindings[] = {
         {actions.gripPoseAction, leftBindingPath},
@@ -976,8 +983,11 @@ inline HandActions createHandActionSet(XrInstance instance) {
         {actions.menuClickAction, leftMenuClickPath},
         {actions.stickClickAction, rightStickClickPath},
         {actions.stickClickAction, leftStickClickPath},
+        {actions.hapticAction, leftHapticPath},
+        {actions.hapticAction, rightHapticPath},
     };
-    suggestForProfile("/interaction_profiles/oculus/touch_controller", touchBindings, 17);
+    suggestForProfile("/interaction_profiles/oculus/touch_controller", touchBindings,
+                      static_cast<uint32_t>(std::size(touchBindings)));
 
     return actions;
 }

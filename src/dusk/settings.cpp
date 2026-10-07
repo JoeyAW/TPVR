@@ -254,7 +254,8 @@ UserSettings g_userSettings = {
         .showInputViewerGyro {"game.showInputViewerGyro", false},
         .enableMoveLinkCombo {"game.enableMoveLinkCombo", false},
         .enableTeleportCombo {"game.enableTeleportCombo", false},
-        .lastSelectedGameModeId {"game.lastSelectedGameModeId", gamemode::kVanillaGameModeId}
+        .lastSelectedGameModeId {"game.lastSelectedGameModeId", gamemode::kVanillaGameModeId},
+        .fileCacheMB {"game.fileCacheMB", 0}
     },
 
     .backend = {
@@ -475,6 +476,7 @@ void registerSettings() {
     Register(g_userSettings.game.enableMoveLinkCombo);
     Register(g_userSettings.game.enableTeleportCombo);
     Register(g_userSettings.game.lastSelectedGameModeId);
+        Register(g_userSettings.game.fileCacheMB);
     Register(g_userSettings.game.fastSpinner);
     Register(g_userSettings.game.infiniteHearts);
     Register(g_userSettings.game.infiniteArrows);

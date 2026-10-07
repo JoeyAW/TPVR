@@ -1172,6 +1172,16 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
             "more GPU headroom on the standalone headset -- 90% cuts the pixel count "
             "by a fifth. Takes effect the next time the game starts.",
             50, 100, 5);
+        
+#if VR_SETTINGS_STANDALONE
+        config_int_select(leftPane, rightPane, getSettings().game.fileCacheMB,
+            "DVD File Cache",
+            "Keeps whole files read from the game disc in RAM so repeat loads can avoid DVD "
+            "I/O. The 256 MiB cap is about 4% of Quest 2's 6 GB total RAM; 0 disables it. "
+            "It is off by default because its memory and load-time effects have not been "
+            "measured on a headset.",
+            0, 256, 16, {}, {}, " MB");
+#endif
 
 #if !VR_SETTINGS_STANDALONE
         // Standalone renders through the native Quest runtime -- no SteamVR / Virtual Desktop /

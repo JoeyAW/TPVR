@@ -29,6 +29,7 @@ public:
     u32 getFileID() const { return mFileInfo.startAddr; }
     DVDFileInfo* getFileInfo() { return &mFileInfo; }
     int getStatus() const { return DVDGetCommandBlockStatus(&mFileInfo.cb); }
+    s32 getEntryNumber() const { return mEntryNumber; }
 
 public:
     /* vt[03] */ virtual bool open(const char*);               /* override */
@@ -55,6 +56,7 @@ public:
     /* 0xE0 */ OSMessage mMessage2;
     /* 0xE4 */ JSULink<JKRDvdFile> mDvdLink;
     /* 0xF4 */ OSThread* mOSThread;
+    /* 0xF8 */ s32 mEntryNumber;
 
 public:
     static void doneProcess(s32, DVDFileInfo*);

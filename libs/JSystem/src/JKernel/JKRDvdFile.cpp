@@ -1,6 +1,7 @@
 #include "JSystem/JSystem.h" // IWYU pragma: keep
 
 #include "JSystem/JKernel/JKRDvdFile.h"
+#include "dusk/file_cache.hpp"
 #include "JSystem/JUtility/JUTAssert.h"
 #include "JSystem/JUtility/JUTException.h"
 #include <stdint.h>
@@ -43,13 +44,16 @@ void JKRDvdFile::initiate(void) {
     OSInitMessageQueue(&mMessageQueue1, &mMessage1, 1);
     mOSThread = NULL;
     field_0x50 = 0;
+    mEntryNumber = -1;
     field_0x58 = 0;
 }
 
 bool JKRDvdFile::open(const char* name) {
     if (!mIsAvailable) {
-        mIsAvailable = DVDOpen(name, &mFileInfo);
+        const s32 entryNumber = DVDConvertPathToEntrynum(name);
+        mIsAvailable = entryNumber >= 0 && DVDFastOpen(entryNumber, &mFileInfo);
         if (mIsAvailable) {
+            mEntryNumber = entryNumber;
             sDvdList.append(&mDvdLink);
             getStatus();
         }
@@ -61,6 +65,7 @@ bool JKRDvdFile::open(s32 entryNum) {
     if (!mIsAvailable) {
         mIsAvailable = DVDFastOpen(entryNum, &mFileInfo);
         if (mIsAvailable) {
+            mEntryNumber = entryNum;
             sDvdList.append(&mDvdLink);
             getStatus();
         }
@@ -72,6 +77,7 @@ void JKRDvdFile::close() {
     if (mIsAvailable) {
         if (DVDClose(&mFileInfo) != 0) {
             mIsAvailable = false;
+            mEntryNumber = -1;
             sDvdList.remove(&mDvdLink);
         } else {
             JUTException::panic(__FILE__, 213, "cannot close DVD file\n");
@@ -96,13 +102,19 @@ s32 JKRDvdFile::readData(void* param_1, s32 length, s32 param_3) {
     mOSThread = OSGetCurrentThread();
 
     s32 result = -1;
+    if (dusk::file_cache::try_read(this, param_1, length, param_3, result)) {
+        mOSThread = NULL;
+        OSUnlockMutex(&mMutex1);
+        return result;
+    }
     if (DVDReadAsyncPrio(&mFileInfo, param_1, length, param_3, JKRDvdFile::doneProcess, 2)) {
         result = sync();
+        if (result >= 0) {
+            dusk::file_cache::record_read(this, param_1, length, param_3, result);
+        }
     }
-
     mOSThread = NULL;
     OSUnlockMutex(&mMutex1);
-
     return result;
 }
 

@@ -6,6 +6,7 @@
 
 #include "JSystem/JKernel/JKRDvdRipper.h"
 #include "JSystem/JKernel/JKRDvdFile.h"
+#include "dusk/file_cache.hpp"
 #include "JSystem/JKernel/JKRDecomp.h"
 #include "JSystem/JUtility/JUTException.h"
 #include <cstring>
@@ -63,7 +64,7 @@ void* JKRDvdRipper::loadToMainRAM(JKRDvdFile* dvdFile, u8* dst, JKRExpandSwitch 
         u8 *bufPtr = (u8 *)ALIGN_NEXT((uintptr_t)buffer, 32);
         while (true)
         {
-            int readBytes = DVDReadPrio(dvdFile->getFileInfo(), bufPtr, 0x20, 0, 2);
+            int readBytes = dusk::file_cache::read_prio(dvdFile, bufPtr, 0x20, 0, 2);
             if (readBytes >= 0)
                 break;
 
@@ -121,6 +122,8 @@ void* JKRDvdRipper::loadToMainRAM(JKRDvdFile* dvdFile, u8* dst, JKRExpandSwitch 
         if (dst == NULL)
             return NULL;
     }
+    dusk::file_cache::Capture cacheCapture(
+        dvdFile, offset == 0 && (dstLength == 0 || dstLength >= static_cast<u32>(fileSizeAligned)));
     if (compression == COMPRESSION_NONE)
     {
         JKRCompression compression2 = COMPRESSION_NONE; // maybe for a sub archive?
@@ -131,7 +134,7 @@ void* JKRDvdRipper::loadToMainRAM(JKRDvdFile* dvdFile, u8* dst, JKRExpandSwitch 
             u8 *bufPtr = (u8 *)ALIGN_NEXT((uintptr_t)buffer, 32);
             while (true)
             {
-                int readBytes = DVDReadPrio(dvdFile->getFileInfo(), bufPtr, 32, (s32)offset, 2);
+                int readBytes = dusk::file_cache::read_prio(dvdFile, bufPtr, 32, (s32)offset, 2);
                 if (readBytes >= 0)
                     break;
 
@@ -156,7 +159,7 @@ void* JKRDvdRipper::loadToMainRAM(JKRDvdFile* dvdFile, u8* dst, JKRExpandSwitch 
                 size = dstLength; // probably a ternary
             while (true)
             {
-                int readBytes = DVDReadPrio(dvdFile->getFileInfo(), dst, size, (s32)offset, 2);
+                int readBytes = dusk::file_cache::read_prio(dvdFile, dst, size, (s32)offset, 2);
                 if (readBytes >= 0)
                     break;
 
@@ -192,7 +195,7 @@ void* JKRDvdRipper::loadToMainRAM(JKRDvdFile* dvdFile, u8* dst, JKRExpandSwitch 
         }
         while (true)
         {
-            int readBytes = DVDReadPrio(dvdFile->getFileInfo(), mem, fileSizeAligned, 0, 2);
+            int readBytes = dusk::file_cache::read_prio(dvdFile, mem, fileSizeAligned, 0, 2);
             if (readBytes >= 0)
                 break;
 
@@ -453,7 +456,7 @@ static u8* firstSrcData() {
     u32 length = transLeft < bufSize ? transLeft : bufSize;
 
     while (true) {
-        int result = DVDReadPrio(srcFile->getFileInfo(), buffer, length, srcOffset, 2);
+        int result = dusk::file_cache::read_prio(srcFile, buffer, length, srcOffset, 2);
         if (result >= 0) {
             break;
         }
@@ -488,7 +491,7 @@ static u8* nextSrcData(u8* src) {
 
     while (true)
     {
-        s32 result = DVDReadPrio(srcFile->getFileInfo(), (dest + limit), transSize, srcOffset, 2);
+        s32 result = dusk::file_cache::read_prio(srcFile, (dest + limit), transSize, srcOffset, 2);
         if (result >= 0)
             break;
         // bug: supposed to call isErrorRetry, but didn't

@@ -1433,6 +1433,8 @@ set(DUSK_FILES
         src/dusk/discord_presence.cpp
         src/dusk/dvd_asset.cpp
         src/dusk/dvd_asset.hpp
+        src/dusk/file_cache.cpp
+        src/dusk/file_cache.hpp
         src/dusk/extras.c
         src/dusk/commands.cpp
         src/dusk/commands.hpp

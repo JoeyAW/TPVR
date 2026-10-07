@@ -6,6 +6,7 @@
 #include "JSystem/JKernel/JKRAramStream.h"
 #include "JSystem/JKernel/JKRDecomp.h"
 #include "JSystem/JKernel/JKRDvdFile.h"
+#include "dusk/file_cache.hpp"
 #include "JSystem/JSupport/JSUFileStream.h"
 #include <os.h>
 #include <os.h>
@@ -33,6 +34,8 @@ JKRAramBlock* JKRDvdAramRipper::loadToAram(s32 entryNumber, u32 address,
 JKRAramBlock* JKRDvdAramRipper::loadToAram(JKRDvdFile* dvdFile, u32 address,
                                            JKRExpandSwitch expandSwitch, u32 param_3, u32 param_4,
                                            u32* param_5) {
+    dusk::file_cache::Capture cacheCapture(
+        dvdFile, param_3 == 0 && (param_4 == 0 || param_4 >= static_cast<u32>(dvdFile->getFileSize())));
     JKRADCommand* command =
         loadToAram_Async(dvdFile, address, expandSwitch, NULL, param_3, param_4, param_5);
     syncAram(command, 0);
@@ -105,7 +108,7 @@ JKRADCommand* JKRDvdAramRipper::callCommand_Async(JKRADCommand* command) {
             u8 buffer[0x40];
             u8* bufPtr = (u8*)ALIGN_NEXT((uintptr_t)&buffer, 0x20);
             while (true) {
-                s32 result = DVDReadPrio(dvdFile->getFileInfo(), bufPtr, 0x20, 0, 2);
+                s32 result = dusk::file_cache::read_prio(dvdFile, bufPtr, 0x20, 0, 2);
                 if (result >= 0) {
                     break;
                 }
@@ -419,7 +422,7 @@ static u8* firstSrcData() {
     u32 bufSize = szpEnd - buffer;
     u32 length = transLeft < bufSize ? transLeft : bufSize;
     while (true) {
-        int result = DVDReadPrio(srcFile->getFileInfo(), buffer, length, 0, 2);
+        int result = dusk::file_cache::read_prio(srcFile, buffer, length, 0, 2);
         if (result >= 0) {
             break;
         }
@@ -450,7 +453,7 @@ static u8* nextSrcData(u8* src) {
     JUT_ASSERT(1036, transSize > 0);
 
     while (true) {
-        s32 result = DVDReadPrio(srcFile->getFileInfo(), dest + size, transSize, srcOffset, 2);
+        s32 result = dusk::file_cache::read_prio(srcFile, dest + size, transSize, srcOffset, 2);
         if (result >= 0) {
             break;
         }

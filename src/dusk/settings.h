@@ -658,6 +658,7 @@ struct UserSettings {
         ConfigVar<bool> enableTeleportCombo;
 
         ConfigVar<std::string> lastSelectedGameModeId;
+        ConfigVar<int> fileCacheMB;
     } game;
 
     struct {

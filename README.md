@@ -20,6 +20,10 @@ More on why it uses AI generated code below.
 - Physical sword swinging, shield bashing and aiming (aim with the right hand)
 - Quest 2/3 controller bindings; other headsets are untested
 - The ability to play the game in flatscreen for parts you want to skip in VR
+- Giant Screen mode: the GameCube HUD and Dusklight menus are separate OpenXR layers over the room-fixed screen, so their sharpness does not follow the game image resolution. The HUD keeps the immersive HUD's color-keyed transparency; menus keep their own alpha. When "Super Resolution (Sharpening)" is enabled on runtimes that advertise `XR_FB_composition_layer_settings` (standalone Quest), the game layer requests sharpening and the UI layers request supersampling.
+- Adaptive resolution in immersive VR: two missed frames within one second lower eye resolution by 10%; resolution steps are 5%, with a configurable floor (50–100%, default 80%). It recovers after 1.5 s of headroom and uses 20 s hysteresis. Giant Screen's picture floor is three quarters of that setting, minimum 50%.
+- Fixed foveated rendering on standalone Quest 2/3: eye edges render at half then quarter resolution (`VK_EXT_fragment_density_map`). The `Foveated Rendering` setting selects Off/Low/Medium/High (Medium by default); requires Single-Pass Stereo. Android uses the Dawn fork ([999sian/dawn](https://github.com/999sian/dawn)) through the [999sian/aurora](https://github.com/999sian/aurora) submodule.
+- High Clocks (standalone Quest, on by default) requests sustained-high CPU and GPU levels, increasing heat and battery use; applies from next start. `XR_META_recommended_layer_resolution` is queried where supported.
 # Quest 2/3 Controller binds
 <div align="center">
 <img src="Controller binding.png" alt="Logo" width="400">

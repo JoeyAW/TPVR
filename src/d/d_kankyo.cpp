@@ -3365,7 +3365,7 @@ void dScnKy_env_light_c::settingTevStruct_plightcol_plus(cXyz* pos_p, dKy_tevstr
                 J3DLightInfo* light0_info = tevstr_p->mLights[0].getLightInfo();
                 sp9 = 1;
 
-                if (dusk::vr::isRenderingToHeadset() &&
+    if (dusk::vr::isImmersiveVr() &&
                     dusk::getSettings().game.vrLightingMode.getValue() != dusk::VrLightingMode::Original)
                 {
                     // VR: shine from the sun/moon, or from above your delayed
@@ -4668,7 +4668,7 @@ void dScnKy_env_light_c::setLightTevColorType_MAJI(J3DModelData* modelData_p,
     // vr-mod-notes). Left in place regardless -- harmless, and this is a
     // real disable of a real camera-relative effect either way.
 #ifdef TARGET_PC
-    if ((tevstr_p->Type & 0x20) && !dusk::vr::isRenderingToHeadset()) {
+    if ((tevstr_p->Type & 0x20) && !dusk::vr::isImmersiveVr()) {
 #else
     if (tevstr_p->Type & 0x20) {
 #endif
@@ -8410,7 +8410,7 @@ static int dKy_Create(void* i_this) {
         // bloom for this stage just won't be allocated until the next time
         // this runs outside VR.
 #if TARGET_PC
-        if (stage_envr_p->pselect_id[64] != 0 && !dusk::vr::isRenderingToHeadset()) {
+    if (stage_envr_p->pselect_id[64] != 0 && !dusk::vr::isRenderingToHeadset()) {
 #else
         if (stage_envr_p->pselect_id[64] != 0) {
 #endif
@@ -11643,7 +11643,7 @@ void dKy_bg_MAxx_proc(void* bg_model_p) {
                     // by mods/effect_remover's own testing to be the Faron
                     // forest-floor shade specifically, which needs to keep
                     // working in VR.
-                    if (dusk::vr::isRenderingToHeadset() &&
+    if (dusk::vr::isImmersiveVr() &&
                         memcmp(&mat_name[3], "MA04", 4) != 0)
                     {
                         sp5C.r = 255;

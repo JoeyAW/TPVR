@@ -28,7 +28,7 @@ int daObjOnsenFire_c::execute() {
     // not this actor, which spawns the identical particle ID directly.
     // See CLAUDE.md section 3 / the VR heat-wave investigation.
 #ifdef TARGET_PC
-    if (!dusk::vr::isRenderingToHeadset())
+    if (!dusk::vr::isImmersiveVr())
 #endif
     dComIfGp_particle_setSimple(0x103,&current.pos,0xff,g_whiteColor,g_whiteColor,0,0.0f);
     Z2GetAudioMgr()->seStartLevel(Z2SE_OBJ_ONSEN_WARM_FIRE,&current.pos,0,0,1.0f,1.0f,-1.0f,-1.0f,0);

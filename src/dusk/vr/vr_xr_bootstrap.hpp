@@ -125,7 +125,15 @@ struct Bootstrap {
     // the recommended motion-vector image size) and Session's space-warp
     // path (vr_xr_submit.hpp). Never true on the D3D12/PC branch.
     bool hasSpaceWarp = false;
+    // XR_FB_composition_layer_settings (Meta Quest Super Resolution / sharpening):
+    // enabled only if advertised. Allows chaining XrCompositionLayerSettingsFB
+    // onto the projection layer to sharpen the rendered picture at panel density.
+    bool hasLayerSettings = false;
     PFN_xrPerfSettingsSetPerformanceLevelEXT xrPerfSettingsSetPerformanceLevelEXT_ = nullptr;
+    // XR_META_recommended_layer_resolution: enabled only if advertised;
+    // nullptr otherwise. Asking it about the eye layer each frame tells the
+    // runtime the app scales its resolution (Quest 3: GPU level 5).
+    PFN_xrGetRecommendedLayerResolutionMETA xrGetRecommendedLayerResolutionMETA_ = nullptr;
 #if DUSK_VR_PLATFORM_ANDROID
     PFN_xrSetAndroidApplicationThreadKHR xrSetAndroidApplicationThreadKHR_ = nullptr;
 #endif
@@ -256,8 +264,19 @@ inline Bootstrap initialize() {
     }
 #endif
     boot.hasSpaceWarp = instanceExtensionAvailable(XR_FB_SPACE_WARP_EXTENSION_NAME);
+#if DUSK_VR_PLATFORM_ANDROID
+    boot.hasLayerSettings = instanceExtensionAvailable(XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME);
+    if (boot.hasLayerSettings) {
+        enabledExtensions.push_back(XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME);
+    }
+#endif
     if (boot.hasSpaceWarp) {
         enabledExtensions.push_back(XR_FB_SPACE_WARP_EXTENSION_NAME);
+    }
+    const bool hasRecommendedLayerResolution =
+        instanceExtensionAvailable(XR_META_RECOMMENDED_LAYER_RESOLUTION_EXTENSION_NAME);
+    if (hasRecommendedLayerResolution) {
+        enabledExtensions.push_back(XR_META_RECOMMENDED_LAYER_RESOLUTION_EXTENSION_NAME);
     }
 
     XrInstanceCreateInfo instanceInfo{XR_TYPE_INSTANCE_CREATE_INFO};
@@ -314,6 +333,12 @@ inline Bootstrap initialize() {
             reinterpret_cast<PFN_xrVoidFunction*>(&boot.xrPerfSettingsSetPerformanceLevelEXT_)))) {
         boot.hasPerformanceSettings = false;
         boot.xrPerfSettingsSetPerformanceLevelEXT_ = nullptr;
+    }
+    if (hasRecommendedLayerResolution &&
+        XR_FAILED(xrGetInstanceProcAddr(
+            boot.instance, "xrGetRecommendedLayerResolutionMETA",
+            reinterpret_cast<PFN_xrVoidFunction*>(&boot.xrGetRecommendedLayerResolutionMETA_)))) {
+        boot.xrGetRecommendedLayerResolutionMETA_ = nullptr;
     }
 #if DUSK_VR_PLATFORM_ANDROID
     if (boot.hasAndroidThreadSettings &&

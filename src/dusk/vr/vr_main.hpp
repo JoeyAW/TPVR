@@ -40,6 +40,14 @@ bool isActive();
 // skipping that fallback whenever this is false blanks menus/video, not
 // just 3D gameplay.
 bool isRenderingToHeadset();
+// True while this headset frame is rendering the flat-camera giant-screen
+// presentation rather than the game directly in immersive VR.
+bool isVrScreenMode();
+
+// True only when a frame has a headset target and the game should use
+// immersive-VR gameplay/rendering behavior. Use this for game semantics;
+// isRenderingToHeadset() remains the physical output-target predicate.
+bool isImmersiveVr();
 
 // True ONLY while a VR eye's own protected offscreen pass is actually open
 // (between a given beginEye() and its matching endEye() inside tick()'s
@@ -53,6 +61,10 @@ bool isRenderingToHeadset();
 // yet" -- the latter is exactly the safe window captureHudBillboard() and
 // captureMapCopy2D() (m_Do_graphic.cpp) already render into.
 bool isEyePassOpen();
+// True while any protected OpenXR render pass is open, including the
+// flat-camera source pass used by screen mode. Use before opening a nested
+// GX framebuffer pass; isEyePassOpen() remains eye-specific.
+bool isProtectedVrPassOpen();
 
 // Only meaningful while isRenderingToHeadset() is true (returns the last
 // computed values otherwise, harmlessly stale). The smallest symmetric

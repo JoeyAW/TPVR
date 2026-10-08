@@ -289,6 +289,18 @@ struct UserSettings {
         // set_present_source_mirror()) -- no extra render pass, no CPU
         // readback, near-zero cost.
         ConfigVar<bool> vrDesktopMirror;
+        // Renders flat-camera gameplay onto a large 16:9 screen in the headset.
+        // It can be toggled live; immersive VR behavior is disabled while selected.
+        ConfigVar<bool> vrScreenMode;
+        // Stereoscopic 3D on the Giant Screen: each eye gets an offset view
+        // with convergence on Link, giving the virtual screen depth (like a 3D cinema).
+        ConfigVar<bool> vrScreenModeStereo;
+        // Stereoscopic 3D depth multiplier for the Giant Screen (0.2x .. 3.0x, default 1.0x).
+        ConfigVar<float> vrScreenModeDepth;
+        // Distance from player to the Giant Screen (meters, 1.5 .. 10.0, default 4.5m).
+        ConfigVar<float> vrScreenModeDistance;
+        // Width of the Giant Screen (meters, 2.0 .. 12.0, default 5.3m).
+        ConfigVar<float> vrScreenModeWidth;
         // Renders both VR eyes in ONE scene pass (instanced per eye into a
         // double-wide target, see vr_render::beginStereoPass()) instead of
         // traversing and recording the whole scene twice per frame. The
@@ -302,6 +314,22 @@ struct UserSettings {
         // Read once at VR startup (sizes the swapchain), so it takes effect
         // on the next launch.
         ConfigVar<float> vrRenderScale;
+        // Meta Quest Super Resolution / sharpening (XR_FB_composition_layer_settings):
+        // asks the Oculus runtime to apply an edge-aware hardware sharpening filter
+        // to the eye layer, making distant textures and geometry look significantly
+        // crisper. Default true on standalone.
+        ConfigVar<bool> vrSuperResolution;
+        // Adaptive per-eye resolution in immersive VR: lowers the eye render size
+        // in 5% steps (down to vrMinResolution) while frames keep missing refreshes
+        // and raises it back with headroom. Off keeps fixed full-size eyes. Default true.
+        ConfigVar<bool> vrAdaptiveResolution;
+        // Adaptive resolution's floor in percent (50..100, default 80). The Giant
+        // Screen's picture goes down to three quarters of it (at least 50%).
+        ConfigVar<int> vrMinResolution;
+        // XR_EXT_performance_settings: request the runtime's SUSTAINED_HIGH CPU and
+        // GPU levels (standalone Quest). Off leaves the runtime's default clocks.
+        // Read once at VR startup. Default true.
+        ConfigVar<bool> vrHighClocks;
         // Application SpaceWarp (XR_FB_space_warp, standalone Quest only):
         // the app submits per-eye motion vectors + depth alongside the
         // color image and the runtime synthesizes every other frame,

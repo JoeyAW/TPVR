@@ -462,19 +462,10 @@ void dRenderingMap_c::renderingMap() {
     // the minimap texture just won't update from THIS call site instead of
     // corrupting VR's eye pass.
     //
-    // UPDATE (minimap black-screen investigation): changed from
-    // isRenderingToHeadset() to isEyePassOpen(). The former is true for
-    // this whole frame once VR is rendering at all, which meant this always
-    // skipped -- including the one call site (vr_main.cpp's tick(),
-    // mDoGph_gInf_c::captureMapCopy2D(), called before the per-eye loop
-    // opens any eye pass) that's actually safe and is now how the minimap's
-    // texture gets rendered during VR. isEyePassOpen() is only true between
-    // beginEye()/endEye(), so this still correctly skips the redundant
-    // per-eye call from inside mDoGph_Painter() (dComIfGd_drawCopy2D(),
-    // m_Do_graphic.cpp), which really would nest a second offscreen pass
-    // inside the eye's own.
+    // The protected-pass guard excludes eye passes and screen mode's source
+    // pass, while leaving the earlier captureMapCopy2D window safe.
 #ifdef TARGET_PC
-    if (dusk::vr::isEyePassOpen()) {
+    if (dusk::vr::isProtectedVrPassOpen()) {
         return;
     }
 #endif
@@ -597,15 +588,10 @@ void dRenderingFDAmap_c::postRenderingMap() {
     // GXCopyTex/GXRestoreFrameBuffer capture, not the rest of the function's
     // GX state setup.
     //
-    // UPDATE (minimap black-screen investigation): changed from
-    // isRenderingToHeadset() to isEyePassOpen(), same reasoning as
-    // renderingMap()'s own guard above -- this function is now only ever
-    // reached (via renderingMap()) when isEyePassOpen() is false (either
-    // flatscreen, or VR's safe pre-eye-loop capture window), so checking
-    // isRenderingToHeadset() here would still incorrectly skip the real
-    // capture during that safe window even though it's fine to run there.
+    // Same nested-pass guard as renderingMap() above. The map is captured
+    // before screen/eye passes by captureMapCopy2D().
 #ifdef TARGET_PC
-    const bool skipCapture = dusk::vr::isEyePassOpen();
+    const bool skipCapture = dusk::vr::isProtectedVrPassOpen();
     const auto [rw, rh] = map_render_size_for(mTexWidth, mTexHeight);
     if (!skipCapture) {
         GXSetTexCopySrc(0, 0, rw, rh);

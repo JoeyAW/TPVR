@@ -446,7 +446,7 @@ void dKyr_sun_move() {
     // under a tree or roof (occluding the sun) pumps the entire scene's
     // brightness up and down. The lens flare itself is unaffected.
 #if TARGET_PC
-    const bool vrSkipGlareDimming = dusk::vr::isRenderingToHeadset() &&
+    const bool vrSkipGlareDimming = dusk::vr::isImmersiveVr() &&
                                     !dusk::getSettings().game.vrSunGlareDimming.getValue();
 #else
     const bool vrSkipGlareDimming = false;
@@ -576,7 +576,7 @@ void dKyr_sun_move() {
         // Skip spawning it in VR entirely, same tradeoff already accepted
         // for the other two kagerou-family effects.
 #ifdef TARGET_PC
-        if (!dusk::vr::isRenderingToHeadset())
+    if (!dusk::vr::isImmersiveVr())
 #endif
         sun_packet->field_0x58 = dComIfGp_particle_set(sun_packet->field_0x58, 0x11C, &sp24, 0, 0);
     }
@@ -4451,7 +4451,7 @@ void dKyr_drawStar(Mtx drawMtx, u8** tex) {
     // in VR, same tradeoff already accepted for those other camera-
     // anchored effects.
 #ifdef TARGET_PC
-    if (dusk::vr::isRenderingToHeadset()) {
+    if (dusk::vr::isImmersiveVr()) {
         return;
     }
 #endif
@@ -4744,7 +4744,7 @@ void drawCloudShadow(Mtx drawMtx, u8** tex) {
     // accepted for those other camera-anchored effects (flatscreen keeps
     // cloud shadows unchanged).
 #ifdef TARGET_PC
-    if (dusk::vr::isRenderingToHeadset()) {
+    if (dusk::vr::isImmersiveVr()) {
         return;
     }
 #endif
@@ -5793,7 +5793,7 @@ void dKyr_odour_draw(Mtx drawMtx, u8** tex) {
     //     refraction). In VR that capture is stale (only refreshed for the
     //     underwater blur), same problem class as water's fake reflection --
     //     so skip the sample and draw a plain colored glow instead.
-    const bool vrEyeView = DUSK_IF_ELSE(dusk::vr::isRenderingToHeadset(), false);
+    const bool vrEyeView = DUSK_IF_ELSE(dusk::vr::isImmersiveVr(), false);
     cXyz fadeEyePos;
 
     if (vrEyeView) {

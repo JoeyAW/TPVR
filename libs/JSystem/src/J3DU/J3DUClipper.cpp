@@ -7,6 +7,7 @@
 
 extern "C" bool g_duskVRRenderingToHeadset;
 extern "C" bool g_duskVREyePassOpen;
+extern "C" bool g_duskVRScreenModePassOpen;
 
 // VR culling gate (2026-09-20, Quest perf item #1 -- see vr-mod-notes).
 //
@@ -26,7 +27,7 @@ extern "C" bool g_duskVREyePassOpen;
 // blanket disable was submitting every mesh in every loaded room twice per
 // frame -- a large, avoidable cost on the Quest.
 static inline bool duskVrSkipCulling() {
-    return g_duskVRRenderingToHeadset && !g_duskVREyePassOpen;
+    return g_duskVRRenderingToHeadset && !g_duskVREyePassOpen && !g_duskVRScreenModePassOpen;
 }
 
 // TEMP DIAGNOSTIC (Quest perf item #1 verification, 2026-09-20 -- remove once
@@ -36,7 +37,7 @@ static inline bool duskVrSkipCulling() {
 extern "C" unsigned int g_duskVRCullTested = 0;
 extern "C" unsigned int g_duskVRCullRejected = 0;
 static inline int duskVrCountCull(int result) {
-    if (g_duskVRRenderingToHeadset && g_duskVREyePassOpen) {
+    if (g_duskVRRenderingToHeadset && (g_duskVREyePassOpen || g_duskVRScreenModePassOpen)) {
         ++g_duskVRCullTested;
         if (result) ++g_duskVRCullRejected;
     }

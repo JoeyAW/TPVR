@@ -125,6 +125,10 @@ struct Bootstrap {
     // the recommended motion-vector image size) and Session's space-warp
     // path (vr_xr_submit.hpp). Never true on the D3D12/PC branch.
     bool hasSpaceWarp = false;
+    // XR_FB_composition_layer_settings (Meta Quest Super Resolution / sharpening):
+    // enabled only if advertised. Allows chaining XrCompositionLayerSettingsFB
+    // onto the projection layer to sharpen the rendered picture at panel density.
+    bool hasLayerSettings = false;
     PFN_xrPerfSettingsSetPerformanceLevelEXT xrPerfSettingsSetPerformanceLevelEXT_ = nullptr;
 #if DUSK_VR_PLATFORM_ANDROID
     PFN_xrSetAndroidApplicationThreadKHR xrSetAndroidApplicationThreadKHR_ = nullptr;
@@ -256,6 +260,12 @@ inline Bootstrap initialize() {
     }
 #endif
     boot.hasSpaceWarp = instanceExtensionAvailable(XR_FB_SPACE_WARP_EXTENSION_NAME);
+#if DUSK_VR_PLATFORM_ANDROID
+    boot.hasLayerSettings = instanceExtensionAvailable(XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME);
+    if (boot.hasLayerSettings) {
+        enabledExtensions.push_back(XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME);
+    }
+#endif
     if (boot.hasSpaceWarp) {
         enabledExtensions.push_back(XR_FB_SPACE_WARP_EXTENSION_NAME);
     }

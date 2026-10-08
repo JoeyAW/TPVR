@@ -1009,7 +1009,7 @@ void daMidna_c::setBodyPartMatrix() {
     // the jump-point mechanic) while the rest of her was shown by the
     // broadened gate, reintroducing the exact "one piece keeps fighting
     // back" mismatch rounds 6-9 already fixed, just in reverse.
-    const bool vrHairHandHidden = dusk::vr::isRenderingToHeadset() &&
+    const bool vrHairHandHidden = dusk::vr::isImmersiveVr() &&
                                    dusk::vr::isWolfFirstPersonView(link) &&
                                    !dusk::vr::isMidnaOffWolfBack(this);
 

@@ -254,6 +254,8 @@ public:
     // of each eye drawing the flat HUD independently at zero disparity.
     static TGXTexObj* getHudBillboardTexObj() { return &m_hudBillboardTexObj; }
     static void captureHudBillboard();
+    // Draw the same HUD into the caller's independent Giant Screen UI pass.
+    static void drawHudScreenLayer();
     // VR minimap/pause-map fix: renders the minimap's own render-to-texture
     // pass (dComIfGd_drawCopy2D() -> d_map_path.cpp's renderingMap()) once
     // per frame, before the VR per-eye loop opens any eye pass -- see this

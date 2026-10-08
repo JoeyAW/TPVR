@@ -21,7 +21,7 @@
 #include <windows.h>
 #endif
 #include "dusk/vr/vr_debug_log.hpp"  // dusk::vr::duskVrLog/duskVrSnprintf -- portable OutputDebugStringA/_snprintf_s stand-ins
-extern "C" bool g_duskVRRenderingToHeadset;
+#include "dusk/vr/vr_main.hpp"
 #include "helpers/gx_helper.h"
 
 #include "d/d_menu_collect.h"
@@ -1145,7 +1145,7 @@ void dDlst_shadowReal_c::draw() {
     // session. Disabling here COMPLETES, rather than reverses, the
     // existing "shadows disabled in VR" intent already applied to Simple
     // shadows -- not a new exception.
-    if (g_duskVRRenderingToHeadset) {
+        if (dusk::vr::isImmersiveVr()) {
         return;
     }
 #endif
@@ -1164,9 +1164,9 @@ void dDlst_shadowReal_c::draw() {
     // its comment) -- same frame-interpolation subsystem, same composite
     // phase that runs unconditionally regardless of VR state.
     Mtx view_mtx, recv_proj_mtx;
-    const auto have_view_mtx = !g_duskVRRenderingToHeadset &&
+    const auto have_view_mtx = !dusk::vr::isImmersiveVr() &&
         dusk::interp::lookup_replacement(getInterpKey(mpModels[0], 1), view_mtx);
-    const auto have_recv_proj_mtx = !g_duskVRRenderingToHeadset &&
+    const auto have_recv_proj_mtx = !dusk::vr::isImmersiveVr() &&
         dusk::interp::lookup_replacement(getInterpKey(mpModels[0], 3), recv_proj_mtx);
     if (have_view_mtx && have_recv_proj_mtx) {
         cMtx_concat(recv_proj_mtx, view_mtx, recv_proj_mtx);
@@ -1451,7 +1451,7 @@ void dDlst_shadowSimple_c::draw() {
     // system (dComIfGd_drawShadow in m_Do_graphic.cpp) -- see that guard's
     // comment for why. Re-disabled after a mistaken re-enable confirmed the
     // stretching persists post-fix; do not re-enable without new evidence.
-    if (g_duskVRRenderingToHeadset) {
+        if (dusk::vr::isImmersiveVr()) {
         return;
     }
 #endif
@@ -1462,15 +1462,13 @@ void dDlst_shadowSimple_c::draw() {
     GXClearVtxDesc();
     GXSetVtxDesc(GX_VA_POS, GX_INDEX8);
 #if TARGET_PC
-    // NOTE: dDlst_shadowSimple_c::draw() already returns early for VR at the
-    // top of this function (g_duskVRRenderingToHeadset check above) -- the
-    // stretching root-caused in an earlier session (re-concatenating an
-    // interpolated world-space matrix with whichever view matrix is live at
-    // draw() time, which breaks under VR's two rapidly-alternating per-eye
-    // view matrices) can no longer reach this code at all in VR, so
-    // get_simple_shadow_mtx()'s unconditional concat below is safe:
-    // flatscreen-only by construction, not because this helper itself knows
-    // about VR.
+    // NOTE: dDlst_shadowSimple_c::draw() returns early in immersive VR at
+    // the top of this function. The stretching was root-caused in an earlier
+    // session: re-concatenating an interpolated world-space matrix with
+    // whichever view matrix is live at draw time breaks under VR's rapidly
+    // alternating per-eye matrices. Those no longer reach all in VR, so
+    // get_simple_shadow_mtx()'s unconditional concat below is safe: the
+    // construction is flatscreen-only; the helper itself is unaware of VR.
     Mtx volumeMtx;
     GXLoadPosMtxImm(get_simple_shadow_mtx(mVolumeMtx, mVolumeMtxKey, volumeMtx), GX_PNMTX0);
 #else

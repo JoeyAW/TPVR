@@ -261,7 +261,7 @@ static int dmg_rod_Draw(dmg_rod_class* i_this) {
         // Skipped entirely in VR -- no smoothing is needed since the
         // position is already fresh every real frame; the un-interpolated
         // linemat.update() call just above this block stands as-is.
-        if (dusk::interp::is_enabled() && !dusk::vr::isRenderingToHeadset()) {
+    if (dusk::interp::is_enabled() && !dusk::vr::isImmersiveVr()) {
             if (i_this->mLineInterpCurrValid) {
                 memcpy(i_this->mLineInterpPrev, i_this->mLineInterpCurr, MG_ROD_LURE_LINE_LEN * sizeof(cXyz));
                 i_this->mLineInterpPrevValid = true;
@@ -314,7 +314,7 @@ static int dmg_rod_Draw(dmg_rod_class* i_this) {
         // Skipped entirely in VR -- no smoothing is needed since the
         // position is already fresh every real frame; the un-interpolated
         // linemat.update() call just above this block stands as-is.
-        if (dusk::interp::is_enabled() && !dusk::vr::isRenderingToHeadset()) {
+    if (dusk::interp::is_enabled() && !dusk::vr::isImmersiveVr()) {
             if (i_this->mLineInterpCurrValid) {
                 memcpy(i_this->mLineInterpPrev, i_this->mLineInterpCurr, MG_ROD_UKI_LINE_LEN * sizeof(cXyz));
                 i_this->mLineInterpPrevValid = true;

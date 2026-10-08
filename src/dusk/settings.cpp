@@ -88,8 +88,15 @@ UserSettings g_userSettings = {
         .disableLetterboxing {"game.disableLetterboxing", LetterboxMode::Off},
         .enableHighQualityMinimapTextures {"game.enableHighQualityMinimapTextures", true},
         .vrDesktopMirror {"game.vrDesktopMirror", true},
+        .vrScreenMode {"game.vrScreenMode", false},
+        .vrScreenModeStereo {"game.vrScreenModeStereo", false},
+        .vrScreenModeDepth {"game.vrScreenModeDepth", 1.0f},
+        .vrScreenModeDistance {"game.vrScreenModeDistance", 1.0f},
+        .vrScreenModeWidth {"game.vrScreenModeWidth", 1.0f},
         .vrSinglePassStereo {"game.vrSinglePassStereo", true},
         .vrRenderScale {"game.vrRenderScale", 1.0f},
+        .vrSuperResolution {"game.vrSuperResolution", true},
+        .vrAdaptiveResolution {"game.vrAdaptiveResolution", true},
         .vrSpaceWarp {"game.vrSpaceWarp", false},
         .vrSpaceWarpDebugNegateMv {"game.vrSpaceWarpDebugNegateMv", false},
         .vrSpaceWarpDebugFlipMvY {"game.vrSpaceWarpDebugFlipMvY", false},
@@ -409,8 +416,15 @@ void registerSettings() {
     Register(g_userSettings.game.disableLetterboxing);
     Register(g_userSettings.game.enableHighQualityMinimapTextures);
     Register(g_userSettings.game.vrDesktopMirror);
+    Register(g_userSettings.game.vrScreenMode);
+    Register(g_userSettings.game.vrScreenModeStereo);
+    Register(g_userSettings.game.vrScreenModeDepth);
+    Register(g_userSettings.game.vrScreenModeDistance);
+    Register(g_userSettings.game.vrScreenModeWidth);
     Register(g_userSettings.game.vrSinglePassStereo);
     Register(g_userSettings.game.vrRenderScale);
+    Register(g_userSettings.game.vrSuperResolution);
+    Register(g_userSettings.game.vrAdaptiveResolution);
     Register(g_userSettings.game.vrSpaceWarp);
     Register(g_userSettings.game.vrSpaceWarpDebugNegateMv);
     Register(g_userSettings.game.vrSpaceWarpDebugFlipMvY);

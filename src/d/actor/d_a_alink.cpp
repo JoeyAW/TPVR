@@ -5633,7 +5633,7 @@ void daAlink_c::setBodyPartPos() {
         // which is real physics/collision state (read by dBomb_c's own
         // logic), not just a draw matrix -- deliberately not attempted
         // here; not yet explored.
-        if (dusk::vr::isRenderingToHeadset()) {
+    if (dusk::vr::isImmersiveVr()) {
             float lx, ly, lz, rx, ry, rz;
             if (dusk::vr::getTrackedHandWorldPos(true, lx, ly, lz) &&
                 dusk::vr::getTrackedHandWorldPos(false, rx, ry, rz)) {
@@ -5898,7 +5898,7 @@ int daAlink_c::simpleAnmPlay(J3DAnmBase* i_anm) {
 // tracked hand and its attack hitbox is armed by real swing speed instead of
 // by an attack animation. See setSwordPos()/setAtCollision().
 bool daAlink_c::checkVrPhysicalSword() {
-    return dusk::vr::isRenderingToHeadset() &&
+    return dusk::vr::isImmersiveVr() &&
            dusk::getSettings().game.vrPhysicalSword.getValue() &&
            !checkWolf() && checkItemSwordEquip() && dusk::vr::isVrFirstPerson(this);
 }
@@ -9709,7 +9709,7 @@ void daAlink_c::setStickData() {
         // offset (see computeHeadWorldForward()'s comment in
         // vr_stereo_render.hpp) -- so this is a straight substitution, not
         // an addition on top of it.
-        if (dusk::vr::isRenderingToHeadset()) {
+        if (dusk::vr::isImmersiveVr()) {
             mMoveAngle = mStickAngle + dusk::vr::getHeadMoveAngleS();
         } else {
             mMoveAngle = mStickAngle + dCam_getControledAngleY(dComIfGp_getCamera(field_0x317c));
@@ -12676,7 +12676,7 @@ int daAlink_c::checkNextAction(int param_0) {
         // yours. In VR the player's head IS Link's facing. Ground-only; the
         // ride/swim/vine/magnet states keep their own facing rules.
         if (dusk::getSettings().game.vrInstantStartFacing.getValue() &&
-            checkZeroSpeedF() && checkInputOnR() && dusk::vr::isRenderingToHeadset() &&
+        checkZeroSpeedF() && checkInputOnR() && dusk::vr::isImmersiveVr() &&
             dusk::vr::isVrFirstPerson(this) && !checkEventRun() && !checkMagneBootsOn() &&
             !checkModeFlg(MODE_SWIMMING | MODE_VINE_CLIMB | MODE_RIDING))
         {
@@ -13322,7 +13322,7 @@ void daAlink_c::posMove() {
     // Feet may slide slightly during those transitions; the body is hidden
     // in VR first person by default.
     const bool vrSmoothSpeed = dusk::getSettings().game.vrSmoothStartStop.getValue() &&
-        dusk::vr::isRenderingToHeadset() &&
+        dusk::vr::isImmersiveVr() &&
         (dusk::vr::isVrFirstPerson(this) || dusk::vr::isWolfFirstPersonView(this));
     if (vrSmoothSpeed) {
         speedF = mNormalSpeed;
@@ -19277,7 +19277,7 @@ int daAlink_c::execute() {
     // so they stay exactly centred; restored to his body otherwise.
     {
         using SoundPos = JGeometry::TVec3<f32>;
-        const bool vrEars = dusk::vr::isRenderingToHeadset() && dusk::vr::isVrFirstPerson(this);
+        const bool vrEars = dusk::vr::isImmersiveVr() && dusk::vr::isVrFirstPerson(this);
         SoundPos* listener = reinterpret_cast<SoundPos*>(dusk::vr::getVrListenerPosPtr());
         mZ2Link.mSoundObjAnime.pos_ =
             vrEars ? listener : reinterpret_cast<SoundPos*>(&current.pos);
@@ -19286,7 +19286,7 @@ int daAlink_c::execute() {
             vrEars ? listener : reinterpret_cast<SoundPos*>(&field_0x3720);
     }
 
-    if (dusk::vr::isRenderingToHeadset() && dusk::vr::isVrForcingBodyYawToHeadset(this)) {
+    if (dusk::vr::isImmersiveVr() && dusk::vr::isVrForcingBodyYawToHeadset(this)) {
         const s16 freshHeadYawS = dusk::vr::getHeadMoveAngleS();
         // ROOT CAUSE (found 2026-09-11 via a real debugger session):
         // setMatrix() already ran earlier THIS SAME execute() call (see its
@@ -19433,7 +19433,7 @@ void daAlink_c::setDrawHand() {
     // needs the same gate as the real per-eye-relevant fix
     // (refreshTrackedHandDrawMtxLive(), vr_main.cpp's tick()) even though
     // it's confirmed dead for reaching the actual render output itself.
-    if (dusk::vr::isRenderingToHeadset() && dusk::vr::isVrFirstPerson(this)) {
+    if (dusk::vr::isImmersiveVr() && dusk::vr::isVrFirstPerson(this)) {
         dusk::vr::applyTrackedHandMtx(mpLinkHandModel);
     }
 #endif
@@ -20146,7 +20146,7 @@ int daAlink_c::draw() {
         // "Third Person" VR setting (2026-08-19 follow-up): also gated on
         // isVrFirstPerson(this) now -- see its comment (vr_main.hpp) and
         // the matching fix on the tracked-hand call site above.
-        if (dusk::vr::isRenderingToHeadset() && dusk::vr::isVrFirstPerson(this)) {
+    if (dusk::vr::isImmersiveVr() && dusk::vr::isVrFirstPerson(this)) {
             dusk::vr::applyTrackedItemMtx(mSwordModel, mShieldModel,
                                            mpLinkModel->getAnmMtx(mLeftItemJntNo),
                                            mpLinkModel->getAnmMtx(mLeftHandJntNo),
@@ -20283,7 +20283,7 @@ int daAlink_c::draw() {
         // NOTE: setting renamed/inverted from "Hide Body" (vrHideBody) to
         // "Experimental: Show Link's Body" (vrShowBody), now off by default
         // -- same underlying mechanism, just flipped sense and default.
-        const BOOL hideBodyForVr = dusk::vr::isRenderingToHeadset() &&
+    const BOOL hideBodyForVr = dusk::vr::isImmersiveVr() &&
                                     !dusk::getSettings().game.vrShowBody.getValue() &&
                                     !dusk::getSettings().game.vrThirdPerson.getValue() &&
                                     !dusk::vr::isRealCutsceneRunning();
@@ -20491,7 +20491,7 @@ int daAlink_c::draw() {
     }
 
     // VR: skip the sword-swing blur trail (ghosting) in the headset.
-    if (m_swordBlur.field_0x14 > 0 && !dusk::vr::isRenderingToHeadset()) {
+    if (m_swordBlur.field_0x14 > 0 && !dusk::vr::isImmersiveVr()) {
         dComIfGd_entryZSortXluList(&m_swordBlur, m_swordBlur.field_0x308[0]);
     }
 

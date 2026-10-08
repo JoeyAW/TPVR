@@ -2313,6 +2313,10 @@ static void mDoGph_drawHud2D() {
 }
 
 #if TARGET_PC
+void mDoGph_gInf_c::drawHudScreenLayer() {
+    mDoGph_drawHud2D();
+}
+
 // Renders the flat 2D HUD into a small, alpha-preserving offscreen texture
 // once per frame, so both VR eyes can draw it as a single shared stereo
 // billboard (vr_render::drawHudBillboard(), called from mDoGph_Painter()'s
@@ -2588,7 +2592,7 @@ int mDoGph_Painter() {
             // the (or not the only) root cause. Re-disabled after a
             // mistaken re-enable; do not re-enable again without new
             // diagnostic evidence.
-            if (!dusk::vr::isRenderingToHeadset()) {
+            if (!dusk::vr::isImmersiveVr()) {
                 GX_DEBUG_GROUP(dComIfGd_drawShadow, camera_p->view.viewMtx);
             }
 
@@ -2860,7 +2864,7 @@ int mDoGph_Painter() {
                 // half only (aurora's copy_tex halves it) -- the blur then
                 // shows left-eye content in both eyes, which for a full-
                 // screen blur is fine.
-                if (!dusk::vr::isRenderingToHeadset() || g_env_light.is_blure) {
+                if (!dusk::vr::isImmersiveVr() || g_env_light.is_blure) {
                     retry_captue_frame(&camera_p->view, view_port, dComIfGp_getCameraZoomForcus(camera_id));
                 }
                 // VR (2026-09-21): everything that samples this shared capture
@@ -2874,8 +2878,8 @@ int mDoGph_Painter() {
                 // the effects simply vanish, and the underwater blur (the one
                 // consumer whose capture does run) still gets its real data.
                 // In-stream, so it orders correctly against queued draws;
-                // cleared again on every flatscreen frame.
-                GXSetCopyTexFreshOnly(mDoGph_gInf_c::getFrameBufferTex(), dusk::vr::isRenderingToHeadset());
+                // cleared outside immersive-VR frames, including screen mode.
+                GXSetCopyTexFreshOnly(mDoGph_gInf_c::getFrameBufferTex(), dusk::vr::isImmersiveVr());
 
                 #if DEBUG
                 // "Frame Buffer capture 2nd time (Rendering)"
@@ -2927,14 +2931,14 @@ int mDoGph_Painter() {
                 // this list, so rather than re-enable the whole pass, draw
                 // just the odour packet in VR. dKyr_odour_draw() has its own
                 // VR branch (eye-view billboarding, no frame-buffer sample).
-                if (!dusk::vr::isRenderingToHeadset()) {
+                if (!dusk::vr::isImmersiveVr()) {
                     GX_DEBUG_GROUP(dComIfGd_drawIndScreen);
                 } else if (g_env_light.mOdourData.mpOdourPacket != NULL) {
                     g_env_light.mOdourData.mpOdourPacket->draw();
                 }
 
                 if (strcmp(dComIfGp_getStartStageName(), "F_SP124") == 0 &&
-                    !dusk::vr::isRenderingToHeadset()) {
+                    !dusk::vr::isImmersiveVr()) {
                     retry_captue_frame(&camera_p->view, view_port,
                                        dComIfGp_getCameraZoomForcus(camera_id));
                 }
@@ -2974,7 +2978,7 @@ int mDoGph_Painter() {
                 {
                     u8 enable = mDoGph_gInf_c::getBloom()->getEnable();
                     GXColor color = *mDoGph_gInf_c::getBloom()->getMonoColor();
-                    if ((color.a != 0 || enable) && !dusk::vr::isRenderingToHeadset()) {
+                    if ((color.a != 0 || enable) && !dusk::vr::isImmersiveVr()) {
                         retry_captue_frame(&camera_p->view, view_port,
                                            dComIfGp_getCameraZoomForcus(camera_id));
                     }
@@ -3006,7 +3010,7 @@ int mDoGph_Painter() {
                 if (g_kankyoHIO.navy.field_0x30d != 0 && dKy_darkworld_check() == TRUE) {
                     dComIfGd_drawOpaListDark();
                     dComIfGd_drawXluListDark();
-                    if (!dusk::vr::isRenderingToHeadset()) {
+                    if (!dusk::vr::isImmersiveVr()) {
                         retry_captue_frame(&camera_p->view, view_port,
                                            dComIfGp_getCameraZoomForcus(camera_id));
                     }
@@ -3113,9 +3117,10 @@ int mDoGph_Painter() {
     }
     #endif
 
+    // Giant Screen submits the HUD separately; immersive VR keeps its billboard.
     if (!dusk::vr::isRenderingToHeadset()) {
         mDoGph_drawHud2D();
-    } else {
+    } else if (!dusk::vr::isVrScreenMode()) {
         dusk::vr::drawHudBillboard(mDoGph_gInf_c::getHudBillboardTexObj());
     }
 

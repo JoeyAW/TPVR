@@ -134,7 +134,7 @@ int daAlink_c::kandelaarModelCallBack() {
     // field_0x3630) is left computed as before -- harmless, since it only
     // ever feeds var_r28/var_r27, which are overridden here -- so there's
     // only this one place to revert if a proper fix is attempted later.
-    if (dusk::vr::isRenderingToHeadset()) {
+    if (dusk::vr::isImmersiveVr()) {
         var_r28 = 0;
         var_r27 = 0;
     }

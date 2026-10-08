@@ -40,6 +40,14 @@ bool isActive();
 // skipping that fallback whenever this is false blanks menus/video, not
 // just 3D gameplay.
 bool isRenderingToHeadset();
+// True while this headset frame is rendering the flat-camera giant-screen
+// presentation rather than the game directly in immersive VR.
+bool isVrScreenMode();
+
+// True only when a frame has a headset target and the game should use
+// immersive-VR gameplay/rendering behavior. Use this for game semantics;
+// isRenderingToHeadset() remains the physical output-target predicate.
+bool isImmersiveVr();
 
 // True ONLY while a VR eye's own protected offscreen pass is actually open
 // (between a given beginEye() and its matching endEye() inside tick()'s
@@ -53,6 +61,10 @@ bool isRenderingToHeadset();
 // yet" -- the latter is exactly the safe window captureHudBillboard() and
 // captureMapCopy2D() (m_Do_graphic.cpp) already render into.
 bool isEyePassOpen();
+// True while any protected OpenXR render pass is open, including the
+// flat-camera source pass used by screen mode. Use before opening a nested
+// GX framebuffer pass; isEyePassOpen() remains eye-specific.
+bool isProtectedVrPassOpen();
 
 // Only meaningful while isRenderingToHeadset() is true (returns the last
 // computed values otherwise, harmlessly stale). The smallest symmetric
@@ -498,13 +510,14 @@ void tick(const dusk::game_clock::FrameTiming& pacing);
 
 // Call once per frame, right after the caller's own aurora_end_frame() --
 // NOT inside the aurora_begin_frame()/aurora_end_frame() pair tick() runs
-// in. Finishes what tick() started: reads back each eye's copied pixels,
-// uploads them into the XR swapchain image, releases the swapchain image,
-// and calls xrEndFrame(). Required because tick() returns before
-// aurora_end_frame() actually submits the frame's GPU work, so the copy
-// tick() encodes isn't safe to read back until after that Submit() has
-// run. Safe to call unconditionally every frame -- a no-op if tick()
-// didn't actually render stereo eyes this frame.
+// in. Finishes what tick() started: copies each eye into the XR swapchain
+// image, releases the swapchain image, and calls xrEndFrame(). Required
+// because tick() returns before aurora_end_frame() actually submits the
+// frame's GPU work, so that copy can't run until after that Submit(). On
+// Vulkan it is queued on aurora's render worker right behind the Submit
+// and this returns at once; the next tick() waits for it. Safe to call
+// unconditionally every frame -- a no-op if tick() didn't actually render
+// stereo eyes this frame.
 void submitFrame();
 
 }  // namespace dusk::vr

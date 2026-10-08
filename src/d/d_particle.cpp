@@ -15,8 +15,8 @@
 #include <windows.h>
 #endif
 #include "dusk/vr/vr_debug_log.hpp"  // dusk::vr::duskVrLog/duskVrSnprintf -- portable OutputDebugStringA/_snprintf_s stand-ins
-extern "C" bool g_duskVRRenderingToHeadset;
 extern "C" bool g_duskVRSessionActive;
+#include "dusk/vr/vr_main.hpp"
 #endif
 #include "d/d_jnt_col.h"
 #include "JSystem/JKernel/JKRExpHeap.h"
@@ -1514,7 +1514,7 @@ void dPa_control_c::setWaterRipple(u32* param_0, cBgS_PolyInfo& param_1, cXyz co
         // into *param_0) rather than calling the spawn function and
         // discarding the result -- matches every other "no emitter here"
         // state this codebase already represents with 0.
-        if (particleID[i] == ID_ZI_J_HAMON_IND && g_duskVRRenderingToHeadset) {
+        if (particleID[i] == ID_ZI_J_HAMON_IND && dusk::vr::isImmersiveVr()) {
             *param_0 = 0;
             continue;
         }

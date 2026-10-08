@@ -793,7 +793,7 @@ void dCamera_c::updatePad() {
         // (vr_main.cpp reads it directly). Don't also let it orbit the game
         // camera -- in third person the VR view sits on that camera, so the
         // orbit moved the view around Link instead of just rotating it.
-        if (dusk::vr::isRenderingToHeadset()) {
+        if (dusk::vr::isImmersiveVr()) {
             var_f31 = 0.0f;
             var_f29 = std::fabs(var_f30);
         }
@@ -11120,7 +11120,7 @@ void dCamera_c::onHorseDush() {
         // possession shots, Golden Wolf) that weren't reported and aren't
         // touched here, matching this project's established "disable only
         // the reported call site" pattern (see section 5's kagerou fixes).
-        if (!dusk::vr::isRenderingToHeadset()) {
+        if (!dusk::vr::isImmersiveVr()) {
             StartBlure(var_r30, mpPlayerActor, alpha, scale);
         }
     }

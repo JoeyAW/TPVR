@@ -1620,6 +1620,11 @@ public:
     f32 getStickAngleDistanceRate();
     void setSpeedAndAngleNormal();
     void setSpeedAndAngleAtn();
+#if TARGET_PC
+    bool checkVrAimMove();
+    void setSpeedAndAngleVrAimMove();
+    void setVrAimMoveAnime();
+#endif
     int checkRequestTalkActor(dAttList_c* i_attList, fopAc_ac_c* i_actor);
     bool checkServiceWaitMode();
     void setJumpMode();

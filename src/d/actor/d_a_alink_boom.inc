@@ -393,6 +393,11 @@ int daAlink_c::procBoomerangSubject() {
         if (setBodyAngleToCamera()) {
             setBoomerangSight();
         }
+#if TARGET_PC
+        if (checkVrAimMove()) {
+            setVrAimMoveAnime();
+        }
+#endif
     } else {
         mSight.offDrawFlg();
     }

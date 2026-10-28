@@ -1546,6 +1546,11 @@ int daAlink_c::procHookshotSubject() {
         } else {
             dComIfGp_setPlayerStatus0(0, 0x40000);
         }
+#if TARGET_PC
+        if (checkVrAimMove()) {
+            setVrAimMoveAnime();
+        }
+#endif
     }
 
     return 1;

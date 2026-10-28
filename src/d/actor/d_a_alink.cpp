@@ -10493,6 +10493,61 @@ void daAlink_c::setSpeedAndAngleAtn() {
     setNormalSpeedF(speed, deceleration);
 }
 
+#if TARGET_PC
+// VR "Move While Aiming" (game.vrMoveWhileAiming): the first-person aim procs
+// (bow/slingshot, boomerang, Dominion Rod, clawshot) normally hold Link still,
+// since flatscreen the stick aims there. In VR the controllers aim, so the
+// stick moves him instead, strafing like the Z-target aim procs (procBowMove()
+// etc.) but without a lock. Aim is still set by setBodyAngleToCamera().
+bool daAlink_c::checkVrAimMove() {
+    if (!dusk::vr::isImmersiveVr() || !dusk::getSettings().game.vrMoveWhileAiming.getValue()) {
+        return false;
+    }
+
+    return mProcID == PROC_BOW_SUBJECT || mProcID == PROC_BOOMERANG_SUBJECT ||
+           mProcID == PROC_COPY_ROD_SUBJECT || mProcID == PROC_HOOKSHOT_SUBJECT;
+}
+
+// Walks straight along the stick (headset-relative mMoveAngle) instead of
+// turning toward it. Clawshot only while the tip is ready, as in
+// procHookshotMove(); otherwise slows to a stop.
+void daAlink_c::setSpeedAndAngleVrAimMove() {
+    f32 speed = 0.0f;
+    if (checkInputOnR() && (mProcID != PROC_HOOKSHOT_SUBJECT || checkHookshotWait())) {
+        // keep only the part of the speed along the new direction, so
+        // reversing stops first instead of flipping at full speed
+        f32 keep = cM_scos(mMoveAngle - current.angle.y);
+        mNormalSpeed *= keep > 0.0f ? keep : 0.0f;
+        current.angle.y = mMoveAngle;
+        speed = mpHIO->mNoActAtnMove.m.mAcceleration * mStickValue;
+    }
+
+    setNormalSpeedF(speed, mpHIO->mNoActAtnMove.m.mDeceleration);
+}
+
+// Lower-body walk/strafe animation, same as the *Move procs.
+void daAlink_c::setVrAimMoveAnime() {
+    if (mProcID == PROC_HOOKSHOT_SUBJECT && !checkHookshotWait()) {
+        return;
+    }
+
+    u8 idleDir = mProcID == PROC_HOOKSHOT_SUBJECT ? 2 : 3;
+    f32 morf = -1.0f;
+    if (checkZeroSpeedF()) {
+        onModeFlg(MODE_IDLE);
+
+        if (field_0x2f98 != idleDir) {
+            field_0x2f98 = idleDir;
+            morf = mpHIO->mBasic.m.mBasicInterpolation;
+        }
+    } else {
+        offModeFlg(MODE_IDLE);
+    }
+
+    setBlendAtnMoveAnime(morf);
+}
+#endif
+
 int daAlink_c::checkRequestTalkActor(dAttList_c* i_attList, fopAc_ac_c* i_actor) {
     if (i_attList != NULL &&
         (i_attList->mType == fopAc_attn_SPEAK_e || (i_attList->mType == fopAc_attn_TALK_e && mTargetedActor == i_actor)))
@@ -12604,7 +12659,13 @@ int daAlink_c::checkNextAction(int param_0) {
     {
         if (mTargetedActor != NULL || checkAttentionLock()) {
             setSpeedAndAngleAtn();
-        } else if (((!checkUpperReadyThrowAnime() || mFastShotTime != 0)
+        }
+#if TARGET_PC
+        else if (checkVrAimMove()) {
+            setSpeedAndAngleVrAimMove();
+        }
+#endif
+        else if (((!checkUpperReadyThrowAnime() || mFastShotTime != 0)
                     || (checkBoomerangThrowAnime()
                         && (mThrowBoomerangAcKeep.getActor() != NULL || mEquipItem == 0x102 || checkNoResetFlg1(FLG1_UNK_2))
                         )

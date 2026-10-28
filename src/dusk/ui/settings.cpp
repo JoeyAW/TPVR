@@ -1224,6 +1224,13 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                             "back, then release the button to shoot. Both hands aim it. "
                             "Releasing without pulling back puts the seed away."
             });
+        config_bool_select(leftPane, rightPane, getSettings().game.vrMoveWhileAiming,
+            {
+                .key = "Move While Aiming",
+                .helpText = "Lets you walk while aiming the bow, slingshot, boomerang, "
+                            "clawshot or Dominion Rod, strafing like when Z-targeting. "
+                            "Off keeps you standing still while you aim, like the game does."
+            });
         config_bool_select(leftPane, rightPane, getSettings().game.vrHideAimCrosshair,
             {
                 .key = "Hide Aim Crosshair",

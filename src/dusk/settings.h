@@ -474,6 +474,9 @@ struct UserSettings {
         // release to shoot. Aims along the pouch -> grip line. Uses the
         // Left-Handed Bow mirror axes for its grip.
         ConfigVar<bool> vrPhysicalSlingshot;
+        // Lets the stick move Link while aiming the bow, slingshot,
+        // boomerang, clawshot or Dominion Rod (strafing, like Z-target aim).
+        ConfigVar<bool> vrMoveWhileAiming;
         // Hides the world-space aim dot (drawAimCrosshair()) for every aimed
         // item (bow, slingshot, hookshot, boomerang).
         ConfigVar<bool> vrHideAimCrosshair;

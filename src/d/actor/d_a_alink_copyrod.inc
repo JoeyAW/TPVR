@@ -293,6 +293,11 @@ int daAlink_c::procCopyRodSubject() {
         if (setBodyAngleToCamera()) {
             setCopyRodSight();
         }
+#if TARGET_PC
+        if (checkVrAimMove()) {
+            setVrAimMoveAnime();
+        }
+#endif
     } else {
         mSight.offDrawFlg();
     }

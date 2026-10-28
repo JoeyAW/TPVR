@@ -628,8 +628,15 @@ int daAlink_c::procBowSubjectInit() {
 
 int daAlink_c::procBowSubject() {
     setDoStatus(BUTTON_STATUS_BACK);
-    if (!checkNextAction(0) && setBodyAngleToCamera()) {
-        setBowSight();
+    if (!checkNextAction(0)) {
+        if (setBodyAngleToCamera()) {
+            setBowSight();
+        }
+#if TARGET_PC
+        if (checkVrAimMove()) {
+            setVrAimMoveAnime();
+        }
+#endif
     }
 
     return 1;

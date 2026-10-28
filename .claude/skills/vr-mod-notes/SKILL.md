@@ -16013,3 +16013,24 @@ grip, slightly below the fork; nock radius/pull tunables (kSling* in vr_link_vis
   was smoothed too. Now eased in play space (`detail_playSpaceMtx()`, from
   `s_playSpaceOrigin`/`s_playSpaceYawRad` recorded in computeTrackedHandMatrices():
   hand = origin + Ry(yaw)*controller*scale). Also fixes the same lag on the bow.
+
+### "Move While Aiming" (default ON) — built 2026-10-27, NOT yet tested in-headset
+
+`game.vrMoveWhileAiming`, VR tab > Combat after Physical Slingshot. In VR the first-person
+aim procs (PROC_BOW_SUBJECT -- bow + slingshot, BOOMERANG_SUBJECT, COPY_ROD_SUBJECT,
+HOOKSHOT_SUBJECT) let the stick move Link; flatscreen the stick aims there, in VR the
+controllers do. Stays in the Subject procs (the VR controller aim lives in
+setBodyAngleToCamera(), which only runs there) rather than routing to the *Move procs
+(those need a Z-lock; cancelBowMove() drops them without one).
+- `checkVrAimMove()` (d_a_alink.cpp): VR + setting + one of those procs.
+- checkNextAction()'s speed block: new branch -> `setSpeedAndAngleVrAimMove()`: walks
+  straight along headset-relative mMoveAngle (current.angle.y snapped to it; speed scaled
+  by cos of the direction change so reversing stops first), NoActAtnMove accel/decel;
+  mMaxSpeed comes from checkNextAction()'s attention branch (strafe speed), or full run
+  speed when walking straight along the aim (setBlendAtnMoveAnime()'s forward case, same
+  as the game's Z-target aim). Clawshot only while checkHookshotWait(), else slows to 0.
+- `setVrAimMoveAnime()` after setBodyAngleToCamera() in each Subject proc: same
+  MODE_IDLE/field_0x2f98 + setBlendAtnMoveAnime() pattern as procBowMove() (idle dir 3,
+  clawshot 2). Not for iron ball or horse/canoe aim.
+Untested risks: leg animation vs Full Body IK; boomerang's onLockDistanceCancel() (called
+by procBoomerangMove() while moving) is not called here.

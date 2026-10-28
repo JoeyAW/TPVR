@@ -9740,6 +9740,22 @@ void daAlink_c::setStickData() {
             } else {
                 mMoveAngle = getMagneBootsLocalAngleY(mMoveAngle, field_0x2fb9);
             }
+
+#if TARGET_PC
+            // VR "Flip With Iron Boots": the view is tilted with Link, so the
+            // stick is relative to where the headset looks along the surface
+            // (head forward in his local frame) instead of the game's
+            // upright-camera conversion above.
+            cXyz vrHeadForward;
+            if (dusk::vr::isImmersiveVr() &&
+                dusk::vr::getIronBootsHeadForward(&vrHeadForward.x, &vrHeadForward.y, &vrHeadForward.z))
+            {
+                multVecMagneBootInvMtx(&vrHeadForward);
+                if (vrHeadForward.absXZ() > 0.001f) {
+                    mMoveAngle = mStickAngle + vrHeadForward.atan2sX_Z();
+                }
+            }
+#endif
         } else {
             field_0x2fb9 = 1;
         }

@@ -249,6 +249,8 @@ XrInstance g_xrInstance = XR_NULL_HANDLE;
 // g_hudSmoothedWorldForward) -- movement direction should track head
 // rotation immediately, not lag.
 s16 g_headMoveAngleS = 0;
+// World-space head forward (tilted with the play space), same frame as above.
+cXyz g_headWorldForward(0.f, 0.f, 1.f);
 
 // Real right-controller-pointing aim yaw/pitch -- see getControllerAimAngles()'s
 // own declaration comment (vr_main.hpp). Computed once per frame in tick(),
@@ -684,6 +686,16 @@ float getSmoothTurnYawRad() {
 
 s16 getHeadMoveAngleS() {
     return g_headMoveAngleS;
+}
+
+bool getIronBootsHeadForward(float* outX, float* outY, float* outZ) {
+    if (!dusk::vr::g_playSpaceTiltActive) {
+        return false;
+    }
+    *outX = g_headWorldForward.x;
+    *outY = g_headWorldForward.y;
+    *outZ = g_headWorldForward.z;
+    return true;
 }
 
 // Backing state for getVrLightingCamera() (vr_main.hpp). Updated once per
@@ -1634,7 +1646,7 @@ static bool spaceWarpEncodeFrame(const vr_render::StereoParams& sp, const aurora
         const XrVector3f dWorld{(sp.eyeAnchor.x - g_swPrevAnchor.x) / vr_render::kEyePosScale,
                                 (sp.eyeAnchor.y - g_swPrevAnchor.y) / vr_render::kEyePosScale,
                                 (sp.eyeAnchor.z - g_swPrevAnchor.z) / vr_render::kEyePosScale};
-        extras->appSpaceDeltaPose.position = dusk::vr::rotateYawXr(dWorld, -g_swPrevYaw);
+        extras->appSpaceDeltaPose.position = dusk::vr::rotateYawOnlyXr(dWorld, -g_swPrevYaw);
         const float dYaw = yaw - g_swPrevYaw;
         extras->appSpaceDeltaPose.orientation = XrQuaternionf{0.f, std::sin(dYaw * 0.5f), 0.f, std::cos(dYaw * 0.5f)};
     } else {
@@ -2536,6 +2548,31 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         }
     }
 
+    // "Flip With Iron Boots" (game.vrIronBootsCameraFlip): while the boots
+    // hold Link to a magnetic surface, tilt the play space by his
+    // mMagneBootMtx (his local -> world rotation; a pure tilt, no net yaw) so
+    // the surface he stands on is the player's floor. Eased both ways so
+    // attaching, letting go and the game's own snaps don't jerk the view.
+    // Must run before anything below maps tracking space to the world
+    // (head forward, aim, hands, eyes). See dusk::vr::g_playSpaceTilt.
+    {
+        constexpr float kPlaySpaceTiltEaseSec = 0.12f;
+        auto* tiltLink = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
+        dusk::vr::g_playSpaceTiltActive =
+            dusk::getSettings().game.vrIronBootsCameraFlip.getValue() && tiltLink != nullptr &&
+            vr_link::isFirstPerson(tiltLink) && tiltLink->checkMagneBootsOn();
+        XrQuaternionf target{0.f, 0.f, 0.f, 1.f};
+        if (dusk::vr::g_playSpaceTiltActive) {
+            target = dusk::vr::quatFromRotMtx(tiltLink->getMagneBootsMtx());
+        }
+        const float t =
+            1.f - std::exp(-static_cast<float>(pacing.dt) / kPlaySpaceTiltEaseSec);
+        dusk::vr::g_playSpaceTilt = dusk::vr::slerpQuatXr(dusk::vr::g_playSpaceTilt, target, t);
+        if (!dusk::vr::g_playSpaceTiltActive && dusk::vr::g_playSpaceTilt.w > 0.99999f) {
+            dusk::vr::g_playSpaceTilt = XrQuaternionf{0.f, 0.f, 0.f, 1.f};
+        }
+    }
+
     // Scripted-camera facing assist (2026-08-19 request, Third Person VR
     // setting only). Two independent mechanisms, split same day per an
     // explicit follow-up request to treat Z-targeting differently from
@@ -2951,6 +2988,7 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         const cXyz headForward =
             vr_render::computeHeadWorldForward(hmdPose, dusk::vr::getSmoothTurnYawRad());
         g_headMoveAngleS = cM_atan2s(headForward.x, headForward.z);
+        g_headWorldForward = headForward;
 
         // HMD-based aim pitch (see getHeadAimAngles()'s own comment,
         // vr_main.hpp) -- same horizontal-length/atan2s(y, horiz) shape and

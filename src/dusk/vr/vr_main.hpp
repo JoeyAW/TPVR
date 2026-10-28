@@ -352,6 +352,12 @@ float getSmoothTurnYawRad();
 // relationship to where the player's head is actually turned in VR.
 s16 getHeadMoveAngleS();
 
+// "Flip With Iron Boots": while the view is tilted with Link on a magnetic
+// surface, returns true and the headset's world-space forward (for movement
+// relative to where the player looks along the surface). False otherwise.
+// Plain floats rather than cXyz, same header-layering reason as above.
+bool getIronBootsHeadForward(float* outX, float* outY, float* outZ);
+
 // Viewpoint for the base game's camera-relative lighting (d_kankyo.cpp's
 // dKy_light_eye()/dKy_light_center(), 2026-09-28). The kankyo code places
 // several lights relative to dComIfGp_getCamera(0)'s lookat eye/center --

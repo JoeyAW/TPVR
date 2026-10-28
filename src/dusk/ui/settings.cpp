@@ -1099,6 +1099,13 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                             "she turns. You can still look anywhere with the headset. On by "
                             "default.",
             });
+        config_bool_select(leftPane, rightPane, getSettings().game.vrIronBootsCameraFlip,
+            {
+                .key = "Flip With Iron Boots",
+                .helpText = "While Iron Boots hold you to a magnetic wall or ceiling, your "
+                            "view tilts with Link so the surface under his feet is your floor. "
+                            "Off keeps the view upright. On by default.",
+            });
 
         leftPane.add_section("Appearance");
         config_bool_select(leftPane, rightPane, getSettings().game.vrHudOnLeftArm,

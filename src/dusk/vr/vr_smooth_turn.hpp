@@ -47,6 +47,15 @@ namespace dusk::vr {
 // snap/smooth-turn works in essentially every other VR game.
 inline float g_smoothTurnYawRad = 0.f;
 
+// "Flip With Iron Boots" (game.vrIronBootsCameraFlip): extra rotation of the
+// whole play space, applied AFTER the yaw by rotateYawXr()/rotateYawQuat()
+// below, so the camera, hands, aim and head forward all tilt together with
+// Link on a magnetic wall/ceiling. Identity otherwise. Eased toward Link's
+// mMagneBootMtx once per frame by vr_main.cpp's tick(); g_playSpaceTiltActive
+// is whether it's targeting that matrix (vs easing back to upright).
+inline XrQuaternionf g_playSpaceTilt{0.f, 0.f, 0.f, 1.f};
+inline bool g_playSpaceTiltActive = false;
+
 // Deadzone to avoid drift from controller noise while the stick is resting
 // near center. The turn RATE itself is no longer a constant here -- it's
 // the game.vrSmoothTurnSpeed setting (default 135 deg/s, the value
@@ -193,10 +202,43 @@ inline constexpr float kZTargetCameraTrackMaxDurationSec = 1.5f;
 // yawRad. Explicit parameter rather than reading the global above directly
 // -- keeps this pure/testable and matches eyePoseToViewMtx's existing style
 // of taking `scale` as an explicit parameter instead of a hidden global.
-inline XrVector3f rotateYawXr(const XrVector3f& v, float yawRad) {
+inline XrVector3f rotateYawOnlyXr(const XrVector3f& v, float yawRad) {
     const float s = std::sin(yawRad);
     const float c = std::cos(yawRad);
     return XrVector3f{ v.x * c + v.z * s, v.y, -v.x * s + v.z * c };
+}
+
+// Hamilton product a * b (apply b, then a).
+inline XrQuaternionf mulQuatXr(const XrQuaternionf& a, const XrQuaternionf& b) {
+    return XrQuaternionf{
+        a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+        a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+        a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+        a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+    };
+}
+
+inline XrVector3f rotateVecByQuatXr(const XrQuaternionf& q, const XrVector3f& v) {
+    // v + 2w(u x v) + 2u x (u x v), u = q.xyz
+    const float tx = 2.f * (q.y * v.z - q.z * v.y);
+    const float ty = 2.f * (q.z * v.x - q.x * v.z);
+    const float tz = 2.f * (q.x * v.y - q.y * v.x);
+    return XrVector3f{
+        v.x + q.w * tx + (q.y * tz - q.z * ty),
+        v.y + q.w * ty + (q.z * tx - q.x * tz),
+        v.z + q.w * tz + (q.x * ty - q.y * tx),
+    };
+}
+
+inline bool isPlaySpaceTiltIdentity() {
+    return g_playSpaceTilt.w > 0.999999f;
+}
+
+// Play-space mapping for a tracking-space vector: yaw, then the Iron Boots
+// tilt (identity unless magnetized, see g_playSpaceTilt).
+inline XrVector3f rotateYawXr(const XrVector3f& v, float yawRad) {
+    const XrVector3f yawed = rotateYawOnlyXr(v, yawRad);
+    return isPlaySpaceTiltIdentity() ? yawed : rotateVecByQuatXr(g_playSpaceTilt, yawed);
 }
 
 // Composes a yaw rotation onto an orientation quaternion in world/tracking
@@ -205,15 +247,64 @@ inline XrVector3f rotateYawXr(const XrVector3f& v, float yawRad) {
 // rotateYawXr above applies to a position, so a rigidly-tracked point
 // (e.g. a hand's offset from the head) stays self-consistent under the
 // applied yaw. RotateY(yawRad) = (0, sin(yawRad/2), 0, cos(yawRad/2)).
+// Also applies the Iron Boots tilt after the yaw, same as rotateYawXr().
 inline XrQuaternionf rotateYawQuat(const XrQuaternionf& q, float yawRad) {
     const float hs = std::sin(yawRad * 0.5f);
     const float hc = std::cos(yawRad * 0.5f);
-    return XrQuaternionf{
+    const XrQuaternionf yawed{
         hc * q.x + hs * q.z,
         hc * q.y + hs * q.w,
         hc * q.z - hs * q.x,
         hc * q.w - hs * q.y,
     };
+    return isPlaySpaceTiltIdentity() ? yawed : mulQuatXr(g_playSpaceTilt, yawed);
+}
+
+// Rotation part of a game Mtx (column-vector convention, v' = m * v; the game
+// world and OpenXR tracking space share axes) as a quaternion.
+inline XrQuaternionf quatFromRotMtx(const float m[3][4]) {
+    XrQuaternionf q;
+    const float trace = m[0][0] + m[1][1] + m[2][2];
+    if (trace > 0.f) {
+        const float s = std::sqrt(trace + 1.f) * 2.f;
+        q = {(m[2][1] - m[1][2]) / s, (m[0][2] - m[2][0]) / s, (m[1][0] - m[0][1]) / s, 0.25f * s};
+    } else if (m[0][0] > m[1][1] && m[0][0] > m[2][2]) {
+        const float s = std::sqrt(1.f + m[0][0] - m[1][1] - m[2][2]) * 2.f;
+        q = {0.25f * s, (m[0][1] + m[1][0]) / s, (m[0][2] + m[2][0]) / s, (m[2][1] - m[1][2]) / s};
+    } else if (m[1][1] > m[2][2]) {
+        const float s = std::sqrt(1.f + m[1][1] - m[0][0] - m[2][2]) * 2.f;
+        q = {(m[0][1] + m[1][0]) / s, 0.25f * s, (m[1][2] + m[2][1]) / s, (m[0][2] - m[2][0]) / s};
+    } else {
+        const float s = std::sqrt(1.f + m[2][2] - m[0][0] - m[1][1]) * 2.f;
+        q = {(m[0][2] + m[2][0]) / s, (m[1][2] + m[2][1]) / s, 0.25f * s, (m[1][0] - m[0][1]) / s};
+    }
+    float len = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+    if (q.w < 0.f) {
+        len = -len;
+    }
+    return XrQuaternionf{q.x / len, q.y / len, q.z / len, q.w / len};
+}
+
+inline XrQuaternionf slerpQuatXr(const XrQuaternionf& a, XrQuaternionf b, float t) {
+    float d = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+    if (d < 0.f) {
+        b = XrQuaternionf{-b.x, -b.y, -b.z, -b.w};
+        d = -d;
+    }
+    float wa, wb;
+    if (d > 0.9995f) {
+        wa = 1.f - t;
+        wb = t;
+    } else {
+        const float theta = std::acos(d);
+        const float s = std::sin(theta);
+        wa = std::sin((1.f - t) * theta) / s;
+        wb = std::sin(t * theta) / s;
+    }
+    const XrQuaternionf r{wa * a.x + wb * b.x, wa * a.y + wb * b.y, wa * a.z + wb * b.z,
+                          wa * a.w + wb * b.w};
+    const float len = std::sqrt(r.x * r.x + r.y * r.y + r.z * r.z + r.w * r.w);
+    return XrQuaternionf{r.x / len, r.y / len, r.z / len, r.w / len};
 }
 
 }  // namespace dusk::vr

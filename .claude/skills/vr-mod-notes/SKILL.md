@@ -16034,3 +16034,29 @@ setBodyAngleToCamera(), which only runs there) rather than routing to the *Move 
   clawshot 2). Not for iron ball or horse/canoe aim.
 Untested risks: leg animation vs Full Body IK; boomerang's onLockDistanceCancel() (called
 by procBoomerangMove() while moving) is not called here.
+
+### "Flip With Iron Boots" (default ON) — built 2026-10-27, NOT yet tested in-headset
+
+`game.vrIronBootsCameraFlip`, VR tab > Turning, after Turn With Epona. While
+`checkMagneBootsOn()` in first person, the whole play space is tilted by Link's
+`mMagneBootMtx` (Ry(a)Rx(b)Ry(-a): his local -> world, a pure tilt), so walls/ceilings
+and the rotating magnet platforms become the player's floor.
+- `dusk::vr::g_playSpaceTilt` (vr_smooth_turn.hpp): applied AFTER the yaw inside
+  `rotateYawXr()`/`rotateYawQuat()` -- every tracking -> world mapping (eyes via
+  eyePoseToViewMtx, hands via buildHandMtx/computeTrackedHandMatrices, aim pose, head
+  forward/rotation, 6DOF offset, play-space basis) already goes through them, so they all
+  tilt together. `rotateYawOnlyXr()` = the old pure-yaw version (only SpaceWarp's delta
+  uses it).
+- tick() (vr_main.cpp, right after smooth/snap turn): target = quatFromRotMtx(M) or
+  identity; slerp with 1-exp(-dt/0.12s); snapped to exact identity once settled.
+- Movement (d_a_alink.cpp, after the game's getMagneBootsLocalAngleY() conversion): with
+  the tilt active, mMoveAngle = stick + yaw of (M^-1 * tilted head forward), i.e. walk
+  where you look along the surface. `getIronBootsHeadForward()` (vr_main.hpp).
+- Aim needed no change: the controller aim is now a tilted world dir, which
+  setBodyAngleToCamera()'s existing multVecMagneBootInvMtx() conversion handles.
+- Camera position: unchanged, still the raw head-joint anchor while magnetized
+  (getSubjectEyePos, already M-aware).
+Untested risks: g_headMoveAngleS (atan2 of the tilted forward) is meaningless on a ceiling
+-- body-yaw forcing is already off while magnetized, but anything else reading it there
+(lighting yaw) may look off; Full Body IK gets a tilted head rotation; the game's snaps
+of M (attach/detach) are eased, not removed.

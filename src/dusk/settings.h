@@ -389,6 +389,10 @@ struct UserSettings {
         // option that shows link's body and puts the entire game in third
         // person").
         ConfigVar<bool> vrThirdPerson;
+        // Third person only while riding Epona (checkHorseRide()); first
+        // person everywhere else. Same camera/body handling as vrThirdPerson
+        // via vr_link::isVrThirdPersonActive(). Default off (2026-10-28).
+        ConfigVar<bool> vrThirdPersonOnEpona;
         // Third Person only: each frame, the flatscreen game camera's own yaw
         // change is added to the VR smooth-turn yaw, so the view turns WITH
         // the game camera while the headset still looks around freely on top.

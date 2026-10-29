@@ -20401,6 +20401,8 @@ int daAlink_c::draw() {
         const BOOL hideBodyForVr = dusk::vr::isImmersiveVr() &&
                                     !dusk::getSettings().game.vrFullBody.getValue() &&
                                     !dusk::getSettings().game.vrThirdPerson.getValue() &&
+                                    !(dusk::getSettings().game.vrThirdPersonOnEpona.getValue() &&
+                                      checkHorseRide()) &&
                                     !dusk::vr::isRealCutsceneRunning();
         modelDraw(mpLinkModel, isPlayerNoDraw || hideBodyForVr);
         // Stowed sword/shield and the sheath are hidden in VR first person

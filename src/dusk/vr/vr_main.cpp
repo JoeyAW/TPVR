@@ -2608,11 +2608,11 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         }
 
         bool followActive = false;
-        if (dusk::getSettings().game.vrThirdPerson.getValue() &&
-            dusk::getSettings().game.vrThirdPersonFollowCameraYaw.getValue() &&
+        if (dusk::getSettings().game.vrThirdPersonFollowCameraYaw.getValue() &&
             !dusk::vr::isRealCutsceneRunning() && !dusk::vr::isHeadDrivenAimActive())
         {
-            if (auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer())) {
+            auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
+            if (link && vr_link::isVrThirdPersonActive(link)) {
                 followActive = !dusk::vr::isVrFirstPerson(link);
             }
         }
@@ -2909,10 +2909,9 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         }
 
         bool zTargetActive = false;
-        if (dusk::getSettings().game.vrThirdPerson.getValue() &&
-            dusk::getSettings().game.vrZTargetCameraFocus.getValue())
-        {
-            if (auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer())) {
+        if (dusk::getSettings().game.vrZTargetCameraFocus.getValue()) {
+            auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
+            if (link && vr_link::isVrThirdPersonActive(link)) {
                 zTargetActive = link->checkAttentionLock();
             }
         }

@@ -963,6 +963,14 @@ inline bool isHookshotAirborneOrHanging(daAlink_c* link);
 inline bool isHookshotAiming(daAlink_c* link);
 inline bool isRealCutsceneRunning();
 
+// "Third Person" (game.vrThirdPerson), or "Third Person On Epona"
+// (game.vrThirdPersonOnEpona) while riding her. Every vrThirdPerson check
+// that's about the current view goes through this.
+inline bool isVrThirdPersonActive(daAlink_c* link) {
+    if (dusk::getSettings().game.vrThirdPerson.getValue()) return true;
+    return link && dusk::getSettings().game.vrThirdPersonOnEpona.getValue() && link->checkHorseRide();
+}
+
 inline bool isFirstPerson(daAlink_c* link) {
     if (!link || link->checkWolf()) return false;
 
@@ -1014,7 +1022,7 @@ inline bool isFirstPerson(daAlink_c* link) {
     // general aim-camera issue (bow/slingshot/boomerang aiming was
     // explicitly checked and does NOT show this symptom) -- so scoped
     // narrowly to hookshot's own aiming state, not every aim-capable item.
-    if (dusk::getSettings().game.vrThirdPerson.getValue() &&
+    if (isVrThirdPersonActive(link) &&
         !isHookshotAirborneOrHanging(link) && !isHookshotAiming(link)) return false;
 
     if (!link->checkEventRun()) return true;  // no event at all -- ordinary gameplay
@@ -1419,7 +1427,7 @@ inline bool isHookshotAiming(daAlink_c* link) {
 // warranted for a hookshot-only preference).
 inline bool shouldTrackHookshotToHand(daAlink_c* link) {
     if (!isFirstPerson(link)) return false;
-    if (dusk::getSettings().game.vrThirdPerson.getValue() &&
+    if (isVrThirdPersonActive(link) &&
         (isHookshotAirborneOrHanging(link) || isHookshotAiming(link))) {
         return false;
     }
@@ -2718,6 +2726,39 @@ inline void refreshBootsLive(daAlink_c* link) {
         if (boots[i]->getModelData()->getWEvlpMtxNum() > 0) boots[i]->calcWeightEnvelopeMtx();
         markModelJointsLive(boots[i]);
     }
+
+    // Magnet zap around the boots (setMagneBootsEffect(), d_a_alink_effect.inc):
+    // its emitters are pinned to the boot joints once per sim tick, i.e. to
+    // the un-anchored boots. Same fix as the lantern flame
+    // (refreshTrackedHeldItemMtxLive()): re-pin the emitters to the boots just
+    // drawn and re-root the live particles there, every frame.
+    for (int i = 0; i < 2; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            JPABaseEmitter* emitter = dComIfGp_particle_getEmitter(link->getMagneBootsParticleId(i, j));
+            if (!emitter) continue;
+            MtxP m = boots[i]->getAnmMtx(j == 1 ? 1 : 2);  // setMagneBootsEffect()'s joints
+            emitter->setGlobalRTMatrix(m);
+            dusk::interp::particle::mark_live_position(emitter);
+            const cXyz root = detail::ikPos(m);
+            JPANode<JPABaseParticle>* lists[2][2] = {
+                {emitter->mAlivePtclBase.getFirst(), emitter->mAlivePtclBase.getEnd()},
+                {emitter->mAlivePtclChld.getFirst(), emitter->mAlivePtclChld.getEnd()},
+            };
+            for (auto& list : lists) {
+                for (JPANode<JPABaseParticle>* node = list[0]; node != list[1]; node = node->getNext()) {
+                    JPABaseParticle* ptcl = node->getObject();
+                    const cXyz local(ptcl->mPosition.x - ptcl->mOffsetPosition.x,
+                                     ptcl->mPosition.y - ptcl->mOffsetPosition.y,
+                                     ptcl->mPosition.z - ptcl->mOffsetPosition.z);
+                    ptcl->mOffsetPosition.set(root.x, root.y, root.z);
+                    ptcl->mPosition.set(root.x + local.x, root.y + local.y, root.z + local.z);
+                    ptcl->setStatus(0x20);
+                    dusk::interp::mark_live_this_frame(ptcl);
+                    dusk::interp::particle::mark_live_position(ptcl);
+                }
+            }
+        }
+    }
 }
 
 inline bool isFullBodyIkActive(daAlink_c* link) {
@@ -2910,7 +2951,46 @@ inline void refreshFullBodyIkLive(const cXyz& cameraEye, s16 headYawS, const Mtx
     // 2026-10-15; the ball-and-chain twirl twists the upper body, and turning
     // that to the head yaw spun the whole body. Falls back to the shoulders
     // if the hip joints are too close together to give a direction.
+    // Iron Boots on a wall/ceiling: "up" is Link's surface normal, so the
+    // turn below and the elbow pole are done in his local frame
+    // (mMagneBootMtx, local -> world, rotation only) instead of about world
+    // Y -- turning about world Y there swung the whole body off the wall and
+    // put the elbows on the wrong side. surf = identity when not magnetized.
+    // Local helpers: toLocal = surf^T * v, toWorld = surf * v.
+    Mtx surf;
+    MTXIdentity(surf);
+    const bool onSurface = link->checkMagneBootsOn();
+    if (onSurface) {
+        MtxP m = link->getMagneBootsMtx();
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) surf[r][c] = m[r][c];
+        }
+    }
+    auto toLocal = [&surf](const cXyz& v) {
+        return cXyz(surf[0][0] * v.x + surf[1][0] * v.y + surf[2][0] * v.z,
+                    surf[0][1] * v.x + surf[1][1] * v.y + surf[2][1] * v.z,
+                    surf[0][2] * v.x + surf[1][2] * v.y + surf[2][2] * v.z);
+    };
+    auto toWorld = [&surf](const cXyz& v) {
+        cXyz o;
+        MTXMultVecSR(surf, &v, &o);
+        return o;
+    };
+    // Local-frame head yaw. Off the surface this is just headYawS; on it,
+    // the headset forward (headWorldRot's +Z column) taken into his frame.
+    if (onSurface && headWorldRot != nullptr) {
+        const cXyz f = toLocal(cXyz((*headWorldRot)[0][2], (*headWorldRot)[1][2], (*headWorldRot)[2][2]));
+        if (f.absXZ() > 1e-3f) headYawS = cM_atan2s(f.x, f.z);
+    }
+
     s16 bodyYaw = link->shape_angle.y;
+    if (onSurface) {
+        // Sign reference for the hip line below: the drawn model's facing
+        // (base matrix +Z) in his frame, rather than shape_angle.
+        MtxP base = model->getBaseTRMtx();
+        const cXyz f = toLocal(cXyz(base[0][2], base[1][2], base[2][2]));
+        if (f.absXZ() > 1e-3f) bodyYaw = cM_atan2s(f.x, f.z);
+    }
     {
         constexpr int kLegA = 0x13;  // leg chains, as setItemMatrix() reads them for the iron boots
         constexpr int kLegB = 0x18;
@@ -2925,8 +3005,8 @@ inline void refreshFullBodyIkLive(const cXyz& cameraEye, s16 headYawS, const Mtx
                 lineB = hipB;
             }
         }
-        const cXyz lS = detail::ikPos(model->getAnmMtx(lineA));
-        const cXyz rS = detail::ikPos(model->getAnmMtx(lineB));
+        const cXyz lS = toLocal(detail::ikPos(model->getAnmMtx(lineA)));
+        const cXyz rS = toLocal(detail::ikPos(model->getAnmMtx(lineB)));
         cXyz fwd(lS.z - rS.z, 0.f, -(lS.x - rS.x));  // up x (A - B); sign fixed below
         if (fwd.x * cM_ssin(bodyYaw) + fwd.z * cM_scos(bodyYaw) < 0.f) {
             fwd.x = -fwd.x;
@@ -2943,6 +3023,13 @@ inline void refreshFullBodyIkLive(const cXyz& cameraEye, s16 headYawS, const Mtx
         const s16 deltaYaw = static_cast<s16>(headYawS - bodyYaw);
         Mtx rot;
         MTXRotRad(rot, 'Y', cM_s2rad(deltaYaw));
+        if (onSurface) {
+            // surf * Ry * surf^T: the same turn, about his up.
+            Mtx surfT, tmp;
+            MTXTranspose(surf, surfT);
+            MTXConcat(rot, surfT, tmp);
+            MTXConcat(surf, tmp, rot);
+        }
         Mtx& delta = detail::s_bodyAnchorDelta;
         MTXCopy(rot, delta);
         cXyz rEye;
@@ -2967,15 +3054,16 @@ inline void refreshFullBodyIkLive(const cXyz& cameraEye, s16 headYawS, const Mtx
     }
 
     // Pole: elbows point down, outward (away from the other shoulder) and a
-    // little back.
-    const cXyz lS = detail::ikPos(model->getAnmMtx(lShoulder));
-    const cXyz rS = detail::ikPos(model->getAnmMtx(rShoulder));
+    // little back -- in his frame (see surf above), then back to world.
+    const cXyz lS = toLocal(detail::ikPos(model->getAnmMtx(lShoulder)));
+    const cXyz rS = toLocal(detail::ikPos(model->getAnmMtx(rShoulder)));
     cXyz out = lS - rS;
     out.y = 0.f;
     if (out.abs() > 1e-3f) out /= out.abs();
+    out = toWorld(out);
     const s16 yaw = bodyYaw;
-    const cXyz back(-cM_ssin(yaw), 0.f, -cM_scos(yaw));
-    const cXyz down(0.f, -1.f, 0.f);
+    const cXyz back = toWorld(cXyz(-cM_ssin(yaw), 0.f, -cM_scos(yaw)));
+    const cXyz down = toWorld(cXyz(0.f, -1.f, 0.f));
     const f32 maxStretch = dusk::getSettings().game.vrArmStretchMax.getValue();
     detail::ikSolveArm(model, kLeftHand, lElbow, lShoulder, detail::s_leftHandMtx,
                        down + out * 0.6f + back * 0.3f, maxStretch);

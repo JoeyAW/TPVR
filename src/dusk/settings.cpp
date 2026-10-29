@@ -110,6 +110,7 @@ UserSettings g_userSettings = {
         .vrShadows {"game.vrShadows", true},        .vrFullBody {"game.vrFullBody", true},
         .vrFullBodyShowRolls {"game.vrFullBodyShowRolls", false},
         .vrArmStretchMax {"game.vrArmStretchMax", 1.25f},        .vrThirdPerson {"game.vrThirdPerson", false},
+        .vrThirdPersonOnEpona {"game.vrThirdPersonOnEpona", false},
         .vrThirdPersonFollowCameraYaw {"game.vrThirdPersonFollowCameraYaw", true},
         .vrZTargetCameraFocus {"game.vrZTargetCameraFocus", true},
         .vrAttachBodyRotationToHead {"game.vrAttachBodyRotationToHead", false},
@@ -449,6 +450,7 @@ void registerSettings() {
     Register(g_userSettings.game.vrShadows);    Register(g_userSettings.game.vrFullBody);
     Register(g_userSettings.game.vrFullBodyShowRolls);
     Register(g_userSettings.game.vrArmStretchMax);    Register(g_userSettings.game.vrThirdPerson);
+    Register(g_userSettings.game.vrThirdPersonOnEpona);
     Register(g_userSettings.game.vrThirdPersonFollowCameraYaw);
     Register(g_userSettings.game.vrZTargetCameraFocus);
     Register(g_userSettings.game.vrAttachBodyRotationToHead);

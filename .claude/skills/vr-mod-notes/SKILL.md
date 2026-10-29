@@ -16060,3 +16060,26 @@ Untested risks: g_headMoveAngleS (atan2 of the tilted forward) is meaningless on
 -- body-yaw forcing is already off while magnetized, but anything else reading it there
 (lighting yaw) may look off; Full Body IK gets a tilted head rotation; the game's snaps
 of M (attach/detach) are eased, not removed.
+- 2026-10-28 in-headset report: elbows flipped on ceilings, and turning the head on a wall
+  swung the whole body off the wall. Both from Full Body IK (`refreshFullBodyIkLive()`):
+  the head-anchor turn was Ry(headYaw - bodyYaw) about WORLD Y and the elbow pole used
+  world down/back. Fix (built, NOT yet tested): while `checkMagneBootsOn()`, the hip-line
+  body yaw, the head yaw (headWorldRot's +Z column) and the pole are all computed in
+  Link's frame (mMagneBootMtx), and the turn is M * Ry * M^T. Body-yaw sign reference on
+  the surface is the model base matrix +Z, not shape_angle. Off the surface: unchanged.
+- 2026-10-28: body/elbow fix above CONFIRMED in-headset. Follow-up report: the magnet zap
+  around the boots (setMagneBootsEffect(), ID_ZI_J_HB_MAGNE_A/B/C) drew at the
+  un-anchored flatscreen boots -- its emitters are pinned to mpLinkBootModels' joints
+  once per sim tick. Fix (built, NOT yet tested): end of refreshBootsLive() re-pins the 6
+  emitters (new accessor daAlink_c::getMagneBootsParticleId(foot, j)) to the live boot
+  joints and re-roots their particles, same pattern as the lantern flame.
+
+### "Third Person On Epona" (default OFF) — built 2026-10-28, NOT yet tested in-headset
+
+`game.vrThirdPersonOnEpona`, VR settings right after "Third Person" (greyed out while
+Third Person is on). Third person only while `checkHorseRide()`. New
+`vr_link::isVrThirdPersonActive(link)` = vrThirdPerson || (this && checkHorseRide()),
+used by isFirstPerson(), shouldTrackHookshotToHand(), the Turn With Game Camera follow and
+Z-target focus (vr_main.cpp), plus the hideBodyForVr check in d_a_alink.cpp. "Turn With
+Game Camera" is enabled when either option is on. Wolf can't ride Epona, so
+isWolfFirstPersonView() is unchanged.

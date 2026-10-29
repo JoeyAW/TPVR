@@ -1149,6 +1149,13 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                             "still looks around freely, just from behind Link instead of "
                             "through his eyes. Also shows his body. Off by default."
             });
+        config_bool_select(leftPane, rightPane, getSettings().game.vrThirdPersonOnEpona,
+            {
+                .key = "Third Person On Epona",
+                .helpText = "Switches to the third-person camera only while riding Epona, "
+                            "and stays first person everywhere else. Off by default.",
+                .isDisabled = [] { return getSettings().game.vrThirdPerson.getValue(); },
+            });
         config_bool_select(leftPane, rightPane, getSettings().game.vrThirdPersonFollowCameraYaw,
             {
                 .key = "Turn With Game Camera",
@@ -1156,7 +1163,10 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                             "right (for example following Link as he runs), your view turns "
                             "with it. You can still look anywhere with the headset. On by "
                             "default.",
-                .isDisabled = [] { return !getSettings().game.vrThirdPerson.getValue(); },
+                .isDisabled = [] {
+                    return !getSettings().game.vrThirdPerson.getValue() &&
+                           !getSettings().game.vrThirdPersonOnEpona.getValue();
+                },
             });
         config_bool_select(leftPane, rightPane, getSettings().game.vrZTargetCameraFocus,
             {

@@ -3756,6 +3756,8 @@ public:
     // refreshTrackedHeldItemMtxLive()'s own comment (vr_link_visibility.hpp)
     // for why it needed its own live-refresh treatment too.
     u32 getKandelaarParticleId() const { return field_0x31c4; }
+    // Iron Boots magnet zap emitters (setMagneBootsEffect()): [foot][effect].
+    u32 getMagneBootsParticleId(int foot, int j) const { return field_0x3228[foot][j]; }
     // The clawshot's SECOND hand-grip model -- setHookshotPos()/
     // applyTrackedHookshotGripTransforms() swap which of mHeldItemModel/
     // this one represents the left vs right hand via field_0x3020

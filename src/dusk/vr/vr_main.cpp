@@ -815,6 +815,18 @@ bool isPhysicalSlingshotMode(daAlink_c* link) {
     return isImmersiveVr() && vr_link::isPhysicalSlingshotMode(link);
 }
 
+bool getPhysicalClimbInput(daAlink_c* link, float* outStick, s16* outAngle) {
+    return isImmersiveVr() && vr_link::getPhysicalClimbInput(link, outStick, outAngle);
+}
+
+bool getPhysicalSwimInput(daAlink_c* link, bool vertical, float* outStick, s16* outYaw, s16* outPitch) {
+    return isImmersiveVr() && vr_link::getPhysicalSwimInput(link, vertical, outStick, outYaw, outPitch);
+}
+
+bool consumePhysicalSwimStroke() {
+    return isImmersiveVr() && vr_link::consumePhysicalSwimStroke();
+}
+
 bool isPhysicalSlingshotNocked() {
     return isImmersiveVr() && vr_link::isPhysicalSlingshotNocked();
 }
@@ -2448,7 +2460,10 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     constexpr float kTriggerDeadzone = 0.1f;
     constexpr float kSqueezeThreshold = 0.5f;
     constexpr float kStickDeadzone = 0.15f;
-    if (rightSqueeze > kSqueezeThreshold) padStatus.button |= PAD_BUTTON_X;  // was Z
+    // While physically climbing the squeezes grab (vr_link::
+    // updatePhysicalClimbState()) instead of pressing X / R.
+    const bool squeezeClimbs = !screenMode && vr_link::isPhysicalClimbActive();
+    if (rightSqueeze > kSqueezeThreshold && !squeezeClimbs) padStatus.button |= PAD_BUTTON_X;  // was Z
     if (rightTrigger > kTriggerDeadzone) padStatus.button |= PAD_BUTTON_Y;   // was analog R
     if (leftTrigger > kTriggerDeadzone) {
         padStatus.button |= PAD_TRIGGER_L;
@@ -2459,7 +2474,7 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     // why a plain OR isn't enough by itself -- the force-release phase can
     // override an existing squeeze-hold to guarantee spActionTrigger() sees
     // a real 0->1 edge).
-    bool rWantsHeld = leftSqueeze > kTriggerDeadzone;
+    bool rWantsHeld = leftSqueeze > kTriggerDeadzone && !squeezeClimbs;
     if (rightThrustForceRelease) {
         rWantsHeld = false;
     } else if (rightThrustForceHold) {
@@ -3129,6 +3144,22 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     // poses the hands/arms or calcs the bow.
     vr_link::updatePhysicalBowState(g_rightAimForward, g_leftAimForward, pacing.dt);
     vr_link::updatePhysicalSlingshotState(g_leftAimForward, pacing.dt);
+    // Physical climbing: grab/pull from the squeezes, gripped hand held on
+    // its grab point.
+    vr_link::updatePhysicalClimbState(leftSqueeze, rightSqueeze);
+    // Physical swimming: arm strokes -> push (vr_link_visibility.hpp).
+    vr_link::updatePhysicalSwimState(pacing.dt);
+    if (const int grabHand = vr_link::consumeClimbGrabEvent(); grabHand >= 0) {
+        XrHapticActionInfo info{XR_TYPE_HAPTIC_ACTION_INFO};
+        info.action = g_hapticAction;
+        info.subactionPath = grabHand == 0 ? g_leftHandPath : g_rightHandPath;
+        XrHapticVibration vib{XR_TYPE_HAPTIC_VIBRATION};
+        vib.duration = 25'000'000;  // ns
+        vib.frequency = XR_FREQUENCY_UNSPECIFIED;
+        vib.amplitude = 0.4f;
+        xrApplyHapticFeedback(g_session->session(), &info,
+                              reinterpret_cast<const XrHapticBaseHeader*>(&vib));
+    }
     if (auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer())) {
         dusk::vr::refreshTrackedHandDrawMtxLive(link->getHandModel());
     }

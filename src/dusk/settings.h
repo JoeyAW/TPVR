@@ -478,6 +478,12 @@ struct UserSettings {
         // release to shoot. Aims along the pouch -> grip line. Uses the
         // Left-Handed Bow mirror axes for its grip.
         ConfigVar<bool> vrPhysicalSlingshot;
+        // Ladders and climbable walls: squeeze to grab, pull the hand down
+        // (or sideways on walls) to climb. The stick still works too.
+        ConfigVar<bool> vrPhysicalClimbing;
+        // Swimming: quick arm strokes push Link the opposite way (with the
+        // Zora Armor underwater too). The stick and buttons still work.
+        ConfigVar<bool> vrPhysicalSwimming;
         // Lets the stick move Link while aiming the bow, slingshot,
         // boomerang, clawshot or Dominion Rod (strafing, like Z-target aim).
         ConfigVar<bool> vrMoveWhileAiming;

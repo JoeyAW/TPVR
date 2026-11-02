@@ -1241,6 +1241,22 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                             "back, then release the button to shoot. Both hands aim it. "
                             "Releasing without pulling back puts the seed away."
             });
+        config_bool_select(leftPane, rightPane, getSettings().game.vrPhysicalClimbing,
+            {
+                .key = "Physical Climbing",
+                .helpText = "On ladders and climbable walls, squeeze a grip to grab and pull "
+                            "your hand down to climb up (push it up to climb down, or pull "
+                            "sideways on walls). The stick still works too."
+            });
+        config_bool_select(leftPane, rightPane, getSettings().game.vrPhysicalSwimming,
+            {
+                .key = "Physical Swimming",
+                .helpText = "Swim with your arms: quick strokes with your palms push you the "
+                            "opposite way, so a one-armed stroke turns you. Moving your hand "
+                            "edge-first or back-first doesn't push, so turn your hands to bring "
+                            "them back. With the Zora Armor this also works underwater, steering "
+                            "up and down. The stick and buttons still work too."
+            });
         config_bool_select(leftPane, rightPane, getSettings().game.vrMoveWhileAiming,
             {
                 .key = "Move While Aiming",

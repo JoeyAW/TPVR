@@ -34,6 +34,7 @@
 #include "JSystem/J3DGraphAnimator/J3DShapeTable.h"
 #include "JSystem/JUtility/JUTNameTab.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -851,6 +852,10 @@ inline bool s_handMtxValid = false;
 // Flipped to -1 on 2026-10-13: in-headset, +X put the panel on the palm.
 inline constexpr float kLeftBackOfHandSign = -1.0f;
 inline Vec3f s_leftBackOfHand{0.f, 1.f, 0.f};
+// Game-world unit normals pointing OUT of each palm ([0] left, [1] right),
+// for physical swimming. Left = -back of hand; the right grip's palm-out
+// axis is -X (OpenXR: +X points into the right palm).
+inline Vec3f s_palmNormal[2] = {{0.f, -1.f, 0.f}, {0.f, -1.f, 0.f}};
 
 // Sword/shield RESTING-POSE (not-hand-attached) smoothing state: the
 // belt/back-relative pose setItemMatrix() computes is only written once per
@@ -1564,6 +1569,11 @@ inline void computeTrackedHandMatrices(const XrVector3f& hmdPos,
     const XrQuaternionf q = dusk::vr::rotateYawQuat(leftControllerPose.orientation, yawRad);
     detail::s_leftBackOfHand = rotateVecByQuat(q.x, q.y, q.z, q.w,
                                                Vec3f{detail::kLeftBackOfHandSign, 0.f, 0.f});
+    detail::s_palmNormal[0] = rotateVecByQuat(q.x, q.y, q.z, q.w,
+                                              Vec3f{-detail::kLeftBackOfHandSign, 0.f, 0.f});
+    const XrQuaternionf qr = dusk::vr::rotateYawQuat(rightControllerPose.orientation, yawRad);
+    detail::s_palmNormal[1] = rotateVecByQuat(qr.x, qr.y, qr.z, qr.w,
+                                              Vec3f{detail::kLeftBackOfHandSign, 0.f, 0.f});
     detail::s_handMtxValid = true;
 }
 
@@ -1869,12 +1879,21 @@ inline bool isHandTrackingSuspended(daAlink_c* link) {
            dusk::getSettings().game.vrFullBodyShowRolls.getValue() && isFullBodyTumbleProc(link);
 }
 
+// Physical swimming (game.vrPhysicalSwimming, see updatePhysicalSwimState()):
+// strokes move Link, and the hands stay tracked in the water.
+inline bool isPhysicalSwimMode(daAlink_c* link) {
+    return link && dusk::getSettings().game.vrPhysicalSwimming.getValue() && isFirstPerson(link) &&
+           !link->checkWolf() && link->checkModeFlg(daAlink_c::MODE_SWIMMING) &&
+           link->mProcID != daAlink_c::PROC_SWIM_HOOKSHOT_SUBJECT &&
+           link->mProcID != daAlink_c::PROC_SWIM_HOOKSHOT_MOVE && !isHandTrackingSuspended(link);
+}
+
 inline void refreshTrackedHandDrawMtxLive(J3DModel* handModel) {
     if (!handModel || !detail::s_handMtxValid) return;
 
     auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
     if (!link || !isFirstPerson(link)) return;
-    if (link->checkModeFlg(daAlink_c::MODE_SWIMMING) || isCrawling(link)) return;
+    if ((link->checkModeFlg(daAlink_c::MODE_SWIMMING) && !isPhysicalSwimMode(link)) || isCrawling(link)) return;
 
     if (isHandTrackingSuspended(link)) {
         // Hands follow the body's animated hand joints (al_handsL/R mirror
@@ -2763,7 +2782,9 @@ inline void refreshBootsLive(daAlink_c* link) {
 
 inline bool isFullBodyIkActive(daAlink_c* link) {
     return link && dusk::getSettings().game.vrFullBody.getValue() && detail::s_handMtxValid &&
-           isFirstPerson(link) && !link->checkWolf() && !link->checkModeFlg(daAlink_c::MODE_SWIMMING) &&
+           isFirstPerson(link) && !link->checkWolf() &&
+           // Physical swimming keeps the arms on the tracked hands.
+           (!link->checkModeFlg(daAlink_c::MODE_SWIMMING) || isPhysicalSwimMode(link)) &&
            !isCrawling(link) && !dComIfGp_isPauseFlag() && link->getClothesChangeWaitTimer() == 0 &&
            // Spinner: the ride pose crouches/leans Link far from the standing
            // pose the head anchor and arm IK assume, and it came out jumbled
@@ -4238,17 +4259,19 @@ inline void refreshPhysicalBowArrowLive() {
     } else {
         detail::s_bowStringFrac = 0.0f;
     }
-    // Without Left-Handed Bow the game already keeps the arrow in the left
-    // hand; only the charge wait needs frame-rate placement for nocking.
     // Still held but no longer nocked (not shot): forget it.
     if (daArrow_c* held = link ? getNockableArrow(link) : nullptr) {
         if (!detail::s_bowArrowMtxValid && fopAcM_GetID(held) == detail::s_lastNockedArrowId) {
             detail::s_lastNockedArrowId = fpcM_ERROR_PROCESS_ID_e;
         }
     }
-    if (!charging && !leftHandedBow) return;
+    // Any held arrow (not just the charge wait, and with the physical bow off
+    // too) is placed at frame rate: setKeepMatrix() only runs per sim tick
+    // from procWait(), so the arrow lagged the hand while moving, worst on
+    // horseback. Only while still held -- a shot arrow positions itself.
+    if (!tracking || !isFirstPerson(link)) return;
     daArrow_c* arrow = getNockableArrow(link);
-    if (!arrow || !arrow->mpModel) return;
+    if (!arrow || !arrow->mpModel || arrow->mProcFunc != &daArrow_c::procWait) return;
     if (detail::s_bowArrowMtxValid) {
         arrow->mpModel->setBaseTRMtx(detail::s_bowArrowMtx);
     } else if (leftHandedBow) {
@@ -4449,6 +4472,294 @@ inline void refreshPhysicalSlingshotLive() {
     }
     if (sling->getModelData()->getWEvlpMtxNum() > 0) sling->calcWeightEnvelopeMtx();
     markModelJointsLive(sling);
+}
+
+// ---------------------------------------------------------------------------
+// Physical climbing (game.vrPhysicalClimbing)
+// ---------------------------------------------------------------------------
+//
+// Ladders and climbable walls/vines. Squeezing grabs; pulling the gripped hand
+// down (or sideways, on walls) banks that much body movement, which is fed
+// to the game as stick input (getPhysicalClimbInput(), read by
+// setStickData()). The game's own one-rung climb steps then play at a speed
+// matching the pull, and stop once Link has covered it. The gripped hand is
+// held where it grabbed while Link catches up.
+inline bool isPhysicalClimbProc(daAlink_c* link) {
+    switch (link->mProcID) {
+        case daAlink_c::PROC_LADDER_UP_START:
+        case daAlink_c::PROC_LADDER_DOWN_START:
+        case daAlink_c::PROC_LADDER_MOVE:
+        case daAlink_c::PROC_CLIMB_UP_START:
+        case daAlink_c::PROC_CLIMB_DOWN_START:
+        case daAlink_c::PROC_CLIMB_MOVE_UPDOWN:
+        case daAlink_c::PROC_CLIMB_MOVE_SIDE:
+        case daAlink_c::PROC_CLIMB_WAIT:
+            return true;
+        default:
+            return false;
+    }
+}
+
+inline bool isLadderProc(daAlink_c* link) {
+    return link->mProcID == daAlink_c::PROC_LADDER_UP_START ||
+           link->mProcID == daAlink_c::PROC_LADDER_DOWN_START ||
+           link->mProcID == daAlink_c::PROC_LADDER_MOVE;
+}
+
+inline bool isPhysicalClimbMode(daAlink_c* link) {
+    return link && dusk::getSettings().game.vrPhysicalClimbing.getValue() && isFirstPerson(link) &&
+           !isHandTrackingSuspended(link) && isPhysicalClimbProc(link);
+}
+
+namespace detail {
+inline bool s_climbActive = false;
+inline bool s_climbSqueezed[2] = {false, false};  // [0] left, [1] right
+inline int s_climbHand = -1;                      // gripping hand, -1 = none
+inline int s_climbGrabEventHand = -1;
+inline cXyz s_climbPrevHandLocal;  // gripped hand relative to the play space
+inline float s_climbPrevYawRad = 0.f;
+inline cXyz s_climbGrabWorld;      // where the gripped hand is held
+inline cXyz s_climbPrevLinkPos;
+inline bool s_climbPrevLinkPosValid = false;
+// Body movement still owed to the pull, along the wall: up, and sideways
+// (+ = the shape_angle.y + 0x4000 direction, the game's DIR_LEFT).
+inline float s_climbBankUp = 0.f;
+inline float s_climbBankSide = 0.f;
+}  // namespace detail
+
+constexpr float kClimbSqueezeOn = 0.6f;
+constexpr float kClimbSqueezeOff = 0.4f;
+constexpr float kClimbBankMax = 75.0f;       // two ladder rungs
+constexpr float kClimbBankDeadzone = 6.0f;   // pulls shorter than this don't move Link
+constexpr float kClimbFullStickBank = 30.0f; // this much owed = full climb speed
+constexpr float kClimbMinStick = 0.35f;
+constexpr float kClimbMaxLinkStep = 60.0f;   // larger jumps are snaps, not climbing
+
+inline void detail_consumeClimbBank(float& bank, float moved) {
+    if (bank > 0.f && moved > 0.f) {
+        bank = std::max(0.f, bank - moved);
+    } else if (bank < 0.f && moved < 0.f) {
+        bank = std::min(0.f, bank - moved);
+    }
+}
+
+inline void detail_resetClimb() {
+    detail::s_climbHand = -1;
+    detail::s_climbBankUp = 0.f;
+    detail::s_climbBankSide = 0.f;
+    detail::s_climbPrevLinkPosValid = false;
+}
+
+// Once per real frame from tick(), after updateFrame() built the hand
+// matrices and before anything poses the hands/arms (moves the gripped
+// hand like the bow's draw-hand lock).
+inline void updatePhysicalClimbState(float leftSqueeze, float rightSqueeze) {
+    const float squeeze[2] = {leftSqueeze, rightSqueeze};
+    bool pressed[2];
+    for (int i = 0; i < 2; i++) {
+        const bool was = detail::s_climbSqueezed[i];
+        detail::s_climbSqueezed[i] = was ? squeeze[i] > kClimbSqueezeOff : squeeze[i] > kClimbSqueezeOn;
+        pressed[i] = detail::s_climbSqueezed[i] && !was;
+    }
+
+    auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
+    detail::s_climbActive = detail::s_handMtxValid && isPhysicalClimbMode(link);
+    if (!detail::s_climbActive) {
+        detail_resetClimb();
+        return;
+    }
+
+    const s16 wallAngle = link->shape_angle.y;
+    const float sideX = cM_scos(wallAngle);
+    const float sideZ = -cM_ssin(wallAngle);
+    const bool ladder = isLadderProc(link);
+
+    // Link's own movement pays off the bank.
+    const cXyz linkPos = link->current.pos;
+    if (detail::s_climbPrevLinkPosValid) {
+        const cXyz moved = linkPos - detail::s_climbPrevLinkPos;
+        if (moved.abs() < kClimbMaxLinkStep) {
+            detail_consumeClimbBank(detail::s_climbBankUp, moved.y);
+            detail_consumeClimbBank(detail::s_climbBankSide, moved.x * sideX + moved.z * sideZ);
+        }
+    }
+    detail::s_climbPrevLinkPos = linkPos;
+    detail::s_climbPrevLinkPosValid = true;
+
+    // A new squeeze takes over; otherwise any held squeeze grabs.
+    int hand = detail::s_climbHand;
+    if (pressed[0] || pressed[1]) {
+        hand = pressed[1] ? 1 : 0;
+    } else if (hand < 0 || !detail::s_climbSqueezed[hand]) {
+        hand = detail::s_climbSqueezed[1] ? 1 : detail::s_climbSqueezed[0] ? 0 : -1;
+    }
+
+    if (hand < 0) {
+        detail::s_climbHand = -1;
+        return;
+    }
+    MtxP handMtx = hand == 0 ? detail::s_leftHandMtx : detail::s_rightHandMtx;
+    const cXyz handWorld(handMtx[0][3], handMtx[1][3], handMtx[2][3]);
+    // Relative to the play space, so Link climbing doesn't read as a pull.
+    const cXyz handLocal = handWorld - detail::s_playSpaceOrigin;
+
+    if (hand != detail::s_climbHand) {
+        detail::s_climbHand = hand;
+        detail::s_climbGrabEventHand = hand;
+        detail::s_climbGrabWorld = handWorld;
+    } else if (std::fabs(detail::s_playSpaceYawRad - detail::s_climbPrevYawRad) < 0.0001f) {
+        // Pulling the hand down moves Link up.
+        const cXyz pulled = handLocal - detail::s_climbPrevHandLocal;
+        detail::s_climbBankUp = std::clamp(detail::s_climbBankUp - pulled.y, -kClimbBankMax, kClimbBankMax);
+        if (!ladder) {
+            detail::s_climbBankSide = std::clamp(detail::s_climbBankSide - (pulled.x * sideX + pulled.z * sideZ),
+                                                 -kClimbBankMax, kClimbBankMax);
+        }
+    }
+    detail::s_climbPrevHandLocal = handLocal;
+    detail::s_climbPrevYawRad = detail::s_playSpaceYawRad;
+    if (ladder) detail::s_climbBankSide = 0.f;
+
+    // Hold the hand on its grab point, within reach of the real controller.
+    cXyz offset = detail::s_climbGrabWorld - handWorld;
+    const float maxOffset = kClimbBankMax + 15.0f;
+    const float dist = offset.abs();
+    if (dist > maxOffset) {
+        offset *= maxOffset / dist;
+        detail::s_climbGrabWorld = handWorld + offset;
+    }
+    handMtx[0][3] += offset.x;
+    handMtx[1][3] += offset.y;
+    handMtx[2][3] += offset.z;
+}
+
+inline bool isPhysicalClimbActive() {
+    return detail::s_climbActive;
+}
+
+// The hand that just grabbed (0 left, 1 right), once, or -1 (haptic pulse).
+inline int consumeClimbGrabEvent() {
+    const int hand = detail::s_climbGrabEventHand;
+    detail::s_climbGrabEventHand = -1;
+    return hand;
+}
+
+// Stick input for the game's climb procs from the pull still owed: the
+// dominant axis only, since the wall procs turn any diagonal into a side
+// step. False -> leave the real stick alone.
+inline bool getPhysicalClimbInput(daAlink_c* link, float* outStick, s16* outAngle) {
+    if (!detail::s_climbActive || !isPhysicalClimbMode(link)) return false;
+    const float up = detail::s_climbBankUp;
+    const float side = detail::s_climbBankSide;
+    const bool sideways = std::fabs(side) > std::fabs(up);
+    const float mag = sideways ? std::fabs(side) : std::fabs(up);
+    if (mag < kClimbBankDeadzone) return false;
+    *outStick = std::clamp(mag / kClimbFullStickBank, kClimbMinStick, 1.0f);
+    s16 rel;
+    if (sideways) {
+        rel = side > 0.f ? 0x4000 : -0x4000;
+    } else {
+        rel = up > 0.f ? 0 : -0x8000;
+    }
+    *outAngle = static_cast<s16>(link->shape_angle.y + rel);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Physical swimming (game.vrPhysicalSwimming)
+// ---------------------------------------------------------------------------
+//
+// A palm moving palm-first faster than kSwimStrokeMinSpeed pushes Link the
+// opposite way by the excess (a quick stroke pushes; a slow, edge-on or
+// back-of-hand recovery doesn't). The
+// push decays over about a second and is fed to the game as stick input
+// (getPhysicalSwimInput(), read by setStickData()); underwater with the
+// Zora Armor it also steers yaw/pitch and keeps Zora swimming going, and
+// each new stroke counts as an A tap (consumePhysicalSwimStroke()).
+namespace detail {
+inline bool s_swimActive = false;
+inline cXyz s_swimPrevHand[2];  // [0] left, [1] right, relative to the play space
+inline bool s_swimPrevValid = false;
+inline float s_swimPrevYawRad = 0.f;
+inline cXyz s_swimPush;
+inline bool s_swimHandFast[2] = {false, false};
+inline float s_swimStrokeCooldownSec = 0.f;
+inline bool s_swimStrokeEvent = false;
+}  // namespace detail
+
+constexpr float kSwimStrokeMinSpeed = 60.0f;     // units/s (100 units = 1 m)
+constexpr float kSwimStrokeEventSpeed = 130.0f;  // a hand this fast starts a stroke
+constexpr float kSwimStrokeCooldownSec = 0.4f;   // both hands of one stroke = one stroke
+constexpr float kSwimDecaySec = 0.9f;
+constexpr float kSwimFullStickPush = 30.0f;
+constexpr float kSwimPushDeadzone = 3.0f;
+
+// Once per real frame from tick(), after updateFrame() built the hand matrices.
+inline void updatePhysicalSwimState(float dt) {
+    auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
+    detail::s_swimActive = detail::s_handMtxValid && dt > 0.f && isPhysicalSwimMode(link);
+    if (!detail::s_swimActive) {
+        detail::s_swimPrevValid = false;
+        detail::s_swimPush.set(0.f, 0.f, 0.f);
+        detail::s_swimHandFast[0] = detail::s_swimHandFast[1] = false;
+        detail::s_swimStrokeEvent = false;
+        return;
+    }
+
+    if (detail::s_swimStrokeCooldownSec > 0.f) detail::s_swimStrokeCooldownSec -= dt;
+    const float yaw = detail::s_playSpaceYawRad;
+    for (int i = 0; i < 2; i++) {
+        MtxP m = i == 0 ? detail::s_leftHandMtx : detail::s_rightHandMtx;
+        const cXyz local = cXyz(m[0][3], m[1][3], m[2][3]) - detail::s_playSpaceOrigin;
+        if (detail::s_swimPrevValid) {
+            // Turn last frame's position with this frame's smooth/snap turn,
+            // so turning doesn't read as a stroke.
+            const cXyz& p = detail::s_swimPrevHand[i];
+            const XrVector3f turned =
+                dusk::vr::rotateYawOnlyXr(XrVector3f{p.x, p.y, p.z}, yaw - detail::s_swimPrevYawRad);
+            const cXyz vel = (local - cXyz(turned.x, turned.y, turned.z)) * (1.f / dt);
+            // Only the palm pushes water: the speed counted is the part along
+            // the palm normal, so edge-on or back-of-hand motion doesn't push.
+            const Vec3f& palm = detail::s_palmNormal[i];
+            const float speed = vel.x * palm.x + vel.y * palm.y + vel.z * palm.z;
+            if (speed > kSwimStrokeMinSpeed) {
+                detail::s_swimPush -= vel * ((speed - kSwimStrokeMinSpeed) * dt / vel.abs());
+            }
+            const bool fast = speed > kSwimStrokeEventSpeed;
+            if (fast && !detail::s_swimHandFast[i] && detail::s_swimStrokeCooldownSec <= 0.f) {
+                detail::s_swimStrokeEvent = true;
+                detail::s_swimStrokeCooldownSec = kSwimStrokeCooldownSec;
+            }
+            detail::s_swimHandFast[i] = fast;
+        }
+        detail::s_swimPrevHand[i] = local;
+    }
+    detail::s_swimPrevYawRad = yaw;
+    detail::s_swimPrevValid = true;
+    detail::s_swimPush *= std::exp(-dt / kSwimDecaySec);
+}
+
+// Stick value, move yaw and pitch (+ = nose down, like field_0x3080) from
+// the current push. `vertical`: count up/down pushes too (Zora underwater);
+// on the surface only the horizontal push moves Link. False -> use the stick.
+inline bool getPhysicalSwimInput(daAlink_c* link, bool vertical, float* outStick, s16* outYaw,
+                                 s16* outPitch) {
+    if (!detail::s_swimActive || !isPhysicalSwimMode(link)) return false;
+    const cXyz& push = detail::s_swimPush;
+    const float horiz = std::sqrt(push.x * push.x + push.z * push.z);
+    const float mag = vertical ? push.abs() : horiz;
+    if (mag < kSwimPushDeadzone) return false;
+    *outStick = std::clamp(mag / kSwimFullStickPush, 0.f, 1.f);
+    *outYaw = horiz > 0.5f ? cM_atan2s(push.x, push.z) : link->shape_angle.y;
+    *outPitch = vertical ? static_cast<s16>(-cM_atan2s(push.y, horiz)) : 0;
+    return true;
+}
+
+// True once per new stroke (counts as an A tap for the Zora swim speed-up).
+inline bool consumePhysicalSwimStroke() {
+    const bool e = detail::s_swimStrokeEvent;
+    detail::s_swimStrokeEvent = false;
+    return e;
 }
 
 // See dusk::vr::getTrackedHandWorldPos() (vr_main.hpp) for the

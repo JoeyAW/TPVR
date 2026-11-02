@@ -16083,3 +16083,112 @@ used by isFirstPerson(), shouldTrackHookshotToHand(), the Turn With Game Camera 
 Z-target focus (vr_main.cpp), plus the hideBodyForVr check in d_a_alink.cpp. "Turn With
 Game Camera" is enabled when either option is on. Wolf can't ride Epona, so
 isWolfFirstPersonView() is unchanged.
+
+### Held arrow lagging the hand while moving (worst on horseback) — FIXED 2026-11-02, CONFIRMED in-headset ("its fixed now")
+
+User report: "the arrow tracks to your hand when holding it, however when
+moving it slightly lags behind like previous issues we have had,
+especially on horseback." Same 30Hz-sampling bug class as the boomerang/
+fishing rod: `daArrow_c::setKeepMatrix()` is only called from `procWait()`
+(sim tick). `refreshPhysicalBowArrowLive()` already re-placed the arrow
+at frame rate, but only during the physical bow's charge wait (or with
+Left-Handed Bow). Every other held state (reload/aim idle, physical bow
+off) stayed at tick rate. Fix: that function now places any held arrow
+(`mItemAcKeep` arrow with `mProcFunc == &daArrow_c::procWait`, so never a
+shot arrow) every real frame while tracking + `isFirstPerson()`, with the
+same placement priority as before (nocked -> right hand for Left-Handed
+Bow -> `getLeftItemMatrix()`), then `calc()` + `markModelJointsLive()`.
+`current.pos`/`shape_angle` stay tick-rate (setKeepMatrix() owns them).
+
+### Physical climbing (ladders + climbable walls/vines) — built 2026-11-02, CONFIRMED in-headset ("It works")
+
+User request: "add physical ladder climbing motion". Design chosen by the
+user (asked up front): **the pull drives the game's own rung steps** (not 1:1
+free movement), scope **ladders + climbable walls**. Setting
+`game.vrPhysicalClimbing` (default ON), VR tab next to Physical Slingshot.
+
+**Mechanism**: every ladder/wall climb proc (`d_a_alink_hang.inc`) is driven
+only by `checkInputOnR()` (`mMoveValue`), `mMoveAngle` (relative to
+`shape_angle.y`: ~0 up, ~0x8000 down, +/-0x4000 = DIR_LEFT/RIGHT on walls)
+and `mStickValue` (anim speed via `getAnmSpeedStickRate()`). So
+`setStickData()` (`d_a_alink.cpp`, TARGET_PC block after the VR mMoveAngle)
+overrides those three from `dusk::vr::getPhysicalClimbInput()` — no climb
+proc was touched; rung snapping, top/bottom exits, wall checks, A-to-drop
+all stay the game's.
+
+`vr_link::updatePhysicalClimbState()` (`vr_link_visibility.hpp`, called per
+real frame in `tick()` next to the bow/slingshot updates): squeeze (0.6 on /
+0.4 off) grabs, newest press wins; the gripped hand's movement relative to
+`s_playSpaceOrigin` (pure controller motion, Link's own climbing excluded)
+is banked as owed body movement (up, and sideways on walls only), capped at
+75 units (2 rungs). Link's actual `current.pos` movement pays the bank off
+(never past zero). Bank -> stick: dominant axis only (wall procs turn any
+diagonal >~22deg into a side step), 6-unit deadzone, stick =
+clamp(bank/30, 0.35, 1). Below the deadzone it returns false so the real
+stick still works. The gripped hand is held at its world grab point (offset
+clamped to 90 units of the controller), same translation-lock shape as the
+bow draw hand, so arms/IK follow it. Haptic pulse on grab. While active the
+squeezes don't press X / R (`squeezeClimbs` in the pad mapping).
+
+Procs covered: LADDER_UP_START/DOWN_START/MOVE, CLIMB_UP_START/DOWN_START/
+MOVE_UPDOWN/MOVE_SIDE/WAIT (vines share the CLIMB procs). Not: LADDER_*_END,
+CLIMB_TO_ROOF, hang/ledge procs. Untested risks: whether `current.pos`
+moves smoothly during a rung step (if it only snaps at anim end, a single
+pull might occasionally give one extra rung); hand snaps back to the
+controller on release / at the top.
+
+### Physical swimming (surface + Zora underwater) — built 2026-11-02, NOT yet confirmed in-headset
+
+User request right after climbing was confirmed: "Can you add swimming now".
+Design chosen by the user: **Link moves opposite the stroke** (one-armed
+stroke turns, not head-directed), scope **surface + Zora Armor underwater**.
+Setting `game.vrPhysicalSwimming` (default ON), VR tab after Physical Climbing.
+
+**VR side** (`vr_link_visibility.hpp`, `updatePhysicalSwimState(dt)` per real
+frame in `tick()` after the climb update): each hand's velocity relative to
+`s_playSpaceOrigin`, with last frame's position turned by this frame's
+yaw change so smooth/snap turn isn't a stroke. Only speed above
+`kSwimStrokeMinSpeed` (60 u/s = 0.6 m/s) pushes, by the excess, opposite the
+hand -> slow recovery strokes don't cancel the power stroke. Push decays
+with tau 0.9 s; stick = |push|/30. Surface uses horizontal push only; Zora
+underwater uses 3D (pitch = -atan2(y, horiz), + = nose down like
+field_0x3080). A hand crossing 130 u/s = one stroke event (0.4 s cooldown so
+both hands of a breaststroke count once).
+
+`isPhysicalSwimMode()`: setting + first person + not wolf + MODE_SWIMMING,
+excluding PROC_SWIM_HOOKSHOT_SUBJECT/MOVE. It also lifts the old
+"hands follow the swim animation" early-return in
+`refreshTrackedHandDrawMtxLive()` — hands are tracked in water while the
+setting is on (off = old behaviour). Full Body IK still excludes swimming,
+so with Full Body on the animated arms and tracked hands may separate.
+
+**Game hooks** (all TARGET_PC): `setStickData()` overrides mStickValue/
+mMoveValue/mMoveAngle from `getPhysicalSwimInput()` and, when Zora +
+underwater (`!FLG0_SWIM_UP`), sets `field_0x3000 = 30` (the Zora-swim
+"A held" timer `checkZoraSwimMove()` reads). `setSpeedAndAngleSwim()` Zora
+branch: yaw target = push yaw (instead of shape + 16384*sin(mStickAngle)).
+`setSwimMoveAnime()`: Zora pitch target = push pitch (clamped +/-13653,
+instead of 13653*cos(mStickAngle)); the A-tap speed bump also fires on
+`consumePhysicalSwimStroke()`.
+
+Tuning knobs if it feels off: kSwimStrokeMinSpeed (recovery cancelling ->
+raise), kSwimFullStickPush (too slow -> lower), kSwimDecaySec.
+
+**Follow-up 2026-11-02**: user: "When in the water the swimming animations
+take over my arms" (Full Body on — IK excluded MODE_SWIMMING, as flagged
+above). `isFullBodyIkActive()` now allows swimming when
+`isPhysicalSwimMode()`: arms are IK'd to the tracked hands and the head
+anchor turns the body to the head yaw, same as on land. Built, NOT yet
+confirmed. If the horizontal swim body looks wrong under the head-anchor
+yaw turn, next step is skipping that turn (arms-only IK) while swimming.
+
+**Follow-up 2026-11-02 (palm-only push)**: user: "make it so it only propels
+you if you push with the palm of your hand". The counted stroke speed is now
+`dot(handVel, palmNormal)` instead of |handVel| (same 60 u/s threshold, push
+still opposite the full velocity direction, stroke event uses the same
+value). Palm normals `detail::s_palmNormal[2]` are built in
+`computeTrackedHandMatrices()` from the yawed grip orientations: left =
+-kLeftBackOfHandSign * X (= +X, confirmed in-headset 2026-10-13 via HUD on
+Left Arm), right = kLeftBackOfHandSign * X (= -X, from the OpenXR spec only:
++X points into the right palm). If the RIGHT hand only pushes back-first,
+that sign is the suspect. Built, NOT yet confirmed.

@@ -9724,6 +9724,34 @@ void daAlink_c::setStickData() {
             mMoveAngle = mStickAngle + dCam_getControledAngleY(dComIfGp_getCamera(field_0x317c));
         }
 
+#if TARGET_PC
+        // VR physical climbing: the hand pull drives the ladder/wall climb
+        // procs in place of the stick.
+        f32 vrClimbStick;
+        s16 vrClimbAngle;
+        if (dusk::vr::getPhysicalClimbInput(this, &vrClimbStick, &vrClimbAngle)) {
+            mStickValue = vrClimbStick;
+            mMoveValue = vrClimbStick;
+            mMoveAngle = vrClimbAngle;
+        }
+
+        // VR physical swimming: arm strokes push Link in place of the stick.
+        // Underwater with the Zora Armor they keep Zora swimming going, like
+        // holding A (steering: setSpeedAndAngleSwim()/setSwimMoveAnime()).
+        f32 vrSwimStick;
+        s16 vrSwimYaw;
+        s16 vrSwimPitch;
+        const bool vrZoraDive = checkZoraWearAbility() && !checkNoResetFlg0(FLG0_SWIM_UP);
+        if (dusk::vr::getPhysicalSwimInput(this, vrZoraDive, &vrSwimStick, &vrSwimYaw, &vrSwimPitch)) {
+            mStickValue = vrSwimStick;
+            mMoveValue = vrSwimStick;
+            mMoveAngle = vrSwimYaw;
+            if (vrZoraDive) {
+                field_0x3000 = 30;
+            }
+        }
+#endif
+
         if (checkMagneBootsOn()) {
             if (field_0x2fb9 == 1 ||
                 (field_0x2fb9 == 0 && field_0x3114 != -0x8000 && field_0x3114 <= 0x6000))

@@ -219,6 +219,18 @@ void daAlink_c::setSpeedAndAngleSwim() {
                 var_r28 = shape_angle.y + (16384.0f * cM_ssin(mStickAngle) IF_DUSK(* (dusk::getSettings().game.invertAirSwimX ? -1.0f : 1.0f)));
             }
 
+#if TARGET_PC
+            // VR physical swimming: head along the stroke push.
+            f32 vrSwimStick;
+            s16 vrSwimYaw;
+            s16 vrSwimPitch;
+            if (dusk::vr::getPhysicalSwimInput(this, !checkNoResetFlg0(FLG0_SWIM_UP), &vrSwimStick,
+                                               &vrSwimYaw, &vrSwimPitch))
+            {
+                var_r28 = vrSwimYaw;
+            }
+#endif
+
             cLib_addCalcAngleS(&shape_angle.y, var_r28, mpHIO->mSwim.m.mUnderwaterTurnRate, mpHIO->mSwim.m.mUnderwaterMaxTurn, mpHIO->mSwim.m.mUnderwaterMinTurn);
         }
 
@@ -664,7 +676,7 @@ void daAlink_c::setSwimMoveAnime() {
 
         if (mMaxSpeed < mpHIO->mSwim.m.mUnderwaterMaxSpeed) {
             mMaxSpeed = mpHIO->mSwim.m.mUnderwaterMaxSpeed;
-        } else if (holdToMash ? doButton() : doTrigger()) {
+        } else if ((holdToMash ? doButton() : doTrigger()) IF_DUSK(|| dusk::vr::consumePhysicalSwimStroke())) {
             mMaxSpeed += 0.75f;
             if (mMaxSpeed > temp_f29) {
                 mMaxSpeed = temp_f29;
@@ -841,6 +853,16 @@ void daAlink_c::setSwimMoveAnime() {
             } else {
                 var_r24 = 0;
             }
+
+#if TARGET_PC
+            // VR physical swimming: pitch along the stroke push.
+            f32 vrSwimStick;
+            s16 vrSwimYaw;
+            s16 vrSwimPitch;
+            if (!checkEventRun() && dusk::vr::getPhysicalSwimInput(this, true, &vrSwimStick, &vrSwimYaw, &vrSwimPitch)) {
+                var_r24 = vrSwimPitch > 13653 ? 13653 : vrSwimPitch < -13653 ? -13653 : vrSwimPitch;
+            }
+#endif
 
             cLib_addCalcAngleS(&field_0x3080, var_r24, 5, 0x200, 0x80);
         }

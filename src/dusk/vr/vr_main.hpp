@@ -433,6 +433,15 @@ bool isPhysicalSlingshotDrawn();
 bool getPhysicalSlingshotShotPos(float& outX, float& outY, float& outZ);
 // Frame of the slingshot's draw animation (PRELORD) matching the current pull.
 float getPhysicalSlingshotBandFrame(float frameMax);
+// Physical climbing (game.vrPhysicalClimbing): stick value/move angle for
+// Link's ladder/wall climb procs from the hand pull. False -> use the stick.
+bool getPhysicalClimbInput(daAlink_c* link, float* outStick, s16* outAngle);
+// Physical swimming (game.vrPhysicalSwimming): stick value, move yaw and
+// pitch (+ = nose down) from arm strokes. `vertical`: count up/down pushes
+// (Zora underwater). False -> use the stick.
+bool getPhysicalSwimInput(daAlink_c* link, bool vertical, float* outStick, s16* outYaw, s16* outPitch);
+// True once per new stroke (an A tap for the Zora swim speed-up).
+bool consumePhysicalSwimStroke();
 
 // Real right-controller-pointing aim yaw/pitch (same s16 BAMS unit as
 // daAlink_c::shape_angle.y / mBodyAngle.x), for first-person item aiming

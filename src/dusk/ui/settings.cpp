@@ -1241,6 +1241,14 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                             "back, then release the button to shoot. Both hands aim it. "
                             "Releasing without pulling back puts the seed away."
             });
+        config_bool_select(leftPane, rightPane, getSettings().game.vrPhysicalBoomerang,
+            {
+                .key = "Physical Boomerang",
+                .helpText = "Holds the boomerang in your right hand. Hold the boomerang button, "
+                            "point your left controller to aim, then make a throwing motion "
+                            "with your right hand. Releasing the button without throwing "
+                            "cancels."
+            });
         config_bool_select(leftPane, rightPane, getSettings().game.vrPhysicalClimbing,
             {
                 .key = "Physical Climbing",

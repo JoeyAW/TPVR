@@ -158,9 +158,10 @@ BOOL daAlink_c::setBodyAngleToCamera() {
                     leftHand = true;
                 } else if (mEquipItem == dItemNo_W_HOOKSHOT_e) {
                     leftHand = getHookshotLeft();
-                } else if (dusk::vr::isLeftHandedBow(this)) {
+                } else if (dusk::vr::isLeftHandedBow(this) || dusk::vr::isPhysicalBoomerangMode(this)) {
                     // "Left-Handed Bow" / Physical Slingshot: the bow or
-                    // slingshot is in the left hand
+                    // slingshot is in the left hand. Physical Boomerang: held
+                    // in the right, pointed with the left.
                     leftHand = true;
                 }
                 // Physical Bow / Slingshot: aim along the loaded shot's line

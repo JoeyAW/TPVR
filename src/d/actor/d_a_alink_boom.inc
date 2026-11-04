@@ -273,6 +273,33 @@ int daAlink_c::checkUpperItemActionBoomerang() {
         }
     }
 
+#if TARGET_PC
+    // VR Physical Boomerang: the hand motion throws, not releasing the button.
+    if (dusk::vr::isPhysicalBoomerangMode(this)) {
+        if (checkReadyItem() && checkBoomerangReadyAnime()) {
+            if (dusk::vr::consumePhysicalBoomerangThrow()) {
+                setThrowBoomerangAnime();
+                // The animation lets go when it passes frame 5.5. Start one
+                // step (rate 0.9) short of it so the boomerang leaves with the
+                // swing. Not closer: the frame may advance before the next
+                // check, and starting past 5.5 would never let go.
+                mUpperFrameCtrl[2].setFrame(4.5f);
+                getNowAnmPackUpper(UPPER_2)->setFrame(4.5f);
+                return 1;
+            }
+            if (!itemButton()) {
+                // Released without throwing: same as the cancel button.
+                seStartSystem(Z2SE_SY_ITEM_USE_CANCEL);
+                cancelItemUseQuake(0);
+                resetUpperAnime(UPPER_2, 3.0f);
+                checkWaitAction();
+                return 1;
+            }
+        }
+        return cancelUpperItemReadyAnime(0);
+    }
+#endif
+
     if (checkReadyItem() && !itemButton() && checkBoomerangReadyAnime()) {
         setThrowBoomerangAnime();
         return 1;
@@ -303,6 +330,13 @@ int daAlink_c::checkNextActionBoomerang() {
     if (!checkBoomerangAnime()) {
         setBoomerangReadyAnime();
         setFastShotTimer();
+#if TARGET_PC
+        // VR Physical Boomerang: aim from the start, so a quick throw goes
+        // where the left controller points rather than where Link faces.
+        if (dusk::vr::isPhysicalBoomerangMode(this)) {
+            mFastShotTime = 0;
+        }
+#endif
 
         if (!checkAttentionLock()) {
             field_0x2fe4 = shape_angle.y;

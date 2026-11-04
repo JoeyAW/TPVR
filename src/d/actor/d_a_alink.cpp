@@ -14481,6 +14481,13 @@ BOOL daAlink_c::checkSightLine(f32 i_maxDist, cXyz* o_sightPos) {
     } else if (checkBowItem(mEquipItem) && mItemAcKeep.getActor() != NULL) {
         line_start_pos = &mItemAcKeep.getActor()->current.pos;
     }
+#if TARGET_PC
+    else if (dusk::vr::isPhysicalBoomerangMode(this)) {
+        // VR Physical Boomerang: the aim dot sits along the pointing left hand.
+        mDoMtx_multVecZero(getLeftItemMatrix(), &sp30);
+        line_start_pos = &sp30;
+    }
+#endif
 
     BOOL isLineCross;
     s16 temp_r27 = shape_angle.y + mBodyAngle.y;
@@ -19531,7 +19538,9 @@ void daAlink_c::setDrawHand() {
     // materials 0-4, right 5-10; mapped by matching pairs the game itself uses
     // together (0/5 grip, 1/6 open, 3/9 grab, 4/10 ledge grip). Check with the
     // one-shot [dusk::vr::handmats] name dump if a pose looks wrong.
-    if (dusk::vr::isLeftHandedBow(this) && var_r30 != 0xFB && var_r29 != 0xFB) {
+    // Physical Boomerang swaps the same way: its grip pose goes to the right hand.
+    if ((dusk::vr::isLeftHandedBow(this) || dusk::vr::isPhysicalBoomerangMode(this)) &&
+        var_r30 != 0xFB && var_r29 != 0xFB) {
         dusk::vr::logModelMaterialNamesOnce(mpLinkHandModel, "handmats");
         static const u8 kRightToLeft[] = {0, 1, 2, 2, 3, 4};      // right 5..10 -> left
         static const u8 kLeftToRight[] = {5, 6, 7, 9, 10};        // left 0..4 -> right
@@ -19539,6 +19548,11 @@ void daAlink_c::setDrawHand() {
         const u8 right = var_r29;
         var_r30 = (right >= 5 && right <= 10) ? kRightToLeft[right - 5] : right;
         var_r29 = (left <= 4) ? kLeftToRight[left] : left;
+        // The guessed 2->7 pair is a loose open hand (screenshot, 2026-11-03);
+        // the boomerang needs the closed grip.
+        if (left == 2 && dusk::vr::isPhysicalBoomerangMode(this)) {
+            var_r29 = 5;
+        }
     }
 #endif
 

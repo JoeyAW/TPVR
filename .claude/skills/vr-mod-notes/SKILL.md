@@ -16192,3 +16192,36 @@ value). Palm normals `detail::s_palmNormal[2]` are built in
 Left Arm), right = kLeftBackOfHandSign * X (= -X, from the OpenXR spec only:
 +X points into the right palm). If the RIGHT hand only pushes back-first,
 that sign is the suspect. Built, NOT yet confirmed.
+
+### "Physical Boomerang" (default ON) — built 2026-11-03, NOT yet tested in-headset
+
+`game.vrPhysicalBoomerang`, VR tab > Combat after Physical Slingshot. Gate
+`vr_link::isPhysicalBoomerangMode()`: setting + first person + boomerang equipped.
+- Right hand: `daBoomerang_c::applyTrackedKeepTransforms()` passes its matrices through
+  `retargetBoomerangMtxToRightHand()` (mirrors the left grip, using the sword swap's
+  vrSwapSwordGripMirrorAxis/ExtraFlipAxis, a guess that needs checking in-headset).
+  current.pos comes from the same stack, so the throw starts at the right hand. Hand poses
+  use the Left-Handed Bow swap in setDrawHand().
+- Aim: left controller (setBodyAngleToCamera()); checkSightLine() starts from the left hand.
+  mFastShotTime is zeroed so quick throws aim too. Flight path itself is unchanged, including
+  the game's built-in curve, so an unlocked throw runs parallel to the aim line, not to the dot.
+- Throw: hold the item button, right-hand motion fires (`g_boomerangThrow`, same numbers as
+  the shield-bash thrust, untested here; must head within dot 0.2 of the left aim direction so
+  winding up doesn't throw). Releasing without throwing cancels like the cancel button.
+  The throw animation starts at frame 4.5 so it lets go (5.5) almost at once.
+- Sword-swing and shield-bash gestures are suppressed while it's ready.
+- Not handled: no haptic on throw; the catch point is still the game's own, not the right hand.
+
+**Follow-up (2026-11-03): boomerang floated above the hand (screenshot) — fixed, built, NOT yet tested.**
+The bend sat the right distance away with the held arm pointing off: conjugating by a mirror
+(`mirrorLocalMtxAxis()`, the sword's method) only works for items symmetric across that axis.
+The boomerang model now gets F*O*Fm instead (hand-frame mirror via vrBowSwapMirrorAxis, plus
+flipping the model's own flat axis, `kBoomerangModelFlatAxis` = Y, inferred from the game's
+grip rotation): plane points land exactly on their mirror images; top and underside swap.
+The sword settings no longer apply. Right hand forced to pose 5 (grip) while held, since the
+guessed L2->R7 pair showed a loose open hand. This replaces the "sword swap axes" guess above.
+
+**Follow-up (2026-11-03): boomerang seated correctly but tilted too far forward (screenshots) — fixed, built, NOT yet tested.**
+`kBoomerangGripTiltBackDeg` (20, first guess) turns the model about the grip point, moving the
+held arm toward the wrist. The axis comes from hand geometry (arm x grip-to-wrist in the hand
+frame) rather than a hard-coded local axis.

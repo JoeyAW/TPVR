@@ -16,6 +16,7 @@
 
 #if TARGET_PC
 #include "dusk/interp/sight.h"
+#include "dusk/vr/vr_main.hpp"
 
 namespace {
 struct SightFrame {
@@ -689,9 +690,22 @@ void daBoomerang_c::applyTrackedKeepTransforms() {
     mDoMtx_stack_c::copy(player->getLeftItemMatrix());
     mDoMtx_stack_c::transM(32.0f, -5.0f, -6.0f);
     mDoMtx_stack_c::XYZrotM(cM_deg2s(-4.0f), cM_deg2s(39.0f), cM_deg2s(-9.0f));
+#if TARGET_PC
+    // VR Physical Boomerang: held in the right hand. Left on the stack, since
+    // setKeepMatrix() reads current.pos from it and the throw starts there.
+    dusk::vr::retargetBoomerangMtxToRightHand(player, mDoMtx_stack_c::get(), true);
+#endif
     mp_boomModel->setBaseTRMtx(mDoMtx_stack_c::get());
+#if TARGET_PC
+    Mtx effectMtx;
+    MTXCopy(player->getLeftItemMatrix(), effectMtx);
+    dusk::vr::retargetBoomerangMtxToRightHand(player, effectMtx, false);
+    mp_shippuModel->setBaseTRMtx(effectMtx);
+    mp_setboomEfModel->setBaseTRMtx(effectMtx);
+#else
     mp_shippuModel->setBaseTRMtx(player->getLeftItemMatrix());
     mp_setboomEfModel->setBaseTRMtx(player->getLeftItemMatrix());
+#endif
 }
 
 void daBoomerang_c::setKeepMatrix() {

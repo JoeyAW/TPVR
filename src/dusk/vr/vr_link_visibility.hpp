@@ -3524,6 +3524,39 @@ inline bool isLeftHandedBow(daAlink_c* link) {
            daPy_py_c::checkBowItem(link->getEquipItem()) && !link->checkBowGrabLeftHand();
 }
 
+// "Physical Boomerang" (game.vrPhysicalBoomerang): boomerang in the right
+// tracked hand, aimed with the left controller, thrown by a right-hand motion.
+inline bool isPhysicalBoomerangMode(daAlink_c* link) {
+    return link && dusk::getSettings().game.vrPhysicalBoomerang.getValue() && isFirstPerson(link) &&
+           link->getEquipItem() == dItemNo_BOOMERANG_e;
+}
+
+namespace detail {
+// Long enough for the game's next 30Hz tick to see the throw.
+inline constexpr float kBoomerangThrowLatchSec = 0.1f;
+inline float s_boomerangThrowLatchSec = 0.0f;
+}  // namespace detail
+
+// Holding the item button, with the boomerang ready to throw.
+inline bool isPhysicalBoomerangReady() {
+    auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
+    return isPhysicalBoomerangMode(link) && link->checkBoomerangReadyAnime();
+}
+
+inline void updatePhysicalBoomerangThrow(bool thrownThisFrame, float dt) {
+    if (thrownThisFrame) {
+        detail::s_boomerangThrowLatchSec = detail::kBoomerangThrowLatchSec;
+    } else if (detail::s_boomerangThrowLatchSec > 0.0f) {
+        detail::s_boomerangThrowLatchSec -= dt;
+    }
+}
+
+inline bool consumePhysicalBoomerangThrow() {
+    const bool thrown = detail::s_boomerangThrowLatchSec > 0.0f;
+    detail::s_boomerangThrowLatchSec = 0.0f;
+    return thrown;
+}
+
 inline void refreshTrackedHeldItemMtxLive() {
     detail::s_heldItemTrackedThisFrame = false;
     dusk::interp::particle::clear_live_positions();  // re-marked below while the lantern is held
@@ -4863,6 +4896,74 @@ inline void refreshTrackedItemJointMtxLive() {
 inline bool getTrackedItemJointMtx(bool isLeft, Mtx outMtx) {
     if (!detail::s_trackedItemJointMtxValid) return false;
     MTXCopy(isLeft ? detail::s_trackedLeftItemJointMtx : detail::s_trackedRightItemJointMtx, outMtx);
+    return true;
+}
+
+// Physical Boomerang: moves a matrix built from getLeftItemMatrix() onto the
+// right tracked hand, in place. The game has no right-hand boomerang grip, so
+// this mirrors the left one (hand axis from the bow's swap, whose translation
+// is known good from the arrow). False (matrix left alone) when not in this
+// mode or the hands aren't tracked this frame.
+//
+// flipModelFlat is for the boomerang model itself. mirrorLocalMtxAxis() alone
+// keeps the rotation proper by also flipping the item's own frame, which only
+// works for an item symmetric across that axis, and the boomerang isn't: its
+// bend landed the right distance from the hand with the held arm pointing away
+// (screenshot, 2026-11-03). A flat object can be mirrored properly by turning
+// it over instead, so flip its own flat axis: every point in its plane,
+// including where the hand holds it, lands exactly on its mirror image. Only
+// its top and underside swap. kBoomerangModelFlatAxis is inferred from the
+// game's grip, whose 39-degree turn is about Y, i.e. within the XZ plane.
+inline constexpr int kBoomerangModelFlatAxis = 1;
+// The mirrored grip leans the boomerang too far forward (screenshots,
+// 2026-11-03), so it's turned about the grip point, the held arm moving this
+// far toward the wrist. The first value tried; raise it for more upright.
+inline constexpr float kBoomerangGripTiltBackDeg = 20.0f;
+inline bool retargetBoomerangMtxToRightHand(daAlink_c* link, Mtx mtx, bool flipModelFlat) {
+    if (!detail::s_trackedItemJointMtxValid || !isPhysicalBoomerangMode(link)) return false;
+    Mtx handInv;
+    if (!MTXInverse(detail::s_leftHandMtx, handInv)) return false;
+    Mtx local;
+    MTXConcat(handInv, mtx, local);
+    const int mirrorAxis = dusk::getSettings().game.vrBowSwapMirrorAxis.getValue();
+    if (flipModelFlat) {
+        for (int r = 0; r < 3; ++r) {
+            if (r == mirrorAxis) {
+                for (int c = 0; c < 4; ++c) local[r][c] = -local[r][c];
+            }
+            local[r][kBoomerangModelFlatAxis] = -local[r][kBoomerangModelFlatAxis];
+        }
+
+        // All in the hand's frame. The grip is the mirrored item joint, the
+        // wrist is the hand frame's origin, and the model's origin is the bend.
+        const Vec itemWorld = {detail::s_trackedLeftItemJointMtx[0][3], detail::s_trackedLeftItemJointMtx[1][3],
+                               detail::s_trackedLeftItemJointMtx[2][3]};
+        cXyz grip;
+        mDoMtx_multVec(handInv, &itemWorld, &grip);
+        detail_negateAxis(grip, mirrorAxis);
+        const cXyz bend(local[0][3], local[1][3], local[2][3]);
+        const cXyz arm = bend - grip;
+        const cXyz toWrist(-grip.x, -grip.y, -grip.z);
+        // Positive rotation about arm x toWrist turns the arm toward the wrist.
+        Vec axis = {arm.y * toWrist.z - arm.z * toWrist.y, arm.z * toWrist.x - arm.x * toWrist.z,
+                    arm.x * toWrist.y - arm.y * toWrist.x};
+        if (axis.x * axis.x + axis.y * axis.y + axis.z * axis.z > 0.001f) {
+            Mtx tilt;
+            MTXRotAxisRad(tilt, &axis, kBoomerangGripTiltBackDeg * (3.14159265f / 180.0f));
+            const Vec gripVec = {grip.x, grip.y, grip.z};
+            Vec turnedGrip;
+            MTXMultVec(tilt, &gripVec, &turnedGrip);
+            tilt[0][3] = grip.x - turnedGrip.x;
+            tilt[1][3] = grip.y - turnedGrip.y;
+            tilt[2][3] = grip.z - turnedGrip.z;
+            Mtx tilted;
+            MTXConcat(tilt, local, tilted);
+            MTXCopy(tilted, local);
+        }
+    } else if (mirrorAxis >= 0) {
+        mirrorLocalMtxAxis(local, local, mirrorAxis);
+    }
+    MTXConcat(detail::s_rightHandMtx, local, mtx);
     return true;
 }
 

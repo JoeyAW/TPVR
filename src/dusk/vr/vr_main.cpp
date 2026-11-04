@@ -149,6 +149,17 @@ vr_combat::SwingDetector g_rightThrust = [] {
     return d;
 }();
 
+// Physical Boomerang throw. Same starting numbers as the shield-bash thrust,
+// also a quick deliberate hand motion; untested for this gesture.
+vr_combat::SwingDetector g_boomerangThrow = [] {
+    vr_combat::SwingDetector d;
+    d.triggerSpeed = 2.2f;
+    d.resetSpeed = 0.4f;
+    d.minSwingDistance = 0.12f;
+    d.cooldownSec = 0.0;
+    return d;
+}();
+
 // LEFT hand -> B (attack), wired below -- sword is Link's LEFT hand
 // (section 16 of vr-mod-notes), so a swing of the hand actually holding the
 // sword is the physically-intuitive gesture for this, unlike the deferred
@@ -813,6 +824,18 @@ float getPhysicalBowStringFrame(float frameMax) {
 
 bool isPhysicalSlingshotMode(daAlink_c* link) {
     return isImmersiveVr() && vr_link::isPhysicalSlingshotMode(link);
+}
+
+bool isPhysicalBoomerangMode(daAlink_c* link) {
+    return isImmersiveVr() && vr_link::isPhysicalBoomerangMode(link);
+}
+
+bool consumePhysicalBoomerangThrow() {
+    return isImmersiveVr() && vr_link::consumePhysicalBoomerangThrow();
+}
+
+bool retargetBoomerangMtxToRightHand(daAlink_c* link, float (*mtx)[4], bool flipModelFlat) {
+    return isImmersiveVr() && vr_link::retargetBoomerangMtxToRightHand(link, mtx, flipModelFlat);
 }
 
 bool getPhysicalClimbInput(daAlink_c* link, float* outStick, s16* outAngle) {
@@ -2260,6 +2283,9 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         {swordSwingSourcePose.position.x, swordSwingSourcePose.position.y, swordSwingSourcePose.position.z},
         static_cast<double>(time) * 1e-9};
     const vr_combat::SwingEvent leftSwingEvent = g_leftSwing.update(leftSwingPose);
+    // While the physical boomerang is ready, hand motions mean throw/aim, so
+    // the sword-swing and shield-bash gestures below stay out of the way.
+    const bool boomerangReady = !screenMode && vr_link::isPhysicalBoomerangReady();
 
     // FIX (2026-08-13) -- user report: "swinging fast left and right
     // repeatedly is the equivalent of pressing B repeatedly on a
@@ -2295,7 +2321,7 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     static double s_leftSwingButtonHoldRemaining = 0.0;
     if (screenMode) {
         s_leftSwingButtonHoldRemaining = 0.0;
-    } else if (leftSwingEvent.triggered) {
+    } else if (leftSwingEvent.triggered && !boomerangReady) {
         s_leftSwingButtonHoldRemaining = kSwingButtonHoldSec;
     } else {
         s_leftSwingButtonHoldRemaining =
@@ -2367,6 +2393,30 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         static_cast<double>(time) * 1e-9};
     const vr_combat::SwingEvent rightThrustEvent = g_rightThrust.update(rightThrustPose);
 
+    // Physical Boomerang: a fast right-hand motion throws while it's ready.
+    // Must head roughly toward where the left controller points, so pulling
+    // the hand back to wind up doesn't throw early. Both are in raw tracking
+    // space, hence no smooth-turn yaw on the aim direction.
+    {
+        constexpr float kBoomerangThrowMinForwardDot = 0.2f;
+        static XrVector3f s_prevThrowHandPos = rightPose.position;
+        const XrVector3f handDelta{rightPose.position.x - s_prevThrowHandPos.x,
+                                   rightPose.position.y - s_prevThrowHandPos.y,
+                                   rightPose.position.z - s_prevThrowHandPos.z};
+        s_prevThrowHandPos = rightPose.position;
+        const vr_combat::SwingEvent throwEvent = g_boomerangThrow.update(
+            {{rightPose.position.x, rightPose.position.y, rightPose.position.z},
+             static_cast<double>(time) * 1e-9});
+        const vr_link::Vec3f aim = vr_link::computeControllerAimForward(leftAimPose, 0.f);
+        const float deltaLen = std::sqrt(handDelta.x * handDelta.x + handDelta.y * handDelta.y +
+                                         handDelta.z * handDelta.z);
+        const float along = handDelta.x * aim.x + handDelta.y * aim.y + handDelta.z * aim.z;
+        vr_link::updatePhysicalBoomerangThrow(
+            boomerangReady && throwEvent.triggered && deltaLen > 0.f &&
+                along >= kBoomerangThrowMinForwardDot * deltaLen,
+            pacing.dt);
+    }
+
     // Getting a shield bash to actually register is a genuinely different
     // problem than the sword's B-latch fix above, not just a copy-paste of
     // it. Traced the real game logic first rather than assuming (d_a_alink.cpp):
@@ -2398,7 +2448,7 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     if (screenMode) {
         s_rightThrustForceReleaseRemaining = 0.0;
         s_rightThrustHoldRemaining = 0.0;
-    } else if (rightThrustEvent.triggered) {
+    } else if (rightThrustEvent.triggered && !boomerangReady) {
         s_rightThrustForceReleaseRemaining = kThrustForceReleaseSec;
         s_rightThrustHoldRemaining = 0.0; // restart release phase even if previous pulse's hold was still running
     } else {

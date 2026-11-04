@@ -478,6 +478,10 @@ struct UserSettings {
         // release to shoot. Aims along the pouch -> grip line. Uses the
         // Left-Handed Bow mirror axes for its grip.
         ConfigVar<bool> vrPhysicalSlingshot;
+        // Physical boomerang: boomerang in the right hand, aimed by pointing
+        // the left controller. Hold the item button, then throw with the
+        // right hand; releasing without throwing cancels.
+        ConfigVar<bool> vrPhysicalBoomerang;
         // Ladders and climbable walls: squeeze to grab, pull the hand down
         // (or sideways on walls) to climb. The stick still works too.
         ConfigVar<bool> vrPhysicalClimbing;

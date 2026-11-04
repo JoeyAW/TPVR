@@ -433,6 +433,15 @@ bool isPhysicalSlingshotDrawn();
 bool getPhysicalSlingshotShotPos(float& outX, float& outY, float& outZ);
 // Frame of the slingshot's draw animation (PRELORD) matching the current pull.
 float getPhysicalSlingshotBandFrame(float frameMax);
+// Physical boomerang (game.vrPhysicalBoomerang): boomerang in the right hand,
+// aimed with the left controller, thrown by a right-hand motion.
+bool isPhysicalBoomerangMode(daAlink_c* link);
+// True once per throw motion.
+bool consumePhysicalBoomerangThrow();
+// Moves a matrix built from getLeftItemMatrix() onto the right tracked hand,
+// in place. False (matrix left alone) if not in this mode or not tracked.
+// flipModelFlat: true for the boomerang model, false for its effect models.
+bool retargetBoomerangMtxToRightHand(daAlink_c* link, float (*mtx)[4], bool flipModelFlat);
 // Physical climbing (game.vrPhysicalClimbing): stick value/move angle for
 // Link's ladder/wall climb procs from the hand pull. False -> use the stick.
 bool getPhysicalClimbInput(daAlink_c* link, float* outStick, s16* outAngle);

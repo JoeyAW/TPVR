@@ -16137,7 +16137,7 @@ moves smoothly during a rung step (if it only snaps at anim end, a single
 pull might occasionally give one extra rung); hand snaps back to the
 controller on release / at the top.
 
-### Physical swimming (surface + Zora underwater) — built 2026-11-02, NOT yet confirmed in-headset
+### Physical swimming (surface + Zora underwater) — built 2026-11-02, CONFIRMED in-headset (palm-only push + Full Body arms, user: "fixed")
 
 User request right after climbing was confirmed: "Can you add swimming now".
 Design chosen by the user: **Link moves opposite the stroke** (one-armed

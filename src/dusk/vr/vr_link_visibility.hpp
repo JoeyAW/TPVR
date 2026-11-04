@@ -5481,6 +5481,23 @@ inline constexpr float kCoreAnchorTeleportDistanceUnits = 300.0f;  // ~3m/tick
 inline constexpr float kCoreAnchorExtraUpUnits = 7.62f;      // 3 real inches
 inline constexpr float kCoreAnchorExtraForwardUnits = 15.24f; // 6 real inches
 
+// ADDED 2026-11-03 (user report: camera jitters when starting to walk or
+// suddenly changing direction). The forward nudge is scaled by the stick
+// direction relative to facing, and the stick changes instantly: pushing
+// sideways from a standstill dropped the whole 6in nudge in a single sim
+// tick, and the extrapolation in getVrCameraEyeAnchor() then doubled that
+// jump before snapping back. Fraction of the remaining distance covered per
+// 30Hz tick, filtered as a world-space vector so a 180-degree reversal passes
+// through zero rather than swinging around Link. 0.2 settles in ~1/3s.
+inline constexpr float kCoreAnchorNudgeSmoothing = 0.2f;
+// A gap this long means the core branch wasn't running (mounted, swimming,
+// cutscene...): take the current target rather than easing from a stale one.
+inline constexpr uint64_t kCoreAnchorNudgeResetGapTicks = 8;
+inline float s_coreAnchorNudgeX = 0.0f;
+inline float s_coreAnchorNudgeZ = 0.0f;
+inline bool s_coreAnchorNudgeValid = false;
+inline uint64_t s_coreAnchorNudgeSimTick = 0;
+
 // Shared by getVrCameraEyeAnchor() and getVrBodyPositionOffset() so both
 // agree on exactly the same definition of "the raw, this-instant,
 // unsmoothed anchor point" -- factored out specifically to avoid the two
@@ -5666,11 +5683,29 @@ inline cXyz computeRawCoreAnchoredEye(daAlink_c* link) {
         forwardAlignment = std::max(0.f, std::cos(moveFacingDeltaRad));
     }
 
+    // Smoothed per sim tick (see kCoreAnchorNudgeSmoothing's comment): this
+    // function runs several times per frame, so the filter may only advance
+    // once per tick for every caller to see the same value.
+    const float targetNudgeX = kCoreAnchorExtraForwardUnits * forwardAlignment * std::sin(yawRad);
+    const float targetNudgeZ = kCoreAnchorExtraForwardUnits * forwardAlignment * std::cos(yawRad);
+    const uint64_t nudgeSimTick = dusk::interp::sim_tick_seq();
+    if (!s_coreAnchorNudgeValid ||
+        nudgeSimTick - s_coreAnchorNudgeSimTick > kCoreAnchorNudgeResetGapTicks) {
+        s_coreAnchorNudgeX = targetNudgeX;
+        s_coreAnchorNudgeZ = targetNudgeZ;
+        s_coreAnchorNudgeValid = true;
+        s_coreAnchorNudgeSimTick = nudgeSimTick;
+    } else if (nudgeSimTick != s_coreAnchorNudgeSimTick) {
+        s_coreAnchorNudgeX += (targetNudgeX - s_coreAnchorNudgeX) * kCoreAnchorNudgeSmoothing;
+        s_coreAnchorNudgeZ += (targetNudgeZ - s_coreAnchorNudgeZ) * kCoreAnchorNudgeSmoothing;
+        s_coreAnchorNudgeSimTick = nudgeSimTick;
+    }
+
     cXyz eye{link->current.pos.x, link->current.pos.y + s_coreAnchorHeightOffset,
              link->current.pos.z};
     eye.y += kCoreAnchorExtraUpUnits;
-    eye.x += kCoreAnchorExtraForwardUnits * forwardAlignment * std::sin(yawRad);
-    eye.z += kCoreAnchorExtraForwardUnits * forwardAlignment * std::cos(yawRad);
+    eye.x += s_coreAnchorNudgeX;
+    eye.z += s_coreAnchorNudgeZ;
     return eye;
 }
 
@@ -5898,6 +5933,74 @@ inline cXyz computeRawEyeAnchor(daAlink_c* link) {
 // blanket engine-wide behavior change with much wider (and untested)
 // blast radius.
 inline constexpr float kEyeAnchorExtrapolationGain = 1.0f;
+
+// ADDED 2026-11-03 (user report: camera jitters when starting to walk or
+// suddenly changing direction). Extrapolating assumes velocity holds until
+// the next tick, so whenever it doesn't, the view pops at the tick boundary
+// by the change in per-tick velocity -- the overshoot tradeoff described
+// above. Rather than give up the latency benefit by lowering the gain, each
+// pop is measured and faded out over kEyeAnchorPopFadeTicks. Steady movement
+// produces no pop, so it's unaffected.
+inline constexpr float kEyeAnchorPopFadeTicks = 3.0f;  // 100ms at 30Hz
+// Anything bigger is a warp or similar, not a velocity change: let it cut
+// instantly rather than visibly sliding the camera there.
+inline constexpr float kEyeAnchorPopMaxUnits = 60.0f;
+struct EyeAnchorPop {
+    cXyz error{0.0f, 0.0f, 0.0f};
+    uint64_t startTick = 0;
+    float startStep = 0.0f;
+
+    // How much of the current pop is still applied, from 1 (just happened) to
+    // 0. Depends only on tick+step, so repeat calls within a frame all agree.
+    float weight(uint64_t simTick, float step) const {
+        const float phase = (static_cast<float>(simTick - startTick) + step - startStep) /
+                            kEyeAnchorPopFadeTicks;
+        const float x = std::min(std::max(phase, 0.0f), 1.0f);
+        return 1.0f - x * x * (3.0f - 2.0f * x);
+    }
+
+    void reset() { error = cXyz(0.0f, 0.0f, 0.0f); }
+
+    void apply(cXyz& eye, uint64_t simTick, float step) const {
+        const float w = weight(simTick, step);
+        eye.x += error.x * w;
+        eye.y += error.y * w;
+        eye.z += error.z * w;
+    }
+};
+inline EyeAnchorPop s_eyeAnchorPop;
+inline EyeAnchorPop s_wolfEyeAnchorPop;
+
+// Moves an anchor's prev/curr samples on to a new sim tick. The gap between
+// where the old samples said the camera would be right now and where the new
+// ones put it is the pop, added to whatever is left of the last one.
+inline void advanceEyeAnchorTick(cXyz& prev, cXyz& curr, uint64_t& lastTick, const cXyz& fresh,
+                                 EyeAnchorPop& pop, uint64_t simTick, float step, float gain) {
+    const float ticksElapsed = static_cast<float>(simTick - lastTick);
+    const cXyz oldPrediction = lerpXyz(prev, curr, step + gain + ticksElapsed);
+    prev = curr;
+    curr = fresh;
+    lastTick = simTick;
+    const cXyz newPrediction = lerpXyz(prev, curr, step + gain);
+
+    const float remaining = pop.weight(simTick, step);
+    cXyz error(pop.error.x * remaining + oldPrediction.x - newPrediction.x,
+               pop.error.y * remaining + oldPrediction.y - newPrediction.y,
+               pop.error.z * remaining + oldPrediction.z - newPrediction.z);
+    if (error.x * error.x + error.y * error.y + error.z * error.z >
+        kEyeAnchorPopMaxUnits * kEyeAnchorPopMaxUnits) {
+        error = cXyz(0.0f, 0.0f, 0.0f);
+    }
+    pop.error = error;
+    pop.startTick = simTick;
+    pop.startStep = step;
+}
+
+// Wolf's facing-relative camera offset, world space. Same reason and same rate
+// as the human forward nudge (kCoreAnchorNudgeSmoothing): it rotates with
+// current.angle.y, so a sudden turn would otherwise swing the camera around him.
+inline float s_wolfCameraOffsetX = 0.0f;
+inline float s_wolfCameraOffsetZ = 0.0f;
 }  // namespace detail
 
 // World-space position the VR camera should be anchored to for this frame.
@@ -5984,27 +6087,41 @@ inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye,
             detail::s_fallbackHeadPosCalibrated = false;
 
             const uint64_t wolfSimTick = dusk::interp::sim_tick_seq();
-            cXyz freshWolfEye = link->current.pos;
-            freshWolfEye.y += detail::kWolfCameraHeightUnits;
+            const float wolfStep = dusk::interp::get_interpolation_step();
             const float wolfYawRad = static_cast<float>(link->current.angle.y) * (3.14159265f / 32768.0f);
-            freshWolfEye.x -= detail::kWolfCameraBackUnits * std::sin(wolfYawRad);
-            freshWolfEye.z -= detail::kWolfCameraBackUnits * std::cos(wolfYawRad);
+            const float targetOffsetX = -detail::kWolfCameraBackUnits * std::sin(wolfYawRad);
+            const float targetOffsetZ = -detail::kWolfCameraBackUnits * std::cos(wolfYawRad);
+            const auto wolfEyeWithOffset = [link] {
+                cXyz eye = link->current.pos;
+                eye.y += detail::kWolfCameraHeightUnits;
+                eye.x += detail::s_wolfCameraOffsetX;
+                eye.z += detail::s_wolfCameraOffsetZ;
+                return eye;
+            };
 
             if (!detail::s_wolfEyeAnchorValid) {
-                detail::s_wolfEyeAnchorPrev = freshWolfEye;
-                detail::s_wolfEyeAnchorCurr = freshWolfEye;
+                detail::s_wolfCameraOffsetX = targetOffsetX;
+                detail::s_wolfCameraOffsetZ = targetOffsetZ;
+                detail::s_wolfEyeAnchorPrev = wolfEyeWithOffset();
+                detail::s_wolfEyeAnchorCurr = detail::s_wolfEyeAnchorPrev;
                 detail::s_wolfEyeAnchorValid = true;
                 detail::s_lastSeenWolfSimTick = wolfSimTick;
+                detail::s_wolfEyeAnchorPop.reset();
             } else if (wolfSimTick != detail::s_lastSeenWolfSimTick) {
-                detail::s_wolfEyeAnchorPrev = detail::s_wolfEyeAnchorCurr;
-                detail::s_wolfEyeAnchorCurr = freshWolfEye;
-                detail::s_lastSeenWolfSimTick = wolfSimTick;
+                detail::s_wolfCameraOffsetX +=
+                    (targetOffsetX - detail::s_wolfCameraOffsetX) * detail::kCoreAnchorNudgeSmoothing;
+                detail::s_wolfCameraOffsetZ +=
+                    (targetOffsetZ - detail::s_wolfCameraOffsetZ) * detail::kCoreAnchorNudgeSmoothing;
+                detail::advanceEyeAnchorTick(detail::s_wolfEyeAnchorPrev, detail::s_wolfEyeAnchorCurr,
+                                             detail::s_lastSeenWolfSimTick, wolfEyeWithOffset(),
+                                             detail::s_wolfEyeAnchorPop, wolfSimTick, wolfStep,
+                                             detail::kEyeAnchorExtrapolationGain);
             }
 
-            const float wolfStep = dusk::interp::get_interpolation_step();
-            const cXyz wolfExtrapolated = detail::lerpXyz(
+            cXyz wolfExtrapolated = detail::lerpXyz(
                 detail::s_wolfEyeAnchorPrev, detail::s_wolfEyeAnchorCurr,
                 wolfStep + detail::kEyeAnchorExtrapolationGain);
+            detail::s_wolfEyeAnchorPop.apply(wolfExtrapolated, wolfSimTick, wolfStep);
 
             // Camera-only 6DOF positional tracking, extended to wolf form
             // (2026-09-14, same-day follow-up to the height/back nudge
@@ -6083,19 +6200,8 @@ inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye,
     // cutscene/dialogue: the original, pre-section-23 animated head-joint
     // anchor instead -- see detail::computeRawEyeAnchor()'s own comment.
     const cXyz freshEye = detail::computeRawEyeAnchor(link);
-
-    if (!detail::s_eyeAnchorValid) {
-        detail::s_eyeAnchorPrev = freshEye;
-        detail::s_eyeAnchorCurr = freshEye;
-        detail::s_eyeAnchorValid = true;
-        detail::s_lastSeenSimTick = simTick;
-    } else if (simTick != detail::s_lastSeenSimTick) {
-        detail::s_eyeAnchorPrev = detail::s_eyeAnchorCurr;
-        detail::s_eyeAnchorCurr = freshEye;
-        detail::s_lastSeenSimTick = simTick;
-    }
-
     const float step = dusk::interp::get_interpolation_step();
+
     // See detail::kEyeAnchorExtrapolationGain's own comment (above,
     // next to lerpXyz()) for why this adds the gain to `step` instead of
     // passing `step` straight through -- extrapolates ahead to roughly
@@ -6106,8 +6212,22 @@ inline cXyz getVrCameraEyeAnchor(const cXyz& fallbackEye,
     // travel -- at sprint speed enough to put the camera inside her neck.
     // Riding, the anchor interpolates and stays in step with her.
     const float extrapolationGain = link->checkReinRide() ? 0.0f : detail::kEyeAnchorExtrapolationGain;
-    const cXyz extrapolated = detail::lerpXyz(detail::s_eyeAnchorPrev, detail::s_eyeAnchorCurr,
-                                               step + extrapolationGain);
+
+    if (!detail::s_eyeAnchorValid) {
+        detail::s_eyeAnchorPrev = freshEye;
+        detail::s_eyeAnchorCurr = freshEye;
+        detail::s_eyeAnchorValid = true;
+        detail::s_lastSeenSimTick = simTick;
+        detail::s_eyeAnchorPop.reset();
+    } else if (simTick != detail::s_lastSeenSimTick) {
+        detail::advanceEyeAnchorTick(detail::s_eyeAnchorPrev, detail::s_eyeAnchorCurr,
+                                     detail::s_lastSeenSimTick, freshEye, detail::s_eyeAnchorPop,
+                                     simTick, step, extrapolationGain);
+    }
+
+    cXyz extrapolated = detail::lerpXyz(detail::s_eyeAnchorPrev, detail::s_eyeAnchorCurr,
+                                         step + extrapolationGain);
+    detail::s_eyeAnchorPop.apply(extrapolated, simTick, step);
 
     // Camera-only 6DOF positional tracking (2026-09-11, explicit user
     // request: "the headset can move horizontally and vertically from its

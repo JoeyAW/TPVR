@@ -16,6 +16,9 @@
 #include <vector>
 
 #include "dusk/action_bindings.h"
+
+// Set while an OpenXR session is running (vr_main.cpp); always on the Quest.
+extern "C" bool g_duskVRSessionActive;
 #include "dusk/config.hpp"
 #include "dusk/gamepad_color.h"
 
@@ -391,6 +394,16 @@ void ControllerConfigWindow::build_port_tab(Rml::Element* content, int port) {
 
 void ControllerConfigWindow::render_page(Pane& pane, int port, Page page) {
     pane.clear();
+
+    // VR players have remapped here expecting their motion controllers to
+    // change, but those feed a fixed layout straight to the game (vr_main.cpp)
+    // and nothing in this window reaches them. Say so on every page.
+    if (g_duskVRSessionActive) {
+        pane.add_section("VR Controllers Aren't Affected");
+        pane.add_text("Changes here only apply to the gamepad or keyboard picked under Device. "
+                      "VR motion controllers (Quest Touch, Index, etc.) always use the VR "
+                      "layout and can't be remapped.");
+    }
 
     switch (page) {
     case Page::Controller: {

@@ -38,6 +38,10 @@
 #include <algorithm>
 #include <filesystem>
 
+// Set while an OpenXR session is running (vr_main.cpp). Always true on the
+// Quest; on PC only when playing in a headset.
+extern "C" bool g_duskVRSessionActive;
+
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
 #endif
@@ -1356,6 +1360,25 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
         };
 
         leftPane.add_section("Inputs");
+        // Remapping only applies to real gamepads and the keyboard; VR motion
+        // controllers bypass it (vr_main.cpp feeds a fixed layout straight to the
+        // virtual pad), and its "Custom Action Bindings" replace default controls
+        // with buttons a VR controller can't press (the Call Midna bug). So it's
+        // offered when not in VR, or in VR only once a regular controller is
+        // connected. Re-checked every time this tab opens.
+        if (!g_duskVRSessionActive || PADCount() > 0) {
+            leftPane.register_control(
+                leftPane.add_group_button({.text = "Configure Inputs"}).on_pressed([this] {
+                    push(std::make_unique<ControllerConfigWindow>());
+                }),
+                rightPane, [](Pane& pane) {
+                    pane.clear();
+                    pane.add_text(g_duskVRSessionActive ?
+                                      "Remap buttons on a connected controller. VR motion "
+                                      "controllers use a fixed layout and aren't affected." :
+                                      "Open input binding configuration.");
+                });
+        }
         config_bool_select(leftPane, rightPane, getSettings().game.allowBackgroundInput,
             {
                 .key = "Allow Background Inputs",

@@ -37,6 +37,9 @@
 #include "m_Do/m_Do_MemCard.h"
 
 namespace dusk::ui {
+// Set while an OpenXR session is running (vr_main.cpp); always on the Quest.
+extern "C" bool g_duskVRSessionActive;
+
 namespace {
 constexpr borealis::Log PrelaunchLog{"dusk::ui::prelaunch"};
 constexpr ByteFormat verificationByteFormat{.gibFractionDigits = 2, .mibFractionDigits = 0};
@@ -768,6 +771,38 @@ void try_push_language_unavailable_modal(Document& host) {
     }));
 }
 
+// VR: on every boot, tell the player how to open the Dusklight menu in game,
+// since VR has no obvious menu button (the chord is in vr_main.cpp tick() /
+// vr_menu_gamepad.hpp: Menu or right stick click, plus right trigger, held
+// kMenuChordHoldToOpenSec). Once per launch; waits while a VR session isn't
+// up yet or another modal is on top.
+bool sVrMenuHintShown = false;
+
+void try_push_vr_menu_hint_modal(Document& host) {
+    if (sVrMenuHintShown || !g_duskVRSessionActive) {
+        return;
+    }
+    sVrMenuHintShown = true;
+
+    auto dismiss = [](Modal& modal) { modal.pop(); };
+    host.push(std::make_unique<Modal>(Modal::Props{
+        .title = "Opening the VR Menu",
+        .bodyRml = "To open the Dusklight menu while playing (settings, including all the VR "
+                   "options), hold the <b>right trigger</b> and the <b>left Menu button</b> "
+                   "together for 1 second.<br/><br/>"
+                   "No Menu button (e.g. Valve Index)? Hold the <b>right trigger</b> and click "
+                   "in the <b>right stick</b> instead.",
+        .actions =
+            {
+                ModalAction{
+                    .label = "OK",
+                    .onPressed = dismiss,
+                },
+            },
+        .onDismiss = dismiss,
+    }));
+}
+
 void ensure_initialized() noexcept {
     auto& state = prelaunch_state();
     if (state.initialized) {
@@ -1021,6 +1056,10 @@ void Prelaunch::update() {
     if (top_document() == this) {
         try_push_verification_modal(*this);
         try_push_language_unavailable_modal(*this);
+    }
+    // Separate check: shown only once the notices above are out of the way.
+    if (top_document() == this) {
+        try_push_vr_menu_hint_modal(*this);
     }
 
     const auto& state = prelaunch_state();

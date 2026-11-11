@@ -9608,7 +9608,17 @@ BOOL daAlink_c::midnaTalkTrigger() const {
 #if TARGET_PC
     // If we have a custom bind for Midna, check that instead
     if (dusk::isActionBound(dusk::ActionBinds::CALL_MIDNA, 0)) {
-        return dusk::getActionBindTrig(dusk::ActionBinds::CALL_MIDNA, 0);
+        if (dusk::getActionBindTrig(dusk::ActionBinds::CALL_MIDNA, 0)) {
+            return TRUE;
+        }
+        // VR: the headset controllers press Z (left stick click) through the
+        // virtual pad and can never press the custom bound gamepad button/key.
+        // A Call Midna binding saved in config.json (e.g. from the since-removed
+        // Configure Inputs menu, which can no longer clear it) used to make
+        // Midna uncallable until the data folder was wiped. Keep Z working.
+        if (!dusk::vr::isImmersiveVr()) {
+            return FALSE;
+        }
     }
 #endif
     return mItemTrigger & BTN_Z;

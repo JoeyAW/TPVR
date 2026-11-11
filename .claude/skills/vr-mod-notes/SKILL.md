@@ -16261,3 +16261,15 @@ at frame rate+9.5 in the checkEquipAnime() branch of the upper-anime update). Sh
 (the anim's own start/change/end, compressed). First person only via the gate, so third person
 and the A button's Put Away keep the animation. Draw still waits for its anim's change frame
 (not reported as a problem). Built, NOT yet retested.
+
+### Can't call Midna with left stick click (user reports, mostly Quest) — likely cause found by code reading 2026-11-11, fix built, NOT yet confirmed by an affected user
+
+Symptom: left stick click (VR -> `PAD_TRIGGER_Z`) never calls Midna; only fixed by wiping the
+data folder. `daAlink_c::midnaTalkTrigger()` (d_a_alink.cpp) checks ONLY the custom "Call Midna"
+action binding when `actionBindings.callMidna_port0` in config.json is anything but -1, never Z.
+VR input goes through PADSetVirtualStatus (raw bits merged after aurora's mapping), so it can't
+press that bound SDL button/key, and the Configure Inputs menu that could clear it was removed
+(eea32ff39b, 2026-10-17). Fix: in immersive VR, Z still works when a binding is saved (the binding
+also still works). Other action-bind overrides checked: First Person Camera / Open Dusklight Menu
+only replace SDL-gamepad paths VR doesn't use. To confirm, ask an affected user for config.json and
+check `actionBindings.callMidna_port0` (Quest: /sdcard/Dusklight; PC: %APPDATA%/TwilitRealm/Dusklight).

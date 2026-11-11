@@ -3710,7 +3710,7 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
             }
         }
         if (menuVisible) {
-            if (!dusk::ui::is_prelaunch_open()) {
+            if (!dusk::ui::is_prelaunch_top()) {
                 vr_render::drawMenuBillboardBackdrop(vr_render::g_menuBillboardAspectHeightOverWidth);
             }
             vr_render::drawMenuBillboard(&vr_render::g_menuBillboardTexObj,
@@ -3858,14 +3858,15 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         // image (prelaunch.rcss's .background/.gradient, unrelated to
         // window.rcss's shared panel styling other RmlUi windows use) and
         // is meant to stay see-through in VR, unlike every other document
-        // -- dusk::ui::is_prelaunch_open() (ui.cpp, already existed) is the
-        // real "is THIS the title screen, not some other document"
-        // signal. Only the solid backdrop is skipped -- the real menu
+        // -- dusk::ui::is_prelaunch_top() is the signal: the start screen
+        // must be the TOP document. (is_prelaunch_open() was used until
+        // 2026-11-11, but the start screen stays open underneath Settings/
+        // Mods opened from it, so those windows lost their backdrop in VR.) Only the solid backdrop is skipped -- the real menu
         // content (text/logo/buttons) still draws normally via
         // drawMenuBillboard() below, just without the opaque quad behind
         // it, so it reads through to the real VR surroundings.
         if (menuVisible) {
-            if (!dusk::ui::is_prelaunch_open()) {
+            if (!dusk::ui::is_prelaunch_top()) {
                 vr_render::drawMenuBillboardBackdrop(vr_render::g_menuBillboardAspectHeightOverWidth);
             }
             vr_render::drawMenuBillboard(&vr_render::g_menuBillboardTexObj,

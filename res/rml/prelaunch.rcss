@@ -6,6 +6,10 @@ body {
     --color-ready: #D8F999;
     --menu-button-decorator: horizontal-gradient(rgba(var(--color-black-rgb), 0%) rgba(var(--color-black-rgb), 0%));
     --menu-button-decorator-hover: horizontal-gradient(#FEE685FF #FEE68500);
+    /* Start-menu options only: a translucent dark backing behind each button so the
+       text reads over the background art. Still a gradient (two equal stops) so
+       it transitions to the hover gradient without a white flash. */
+    --menu-option-decorator: horizontal-gradient(rgba(var(--color-black-rgb), 50%) rgba(var(--color-black-rgb), 50%));
 
     width: 100%;
     height: 100%;
@@ -137,14 +141,14 @@ menu-list {
     font-size: var(--font-size-6xl);
     font-weight: normal;
     cursor: pointer;
-    /* Define a fully transparent gradient as the default state, otherwise a white flash occurs */
-    decorator: var(--menu-button-decorator);
+    /* Define a gradient as the default state, otherwise a white flash occurs */
+    decorator: var(--menu-option-decorator);
 }
 
 #menu-list button:disabled {
     opacity: 0.75;
     cursor: default;
-    decorator: var(--menu-button-decorator);
+    decorator: var(--menu-option-decorator);
 }
 
 #menu-list button.anim-done {

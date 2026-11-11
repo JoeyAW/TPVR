@@ -444,6 +444,10 @@ bool is_prelaunch_open() noexcept {
     });
 }
 
+bool is_prelaunch_top() noexcept {
+    return dynamic_cast<const Prelaunch*>(top_document()) != nullptr;
+}
+
 bool game_obscured_below(const Document& doc) noexcept {
     for (const auto& entry : sDocumentStack) {
         if (entry.get() == &doc) {

@@ -1359,6 +1359,20 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                 });
         };
 
+        // VR controller diagram (res/vr-controls.png, a 1600px copy of
+        // "Graphic design/TPVR controls.png"). First item, so it's what the
+        // right pane shows when this tab opens.
+        leftPane.add_section("VR Controls");
+        leftPane.register_control(
+            leftPane.add_group_button({.text = "VR Controller Layout"}),
+            rightPane, [](Pane& pane) {
+                pane.clear();
+                pane.add_rml("<img src=\"res/vr-controls.png\" "
+                             "style=\"display: block; width: 100%; height: auto;\" />");
+                pane.add_text("Open the Dusklight menu: hold the right trigger and the left Menu "
+                              "button (or click the right stick) together for 1 second.");
+            });
+
         leftPane.add_section("Inputs");
         // Remapping only applies to real gamepads and the keyboard; VR motion
         // controllers bypass it (vr_main.cpp feeds a fixed layout straight to the

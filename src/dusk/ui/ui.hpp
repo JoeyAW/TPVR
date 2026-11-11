@@ -118,6 +118,8 @@ Document* find_document(DocumentScope scope) noexcept;
 void close_all_documents() noexcept;
 bool any_document_visible() noexcept;
 bool is_prelaunch_open() noexcept;
+// The start screen itself is showing, not a window (Settings, Mods, ...) opened over it.
+bool is_prelaunch_top() noexcept;
 bool game_obscured_below(const Document& doc) noexcept;
 Document* top_document() noexcept;
 

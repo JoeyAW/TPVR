@@ -834,6 +834,10 @@ bool consumePhysicalBoomerangThrow() {
     return isImmersiveVr() && vr_link::consumePhysicalBoomerangThrow();
 }
 
+int consumePhysicalSheathRequest() {
+    return isImmersiveVr() ? static_cast<int>(vr_link::consumePhysicalSheathRequest()) : 0;
+}
+
 bool retargetBoomerangMtxToRightHand(daAlink_c* link, float (*mtx)[4], bool flipModelFlat) {
     return isImmersiveVr() && vr_link::retargetBoomerangMtxToRightHand(link, mtx, flipModelFlat);
 }
@@ -2287,6 +2291,15 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     // the sword-swing and shield-bash gestures below stay out of the way.
     const bool boomerangReady = !screenMode && vr_link::isPhysicalBoomerangReady();
 
+    // Physical sheathing: the sword hand's grip at its shoulder draws or puts
+    // away the sword (vr_link::updatePhysicalSheathState()). Meanwhile that
+    // grip's usual button (R on the left, X on the right) stays off.
+    const bool sheathHoldsGrip = vr_link::updatePhysicalSheathState(
+        !screenMode, hmdPose, swordSwingSourcePose, swapSwordShieldHands,
+        swapSwordShieldHands ? rightSqueeze : leftSqueeze, pacing.dt);
+    const bool sheathHoldsLeftSqueeze = sheathHoldsGrip && !swapSwordShieldHands;
+    const bool sheathHoldsRightSqueeze = sheathHoldsGrip && swapSwordShieldHands;
+
     // FIX (2026-08-13) -- user report: "swinging fast left and right
     // repeatedly is the equivalent of pressing B repeatedly on a
     // controller, and it did not attack repeatedly" -- ruled out (by the
@@ -2513,7 +2526,9 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     // While physically climbing the squeezes grab (vr_link::
     // updatePhysicalClimbState()) instead of pressing X / R.
     const bool squeezeClimbs = !screenMode && vr_link::isPhysicalClimbActive();
-    if (rightSqueeze > kSqueezeThreshold && !squeezeClimbs) padStatus.button |= PAD_BUTTON_X;  // was Z
+    if (rightSqueeze > kSqueezeThreshold && !squeezeClimbs && !sheathHoldsRightSqueeze) {
+        padStatus.button |= PAD_BUTTON_X;  // was Z
+    }
     if (rightTrigger > kTriggerDeadzone) padStatus.button |= PAD_BUTTON_Y;   // was analog R
     if (leftTrigger > kTriggerDeadzone) {
         padStatus.button |= PAD_TRIGGER_L;
@@ -2524,7 +2539,7 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     // why a plain OR isn't enough by itself -- the force-release phase can
     // override an existing squeeze-hold to guarantee spActionTrigger() sees
     // a real 0->1 edge).
-    bool rWantsHeld = leftSqueeze > kTriggerDeadzone && !squeezeClimbs;
+    bool rWantsHeld = leftSqueeze > kTriggerDeadzone && !squeezeClimbs && !sheathHoldsLeftSqueeze;
     if (rightThrustForceRelease) {
         rWantsHeld = false;
     } else if (rightThrustForceHold) {
@@ -3199,6 +3214,19 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     vr_link::updatePhysicalClimbState(leftSqueeze, rightSqueeze);
     // Physical swimming: arm strokes -> push (vr_link_visibility.hpp).
     vr_link::updatePhysicalSwimState(pacing.dt);
+    // Physical sheathing: a light tap when the sword hand reaches the hilt, a
+    // stronger one when it draws or puts the sword away.
+    if (const int sheathEvent = vr_link::consumeSheathHapticEvent(); sheathEvent != 0) {
+        XrHapticActionInfo info{XR_TYPE_HAPTIC_ACTION_INFO};
+        info.action = g_hapticAction;
+        info.subactionPath = swapSwordShieldHands ? g_rightHandPath : g_leftHandPath;
+        XrHapticVibration vib{XR_TYPE_HAPTIC_VIBRATION};
+        vib.duration = sheathEvent == 2 ? 40'000'000 : 15'000'000;  // ns
+        vib.frequency = XR_FREQUENCY_UNSPECIFIED;
+        vib.amplitude = sheathEvent == 2 ? 0.6f : 0.25f;
+        xrApplyHapticFeedback(g_session->session(), &info,
+                              reinterpret_cast<const XrHapticBaseHeader*>(&vib));
+    }
     if (const int grabHand = vr_link::consumeClimbGrabEvent(); grabHand >= 0) {
         XrHapticActionInfo info{XR_TYPE_HAPTIC_ACTION_INFO};
         info.action = g_hapticAction;

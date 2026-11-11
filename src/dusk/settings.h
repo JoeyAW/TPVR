@@ -462,6 +462,10 @@ struct UserSettings {
         // tracked sword's own attack hitbox is live while the hand moves
         // faster than the swing-gesture threshold (no attack animation).
         ConfigVar<bool> vrPhysicalSword;
+        // Physical sheathing: reach over the sword hand's shoulder and squeeze
+        // grip to draw the sword; bring it back there and let go to put it
+        // away. B and A ("Put Away") still work.
+        ConfigVar<bool> vrPhysicalSheath;
         // Physical bow: nock the arrow by bringing the draw hand to the bow,
         // pull it back along the bow's aim, release the item button to fire.
         ConfigVar<bool> vrPhysicalBow;

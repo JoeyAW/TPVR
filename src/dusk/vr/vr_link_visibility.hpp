@@ -4677,6 +4677,135 @@ inline int consumeClimbGrabEvent() {
     return hand;
 }
 
+// ---- "Physical Sheathing" (game.vrPhysicalSheath) ----
+// The hilt sits over the sword hand's shoulder. Sheathed: squeezing grip there
+// draws the sword. Drawn: letting go of grip there puts it away, once the hand
+// has left the spot since the draw (so releasing right after a draw doesn't
+// undo it). While the hand is there, and while a grip that started there is
+// still held, that grip doesn't press its usual button (R / raise shield on
+// the left hand, X on the right). daAlink_c::checkItemChangeFromButton() acts
+// on the request, so the game decides whether Link can draw right now, the
+// same as for the B button.
+inline bool isPhysicalSheathMode(daAlink_c* link) {
+    return link && dusk::getSettings().game.vrPhysicalSheath.getValue() && isFirstPerson(link) &&
+           daPy_py_c::checkSwordGet() && !isPhysicalClimbActive();
+}
+
+enum class SheathRequest { None = 0, Draw = 1, Sheathe = 2 };
+
+// The spot, relative to the headset in tracking space (meters), in a frame
+// that only follows head yaw: "side" is toward the sword hand's side, "fwd"
+// is where the face points. The eyes sit roughly 10cm ahead of the shoulder
+// line, so a hand over the shoulder reads as slightly behind them. Turning
+// the head toward that shoulder pushes the hand forward in this frame, hence
+// the forward limit reaching a little in front of the eyes. Exit bounds are
+// wider so the spot doesn't flicker at its edge. First guesses, untested.
+inline constexpr float kSheathFwdMax = 0.05f, kSheathFwdMaxExit = 0.12f;
+inline constexpr float kSheathUpMin = -0.30f, kSheathUpMinExit = -0.38f;
+inline constexpr float kSheathUpMax = 0.25f, kSheathUpMaxExit = 0.33f;
+inline constexpr float kSheathSideMin = -0.08f, kSheathSideMinExit = -0.15f;
+inline constexpr float kSheathSideMax = 0.35f, kSheathSideMaxExit = 0.42f;
+inline constexpr float kSheathGripPress = 0.6f, kSheathGripRelease = 0.4f;
+
+namespace detail {
+// Long enough for a 30Hz tick to see it, and to wait out a short animation
+// that blocks item changes.
+inline constexpr float kSheathRequestLatchSec = 0.3f;
+inline SheathRequest s_sheathRequest = SheathRequest::None;
+inline float s_sheathRequestSec = 0.0f;
+inline bool s_sheathInZone = false;
+inline bool s_sheathGripHeld = false;
+inline bool s_sheathGripOwned = false;  // grip squeezed at the spot, still held
+inline bool s_sheathArmed = true;       // hand left the spot since the last draw
+inline int s_sheathHapticEvent = 0;     // 1 = reached the spot, 2 = drew/sheathed
+}  // namespace detail
+
+inline bool isHandAtSheath(const XrPosef& head, const XrPosef& hand, bool swordOnRight, bool wasThere) {
+    const XrQuaternionf& q = head.orientation;
+    const Vec3f fwd3 = rotateVecByQuat(q.x, q.y, q.z, q.w, Vec3f{0.f, 0.f, -1.f});
+    const float len = std::sqrt(fwd3.x * fwd3.x + fwd3.z * fwd3.z);
+    if (len < 0.3f) return false;  // looking nearly straight up or down
+    const float fx = fwd3.x / len, fz = fwd3.z / len;
+    // OpenXR is y-up with -z forward, so right = forward x up = (-fz, 0, fx).
+    const float rx = -fz, rz = fx;
+    const float dx = hand.position.x - head.position.x;
+    const float dy = hand.position.y - head.position.y;
+    const float dz = hand.position.z - head.position.z;
+    const float fwd = dx * fx + dz * fz;
+    const float side = (dx * rx + dz * rz) * (swordOnRight ? 1.f : -1.f);
+    if (wasThere) {
+        return fwd <= kSheathFwdMaxExit && dy >= kSheathUpMinExit && dy <= kSheathUpMaxExit &&
+               side >= kSheathSideMinExit && side <= kSheathSideMaxExit;
+    }
+    return fwd <= kSheathFwdMax && dy >= kSheathUpMin && dy <= kSheathUpMax && side >= kSheathSideMin &&
+           side <= kSheathSideMax;
+}
+
+// Once per real frame from vr_main.cpp tick(). swordHand/grip are the sword
+// hand's pose and squeeze (they follow "Swap Sword/Shield Hands"). Returns true
+// while that grip must not press its usual button.
+inline bool updatePhysicalSheathState(bool enabled, const XrPosef& head, const XrPosef& swordHand,
+                                      bool swordOnRight, float grip, float dt) {
+    using namespace detail;
+    const bool gripWasHeld = s_sheathGripHeld;
+    s_sheathGripHeld = gripWasHeld ? grip > kSheathGripRelease : grip > kSheathGripPress;
+    const bool pressed = s_sheathGripHeld && !gripWasHeld;
+    const bool released = !s_sheathGripHeld && gripWasHeld;
+
+    if (s_sheathRequestSec > 0.0f) {
+        s_sheathRequestSec -= dt;
+        if (s_sheathRequestSec <= 0.0f) s_sheathRequest = SheathRequest::None;
+    }
+
+    auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
+    if (!enabled || !isPhysicalSheathMode(link)) {
+        s_sheathInZone = false;
+        s_sheathGripOwned = false;
+        s_sheathArmed = true;
+        s_sheathRequest = SheathRequest::None;
+        s_sheathRequestSec = 0.0f;
+        return false;
+    }
+
+    const bool wasInZone = s_sheathInZone;
+    s_sheathInZone = isHandAtSheath(head, swordHand, swordOnRight, wasInZone);
+    if (s_sheathInZone && !wasInZone) s_sheathHapticEvent = std::max(s_sheathHapticEvent, 1);
+    if (!s_sheathInZone) s_sheathArmed = true;
+
+    auto request = [](SheathRequest r) {
+        s_sheathRequest = r;
+        s_sheathRequestSec = kSheathRequestLatchSec;
+        s_sheathHapticEvent = 2;
+    };
+    const bool drawn = link->checkItemSwordEquip();
+    if (s_sheathInZone && pressed) {
+        s_sheathGripOwned = true;
+        if (!drawn) {
+            request(SheathRequest::Draw);
+            s_sheathArmed = false;
+        }
+    } else if (s_sheathInZone && released && drawn && s_sheathArmed) {
+        request(SheathRequest::Sheathe);
+    }
+    if (!s_sheathGripHeld) s_sheathGripOwned = false;
+
+    return s_sheathInZone || s_sheathGripOwned;
+}
+
+inline SheathRequest consumePhysicalSheathRequest() {
+    const SheathRequest r = detail::s_sheathRequest;
+    detail::s_sheathRequest = SheathRequest::None;
+    detail::s_sheathRequestSec = 0.0f;
+    return r;
+}
+
+// 0 none, 1 hand reached the spot (light tap), 2 drew/sheathed. Once.
+inline int consumeSheathHapticEvent() {
+    const int e = detail::s_sheathHapticEvent;
+    detail::s_sheathHapticEvent = 0;
+    return e;
+}
+
 // Stick input for the game's climb procs from the pull still owed: the
 // dominant axis only, since the wall procs turn any diagonal into a side
 // step. False -> leave the real stick alone.

@@ -12508,6 +12508,33 @@ BOOL daAlink_c::checkItemChangeFromButton() {
         && !checkKandelaarSwingAnime()
         && !checkKandelaarSwingAnime())
     {
+#if TARGET_PC
+        // VR Physical Sheathing: gripping at the shoulder draws the sword under
+        // the same conditions as the B button below; letting go there puts it
+        // away like Put Away does, minus the flourish and the lantern swap.
+        if (const int vrSheath = dusk::vr::consumePhysicalSheathRequest(); vrSheath != 0) {
+            if (vrSheath == 1 && checkSwordGet() && !checkNotBattleStage() && !checkCanoeRide()
+                && (!checkModeFlg(0x40000) || checkEquipHeavyBoots()) && mEquipItem != 0x103
+                && !checkEndResetFlg1(ERFLG1_SWORD_TRIGGER_NON))
+            {
+                swordEquip(TRUE);
+                return 0;
+            }
+            if (vrSheath == 2 && mEquipItem == 0x103) {
+                // Instant: the put-away animation only moves the sword and
+                // shield to Link's back at its change frame (~frame 10, see
+                // the checkEquipAnime() branch of the upper-anime update), a
+                // visible lag when your hand is already at the shoulder. Run
+                // its start, item change and end in one go instead. Physical
+                // sheathing is first person only, so third person (and the A
+                // button's Put Away everywhere) keep the animation.
+                allUnequip(FALSE);
+                commonChangeItem();
+                resetUpperAnime(UPPER_2, 3.0f);
+                return 0;
+            }
+        }
+#endif
         if (
             #if PLATFORM_GCN
             dComIfGs_getSelectEquipSword() != dItemNo_NONE_e &&

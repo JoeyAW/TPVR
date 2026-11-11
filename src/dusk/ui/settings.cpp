@@ -1219,6 +1219,14 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                             "the swing slows down. Link doesn't play an attack animation. "
                             "The real attack button still works normally. Off by default."
             });
+        config_bool_select(leftPane, rightPane, getSettings().game.vrPhysicalSheath,
+            {
+                .key = "Physical Sheathing",
+                .helpText = "Reach over the shoulder on your sword hand's side and squeeze grip "
+                            "to draw the sword. To put it away, bring the sword back over that "
+                            "shoulder and let go of grip. Grip doesn't raise the shield while "
+                            "your hand is there. The attack and Put Away buttons still work."
+            });
         config_bool_select(leftPane, rightPane, getSettings().game.vrPhysicalBow,
             {
                 .key = "Physical Bow",

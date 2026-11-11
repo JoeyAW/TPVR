@@ -117,6 +117,7 @@ UserSettings g_userSettings = {
         .vrExperimentalCutsceneFirstPerson {"game.vrExperimentalCutsceneFirstPerson", false},
         .vrSwapSwordShieldHands {"game.vrSwapSwordShieldHands", false},
         .vrPhysicalSword {"game.vrPhysicalSword", true},
+        .vrPhysicalSheath {"game.vrPhysicalSheath", true},
         .vrPhysicalBow {"game.vrPhysicalBow", true},
         .vrLeftHandedBow {"game.vrLeftHandedBow", true},
         .vrBowSwapMirrorAxis {"game.vrBowSwapMirrorAxis", 2},
@@ -460,6 +461,7 @@ void registerSettings() {
     Register(g_userSettings.game.vrExperimentalCutsceneFirstPerson);
     Register(g_userSettings.game.vrSwapSwordShieldHands);
     Register(g_userSettings.game.vrPhysicalSword);
+    Register(g_userSettings.game.vrPhysicalSheath);
     Register(g_userSettings.game.vrPhysicalBow);
     Register(g_userSettings.game.vrLeftHandedBow);
     Register(g_userSettings.game.vrBowSwapMirrorAxis);

@@ -438,6 +438,9 @@ float getPhysicalSlingshotBandFrame(float frameMax);
 bool isPhysicalBoomerangMode(daAlink_c* link);
 // True once per throw motion.
 bool consumePhysicalBoomerangThrow();
+// Physical sheathing (game.vrPhysicalSheath): 1 = draw the sword, 2 = put it
+// away, 0 = nothing. Once per gesture.
+int consumePhysicalSheathRequest();
 // Moves a matrix built from getLeftItemMatrix() onto the right tracked hand,
 // in place. False (matrix left alone) if not in this mode or not tracked.
 // flipModelFlat: true for the boomerang model, false for its effect models.

@@ -16225,3 +16225,39 @@ guessed L2->R7 pair showed a loose open hand. This replaces the "sword swap axes
 `kBoomerangGripTiltBackDeg` (20, first guess) turns the model about the grip point, moving the
 held arm toward the wrist. The axis comes from hand geometry (arm x grip-to-wrist in the hand
 frame) rather than a hard-coded local axis.
+
+### "Physical Sheathing" (default ON) — built 2026-11-11, NOT yet tested in-headset
+
+`game.vrPhysicalSheath`, VR tab > Combat after Physical Sword. User choices: grip to grab
+the hilt (not motion-only), hilt over the shoulder on the sword hand's side (follows
+"Swap Sword/Shield Hands"). Stowed sword/sheath stay hidden in first person as before.
+- Gate `vr_link::isPhysicalSheathMode()`: setting + first person + `checkSwordGet()` +
+  not physically climbing.
+- Spot: `vr_link::isHandAtSheath()`, sword-hand grip pose relative to the HMD in a
+  yaw-only head frame (tracking space): fwd <= 0.05, up -0.30..0.25, side -0.08..0.35
+  toward the sword side, wider exit bounds (`kSheath*`, first guesses). Head turned
+  toward the shoulder pushes the hand "forward" in this frame -- first thing to retune
+  if it's hard to hit.
+- `vr_link::updatePhysicalSheathState()` (tick(), right after `boomerangReady`): grip
+  press at the spot while sheathed -> Draw request; grip release at the spot while drawn
+  -> Sheathe, only once the hand has left the spot since the last draw (`s_sheathArmed`).
+  Requests latch 0.3s. While the hand is at the spot, or a grip that started there is
+  still held, that grip's own button is off (left squeeze -> R/shield, right -> X).
+  Haptics on the sword hand: light tap on reaching the spot, stronger on a request.
+- Game side: top of `daAlink_c::checkItemChangeFromButton()`'s gate, `dusk::vr::
+  consumePhysicalSheathRequest()`: Draw -> `swordEquip(TRUE)` under the B button's own
+  conditions; Sheathe -> `allUnequip(FALSE)` (no flourish `procSwordUnequipSpInit`, no
+  lantern swap). If the game is in a proc that never reaches that function within 0.3s
+  the request just expires (haptic still fired).
+- Horse procs reach it via checkNextActionFromButton() (swordEquip() picks the
+  horseback anim itself); canoe draws are excluded like B's.
+- Untested: zone placement/size, interplay with the swing->B gesture when Physical
+  Sword is off (a fast pull-out may also attack).
+
+**Follow-up (2026-11-11): CONFIRMED WORKING in-headset ("works great"), but putting away lagged** --
+the sword/shield only move to the back at the unequip anim's change frame (`commonChangeItem()`
+at frame rate+9.5 in the checkEquipAnime() branch of the upper-anime update). Sheathe now runs
+`allUnequip(FALSE)` + `commonChangeItem()` + `resetUpperAnime(UPPER_2, 3.0f)` in the same tick
+(the anim's own start/change/end, compressed). First person only via the gate, so third person
+and the A button's Put Away keep the animation. Draw still waits for its anim's change frame
+(not reported as a problem). Built, NOT yet retested.

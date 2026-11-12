@@ -88,6 +88,7 @@ UserSettings g_userSettings = {
         .disableLetterboxing {"game.disableLetterboxing", LetterboxMode::Off},
         .enableHighQualityMinimapTextures {"game.enableHighQualityMinimapTextures", true},
         .vrDesktopMirror {"game.vrDesktopMirror", true},
+        .vrMirrorSingleEye {"game.vrMirrorSingleEye", true},
         .vrScreenMode {"game.vrScreenMode", false},
         .vrScreenModeStereo {"game.vrScreenModeStereo", false},
         .vrScreenModeDepth {"game.vrScreenModeDepth", 1.0f},
@@ -432,6 +433,7 @@ void registerSettings() {
     Register(g_userSettings.game.disableLetterboxing);
     Register(g_userSettings.game.enableHighQualityMinimapTextures);
     Register(g_userSettings.game.vrDesktopMirror);
+    Register(g_userSettings.game.vrMirrorSingleEye);
     Register(g_userSettings.game.vrScreenMode);
     Register(g_userSettings.game.vrScreenModeStereo);
     Register(g_userSettings.game.vrScreenModeDepth);

@@ -35,6 +35,7 @@
 #include "dusk/interp/material.h" // replay_models_for_current_view()
 #include "dusk/settings.h"                      // dusk::getSettings().game.vrDesktopMirror
 #include "dusk/logging.h"                       // DuskLog
+#include <aurora/lib/window.hpp>                // aurora::window::get_window_size -- one-eye mirror crop
 #include <aurora/lib/thread.hpp>                // aurora::thread::native_thread_id_for -- Quest thread hints
 #if defined(__ANDROID__)
 #include <unistd.h>                             // gettid()
@@ -3635,6 +3636,7 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     // own comment for the mechanism; this is just where VR code decides
     // WHICH texture and WHEN.
     aurora::gfx::ResolvedTargets mirrorEyeTargets;
+    bool mirrorIsDoubleWide = false;  // set by the single-pass path below
 
     // Single-pass stereo (VR_SINGLE_PASS_STEREO_PLAN.md, 2026-09-20): one
     // traversal + painter into one double-wide pass, instanced per eye on
@@ -3740,11 +3742,12 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         }
 #endif
 
-        // The desktop mirror gets the whole double-wide image for now (both
-        // eyes side by side in the window) -- the present-resample pass has
-        // no source sub-rect yet.
+        // The desktop mirror gets the whole double-wide image (both eyes side
+        // by side); with "Mirror One Eye" on, cropMirrorToSingleEye() (end of
+        // tick()) cuts the left eye out of it instead.
         if (targets.colorTexture) {
             mirrorEyeTargets = targets;
+            mirrorIsDoubleWide = true;
         }
 
         for (uint32_t eye = 0; eye < viewCount; ++eye) {
@@ -4004,6 +4007,22 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     // -- set_present_source_mirror() itself no-ops if mirrorEyeTargets never
     // got populated this frame (eye 0 never resolved).
     if (dusk::getSettings().game.vrDesktopMirror) {
+#if !defined(TARGET_ANDROID) && !defined(__ANDROID__)
+        // "Mirror One Eye": crop the left eye to the window's shape so it fills
+        // the window. Not on standalone: no desktop window there, and the
+        // mirror source's size also sets the menu overlay's canvas.
+        if (dusk::getSettings().game.vrMirrorSingleEye && mirrorEyeTargets.colorTexture) {
+            const AuroraWindowSize win = aurora::window::get_window_size();
+            const uint32_t winW = win.native_fb_width != 0 ? win.native_fb_width : win.fb_width;
+            const uint32_t winH = win.native_fb_height != 0 ? win.native_fb_height : win.fb_height;
+            // Single-pass stereo resolves both eyes side by side (left eye in
+            // the left half); two-pass resolves eye 0 alone.
+            const uint32_t eyeRegionWidth = mirrorIsDoubleWide ? mirrorEyeTargets.width / 2
+                                                               : mirrorEyeTargets.width;
+            mirrorEyeTargets =
+                vr_render::cropMirrorToSingleEye(mirrorEyeTargets, eyeRegionWidth, winW, winH);
+        }
+#endif
         aurora::gfx::set_present_source_mirror(mirrorEyeTargets);
         // Paired with the reset in tick()'s "reset up front" block -- see
         // aurora::rmlui::set_force_no_backdrop()'s own comment for the real

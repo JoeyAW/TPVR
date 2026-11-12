@@ -289,6 +289,10 @@ struct UserSettings {
         // set_present_source_mirror()) -- no extra render pass, no CPU
         // readback, near-zero cost.
         ConfigVar<bool> vrDesktopMirror;
+        // Desktop mirror shows only the left eye, cropped to fill the window,
+        // instead of both eyes side by side (single-pass stereo) or one eye
+        // letterboxed (two-pass). PC/Linux only.
+        ConfigVar<bool> vrMirrorSingleEye;
         // Renders flat-camera gameplay onto a large 16:9 screen in the headset.
         // It can be toggled live; immersive VR behavior is disabled while selected.
         ConfigVar<bool> vrScreenMode;

@@ -16273,3 +16273,17 @@ press that bound SDL button/key, and the Configure Inputs menu that could clear 
 also still works). Other action-bind overrides checked: First Person Camera / Open Dusklight Menu
 only replace SDL-gamepad paths VR doesn't use. To confirm, ask an affected user for config.json and
 check `actionBindings.callMidna_port0` (Quest: /sdcard/Dusklight; PC: %APPDATA%/TwilitRealm/Dusklight).
+
+### "Mirror One Eye" desktop mirror (default ON, PC/Linux only) — built 2026-11-11, NOT yet tested
+
+`game.vrMirrorSingleEye`, Video tab under "VR Desktop Mirror" (disabled when the mirror is off).
+Single-pass stereo used to mirror the whole double-wide target (both eyes side by side); two-pass
+mirrored eye 0 letterboxed. `vr_render::cropMirrorToSingleEye()` (vr_stereo_render.hpp) copies a
+centered, window-aspect rect of the left eye into its own texture via an encoder task (payload =
+index into a 4-slot ring of strong texture refs, so resize/frames-in-flight can't free a texture
+mid-copy) and that becomes the present source, so aurora's present pass fills the window. Called
+at the end of tick() before set_present_source_mirror(); `mirrorIsDoubleWide` tells it which layout.
+Skipped on Android: the mirror source size also sets the RmlUi canvas there. Side effect on PC: the
+RmlUi canvas (and so the VR menu panel's aspect) now follows the window's aspect instead of 2:1.
+Untested: push_encoder_task needs the EFB pass active at that point (falls back to the uncropped
+mirror if it returns false, with an aurora warning each frame).

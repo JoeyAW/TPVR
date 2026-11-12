@@ -973,6 +973,13 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                             "instead of leaving it blank. Reuses the game's existing present "
                             "pass, so this has no meaningful performance cost."
             });
+        config_bool_select(leftPane, rightPane, getSettings().game.vrMirrorSingleEye,
+            {
+                .key = "Mirror One Eye",
+                .helpText = "Shows only your left eye in the game window, scaled and cropped to "
+                            "fill it, instead of both eyes side by side. On by default.",
+                .isDisabled = [] { return !dusk::getSettings().game.vrDesktopMirror.getValue(); }
+            });
 #endif
 
         leftPane.add_section("Comfort");

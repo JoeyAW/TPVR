@@ -55,6 +55,8 @@
 // safe to include directly (unlike gx.hpp below, deliberately NOT
 // included wholesale -- see that comment).
 #include "../../../extern/aurora/lib/rmlui.hpp"
+// aurora::webgpu::g_device -- cropMirrorToSingleEye() creates its own texture.
+#include "../../../extern/aurora/lib/webgpu/gpu.hpp"
 
 // aurora::gx::ensure_external_copy_texture() lives in the lib-internal
 // extern/aurora/lib/gx/gx.hpp -- deliberately NOT included wholesale here
@@ -1718,6 +1720,136 @@ inline bool copyScreenModeTexture(const aurora::gfx::ResolvedTargets& targets, u
     }
     aurora::gfx::push_encoder_task(screen_mode_detail::s_copyTaskId, nullptr, 0);
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Desktop mirror: one eye, cropped to fill the window ("Mirror One Eye",
+// game.vrMirrorSingleEye, 2026-11-11)
+// ---------------------------------------------------------------------------
+//
+// aurora's present-resample pass letterboxes whatever present source it gets,
+// with no source sub-rect. Single-pass stereo hands it the double-wide target
+// (both eyes side by side), two-pass hands it eye 0 (roughly square, so wide
+// black bars). Instead: copy a window-aspect, centered rect of the left eye
+// into our own texture and mirror that, so the present pass scales it to the
+// whole window. One GPU copy of at most one eye per frame, no extra render.
+//
+// Threading: the copy runs as an encoder task on the render worker. Its
+// payload is just an index into s_slots, which hold strong refs to that
+// frame's source/destination. The ring is deeper than the frames in flight,
+// so a slot is never rewritten while its task can still run, and a texture
+// replaced on resize stays alive in the ring until its last copy is done.
+namespace mirror_crop_detail {
+struct Slot {
+    wgpu::Texture src;
+    wgpu::Texture dst;
+    uint32_t x = 0, y = 0, width = 0, height = 0;
+};
+inline constexpr uint32_t kSlotCount = 4;
+inline std::array<Slot, kSlotCount> s_slots;
+inline uint32_t s_nextSlot = 0;
+inline wgpu::Texture s_texture;
+inline wgpu::TextureView s_view;
+inline uint32_t s_width = 0, s_height = 0;
+inline wgpu::TextureFormat s_format = wgpu::TextureFormat::Undefined;
+inline aurora::gfx::EncoderTaskId s_taskId = aurora::gfx::InvalidEncoderTask;
+
+inline void copyEncoderTaskCallback(const aurora::gfx::EncoderTaskContext& /*ctx*/,
+                                     const wgpu::CommandEncoder& cmd, const void* payload,
+                                     size_t payloadSize, void* /*userdata*/) {
+    if (payload == nullptr || payloadSize != sizeof(uint32_t)) {
+        return;
+    }
+    uint32_t index;
+    std::memcpy(&index, payload, sizeof(index));
+    const Slot& slot = s_slots[index % kSlotCount];
+    if (!slot.src || !slot.dst) {
+        return;
+    }
+    wgpu::CommandEncoder mutableCmd = cmd;
+
+    wgpu::TexelCopyTextureInfo srcCopy{};
+    srcCopy.texture = slot.src;
+    srcCopy.origin = {slot.x, slot.y, 0};
+    srcCopy.aspect = wgpu::TextureAspect::All;
+
+    wgpu::TexelCopyTextureInfo dstCopy{};
+    dstCopy.texture = slot.dst;
+    dstCopy.aspect = wgpu::TextureAspect::All;
+
+    wgpu::Extent3D extent{slot.width, slot.height, 1};
+    mutableCmd.CopyTextureToTexture(&srcCopy, &dstCopy, &extent);
+}
+}  // namespace mirror_crop_detail
+
+// `source` holds the left eye in its first eyeRegionWidth columns (half the
+// width for single-pass stereo, all of it for two-pass). Returns targets for
+// the cropped copy, or `source` unchanged if anything is missing.
+inline aurora::gfx::ResolvedTargets cropMirrorToSingleEye(const aurora::gfx::ResolvedTargets& source,
+                                                          uint32_t eyeRegionWidth, uint32_t windowWidth,
+                                                          uint32_t windowHeight) {
+    using namespace mirror_crop_detail;
+    if (!source.colorTexture || eyeRegionWidth == 0 || source.height == 0 || windowWidth == 0 ||
+        windowHeight == 0) {
+        return source;
+    }
+    const uint32_t eyeW = std::min(eyeRegionWidth, source.width);
+    const uint32_t eyeH = source.height;
+    const double windowAspect = static_cast<double>(windowWidth) / static_cast<double>(windowHeight);
+    uint32_t w = eyeW;
+    uint32_t h = eyeH;
+    if (static_cast<double>(eyeW) / eyeH > windowAspect) {
+        w = static_cast<uint32_t>(std::lround(eyeH * windowAspect));
+    } else {
+        h = static_cast<uint32_t>(std::lround(eyeW / windowAspect));
+    }
+    w = std::clamp<uint32_t>(w, 1, eyeW);
+    h = std::clamp<uint32_t>(h, 1, eyeH);
+
+    if (!s_texture || s_width != w || s_height != h || s_format != source.colorFormat) {
+        const wgpu::TextureDescriptor desc{
+            .label = "VR desktop mirror (one eye)",
+            .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst,
+            .dimension = wgpu::TextureDimension::e2D,
+            .size = {w, h, 1},
+            .format = source.colorFormat,
+            .mipLevelCount = 1,
+            .sampleCount = 1,
+        };
+        s_texture = aurora::webgpu::g_device.CreateTexture(&desc);
+        if (!s_texture) {
+            return source;
+        }
+        s_view = s_texture.CreateView();
+        s_width = w;
+        s_height = h;
+        s_format = source.colorFormat;
+    }
+
+    if (s_taskId == aurora::gfx::InvalidEncoderTask) {
+        const aurora::gfx::EncoderTaskDescriptor desc{
+            .label = "vr_mirror_single_eye_copy",
+            .callback = &copyEncoderTaskCallback,
+            .userdata = nullptr,
+        };
+        s_taskId = aurora::gfx::register_encoder_task_type(desc);
+    }
+
+    const uint32_t index = s_nextSlot;
+    s_slots[index] = Slot{source.colorTexture, s_texture, (eyeW - w) / 2, (eyeH - h) / 2, w, h};
+    if (!aurora::gfx::push_encoder_task(s_taskId, &index, sizeof(index))) {
+        s_slots[index] = {};
+        return source;
+    }
+    s_nextSlot = (index + 1) % kSlotCount;
+
+    aurora::gfx::ResolvedTargets out;
+    out.color = s_view;
+    out.colorTexture = s_texture;
+    out.colorFormat = s_format;
+    out.width = w;
+    out.height = h;
+    return out;
 }
 
 inline void drawScreenModeBillboard(int eye = 0) {

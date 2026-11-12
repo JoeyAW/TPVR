@@ -1,0 +1,424 @@
+diff --git a/src/dusk/settings.cpp b/src/dusk/settings.cpp
+index 3e83dbcb77..ef94660c65 100644
+--- a/src/dusk/settings.cpp
++++ b/src/dusk/settings.cpp
+@@ -89,6 +89,7 @@ UserSettings g_userSettings = {
+         .enableHighQualityMinimapTextures {"game.enableHighQualityMinimapTextures", true},
+         .vrDesktopMirror {"game.vrDesktopMirror", true},
+         .vrMirrorSingleEye {"game.vrMirrorSingleEye", true},
++        .vrMirrorFlatHud {"game.vrMirrorFlatHud", true},
+         .vrScreenMode {"game.vrScreenMode", false},
+         .vrScreenModeStereo {"game.vrScreenModeStereo", false},
+         .vrScreenModeDepth {"game.vrScreenModeDepth", 1.0f},
+@@ -434,6 +435,7 @@ void registerSettings() {
+     Register(g_userSettings.game.enableHighQualityMinimapTextures);
+     Register(g_userSettings.game.vrDesktopMirror);
+     Register(g_userSettings.game.vrMirrorSingleEye);
++    Register(g_userSettings.game.vrMirrorFlatHud);
+     Register(g_userSettings.game.vrScreenMode);
+     Register(g_userSettings.game.vrScreenModeStereo);
+     Register(g_userSettings.game.vrScreenModeDepth);
+diff --git a/src/dusk/settings.h b/src/dusk/settings.h
+index e096d18428..34cb28c186 100644
+--- a/src/dusk/settings.h
++++ b/src/dusk/settings.h
+@@ -293,6 +293,10 @@ struct UserSettings {
+         // instead of both eyes side by side (single-pass stereo) or one eye
+         // letterboxed (two-pass). PC/Linux only.
+         ConfigVar<bool> vrMirrorSingleEye;
++        // With vrMirrorSingleEye: the window shows the HUD flat over the image
++        // (like flatscreen, same look as the VR panel) instead of the VR HUD
++        // panel floating in the eye view. Not while vrHudOnLeftArm is on.
++        ConfigVar<bool> vrMirrorFlatHud;
+         // Renders flat-camera gameplay onto a large 16:9 screen in the headset.
+         // It can be toggled live; immersive VR behavior is disabled while selected.
+         ConfigVar<bool> vrScreenMode;
+diff --git a/src/dusk/ui/settings.cpp b/src/dusk/ui/settings.cpp
+index fded2869e2..4330238c92 100644
+--- a/src/dusk/ui/settings.cpp
++++ b/src/dusk/ui/settings.cpp
+@@ -980,6 +980,17 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
+                             "fill it, instead of both eyes side by side. On by default.",
+                 .isDisabled = [] { return !dusk::getSettings().game.vrDesktopMirror.getValue(); }
+             });
++        config_bool_select(leftPane, rightPane, getSettings().game.vrMirrorFlatHud,
++            {
++                .key = "Flat HUD in Window",
++                .helpText = "Shows the HUD flat over the game window, like playing on a monitor, "
++                            "while the headset keeps its floating HUD panel. Doesn't apply while "
++                            "HUD on Left Arm is on. On by default.",
++                .isDisabled = [] {
++                    return !dusk::getSettings().game.vrDesktopMirror.getValue() ||
++                           !dusk::getSettings().game.vrMirrorSingleEye.getValue();
++                }
++            });
+ #endif
+ 
+         leftPane.add_section("Comfort");
+diff --git a/src/dusk/vr/vr_main.cpp b/src/dusk/vr/vr_main.cpp
+index 8073280507..9afc607b2d 100644
+--- a/src/dusk/vr/vr_main.cpp
++++ b/src/dusk/vr/vr_main.cpp
+@@ -552,6 +552,28 @@ void drawHudBillboard(TGXTexObj* hudTex) {
+     vr_render::drawHudBillboard(hudTex);
+ }
+ 
++// "Flat HUD in Window" (game.vrMirrorFlatHud): the desktop mirror shows the HUD
++// flat instead of the VR panel. Needs the one-eye mirror (the HUD covers the
++// window, not two eyes side by side). Not with HUD on Left Arm: the window then
++// keeps showing what the left eye sees, wrist panel included. PC/Linux only,
++// like the one-eye mirror.
++static bool mirrorFlatHudActive() {
++#if defined(TARGET_ANDROID) || defined(__ANDROID__)
++    return false;
++#else
++    const auto& game = dusk::getSettings().game;
++    return isImmersiveVr() && game.vrDesktopMirror.getValue() && game.vrMirrorSingleEye.getValue() &&
++           game.vrMirrorFlatHud.getValue() && !game.vrHudOnLeftArm.getValue();
++#endif
++}
++
++void captureMirrorEyeBeforeHud() {
++    // Eye 0 is the left eye; single-pass stereo also runs as eye 0.
++    if (g_duskVRCurrentEyeIndex == 0 && mirrorFlatHudActive()) {
++        vr_render::captureMirrorEyeBeforeHud();
++    }
++}
++
+ // Forward declaration -- real definition (and the null-space identity
+ // fallback it provides) is further down in this file; needed here so
+ // applyTrackedHandMtx() below can call it for late-latching.
+@@ -4019,10 +4041,22 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
+             // the left half); two-pass resolves eye 0 alone.
+             const uint32_t eyeRegionWidth = mirrorIsDoubleWide ? mirrorEyeTargets.width / 2
+                                                                : mirrorEyeTargets.width;
+-            mirrorEyeTargets =
+-                vr_render::cropMirrorToSingleEye(mirrorEyeTargets, eyeRegionWidth, winW, winH);
++            // "Flat HUD in Window": the left eye as copied before the HUD panel
++            // (captureMirrorEyeBeforeHud()), with the HUD drawn flat on top.
++            // Falls back to the plain crop if there was no capture this frame.
++            aurora::gfx::ResolvedTargets flatHudMirror;
++            if (mirrorFlatHudActive() &&
++                vr_render::composeMirrorWithFlatHud(mDoGph_gInf_c::getHudBillboardTexObj(), eyeRegionWidth,
++                                                    mirrorEyeTargets.height, winW, winH, flatHudMirror)) {
++                mirrorEyeTargets = flatHudMirror;
++            } else {
++                mirrorEyeTargets =
++                    vr_render::cropMirrorToSingleEye(mirrorEyeTargets, eyeRegionWidth, winW, winH);
++            }
+         }
+ #endif
++        // A capture nobody composed this frame must not be reused next frame.
++        vr_render::g_mirrorEyeCaptured = false;
+         aurora::gfx::set_present_source_mirror(mirrorEyeTargets);
+         // Paired with the reset in tick()'s "reset up front" block -- see
+         // aurora::rmlui::set_force_no_backdrop()'s own comment for the real
+diff --git a/src/dusk/vr/vr_main.hpp b/src/dusk/vr/vr_main.hpp
+index 79a849e8dc..597933f20c 100644
+--- a/src/dusk/vr/vr_main.hpp
++++ b/src/dusk/vr/vr_main.hpp
+@@ -97,6 +97,10 @@ void getEyeSymmetricFov(float* fovyDeg, float* aspect);
+ // include the heavier OpenXR/aurora headers vr_stereo_render.hpp pulls in,
+ // same reasoning as isRenderingToHeadset()/getEyeSymmetricFov() above.
+ void drawHudBillboard(TGXTexObj* hudTex);
++// "Flat HUD in Window": call right before drawHudBillboard() in the eye pass.
++// Copies the left eye (no HUD yet) for the desktop mirror when that option is
++// active this frame; does nothing otherwise.
++void captureMirrorEyeBeforeHud();
+ 
+ // Overwrites mpLinkHandModel's two hand joints (indices 1/2 -- al_handsL/
+ // al_handsR) with this frame's tracked controller poses. Call site:
+diff --git a/src/dusk/vr/vr_stereo_render.hpp b/src/dusk/vr/vr_stereo_render.hpp
+index d8816b8b0c..cea94277e6 100644
+--- a/src/dusk/vr/vr_stereo_render.hpp
++++ b/src/dusk/vr/vr_stereo_render.hpp
+@@ -1203,6 +1203,41 @@ inline bool computeArmHudPose(const cXyz& handWorldPos, const cXyz& backNormalWo
+     return true;
+ }
+ 
++// The HUD panel's luma key: TEV stages 0-2 output the captured HUD color
++// with alpha = R + G + B (the capture's alpha isn't usable, see above).
++// Shared by drawHudBillboard() and the desktop mirror's flat HUD
++// (composeMirrorWithFlatHud()) so both always look the same. The caller
++// sets the stage count (3, or more for extra stages after these).
++inline void setHudLumaKeyTevStages() {
++    GXSetTevSwapModeTable(GX_TEV_SWAP1, GX_CH_RED, GX_CH_GREEN, GX_CH_BLUE, GX_CH_RED);
++    GXSetTevSwapModeTable(GX_TEV_SWAP2, GX_CH_RED, GX_CH_GREEN, GX_CH_BLUE, GX_CH_GREEN);
++    GXSetTevSwapModeTable(GX_TEV_SWAP3, GX_CH_RED, GX_CH_GREEN, GX_CH_BLUE, GX_CH_BLUE);
++
++    // Stage 0: real color; alpha = texture's red channel (via SWAP1).
++    GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR_NULL);
++    GXSetTevSwapMode(GX_TEVSTAGE0, GX_TEV_SWAP0, GX_TEV_SWAP1);
++    GXSetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_TEXC);
++    GXSetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
++    GXSetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_TEXA);
++    GXSetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
++
++    // Stage 1: color unchanged; alpha += texture's green channel (SWAP2).
++    GXSetTevOrder(GX_TEVSTAGE1, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR_NULL);
++    GXSetTevSwapMode(GX_TEVSTAGE1, GX_TEV_SWAP0, GX_TEV_SWAP2);
++    GXSetTevColorIn(GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_CPREV);
++    GXSetTevColorOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
++    GXSetTevAlphaIn(GX_TEVSTAGE1, GX_CA_TEXA, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
++    GXSetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
++
++    // Stage 2: color unchanged; alpha += texture's blue channel (SWAP3).
++    GXSetTevOrder(GX_TEVSTAGE2, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR_NULL);
++    GXSetTevSwapMode(GX_TEVSTAGE2, GX_TEV_SWAP0, GX_TEV_SWAP3);
++    GXSetTevColorIn(GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_CPREV);
++    GXSetTevColorOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
++    GXSetTevAlphaIn(GX_TEVSTAGE2, GX_CA_TEXA, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
++    GXSetTevAlphaOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
++}
++
+ // Call once per eye, from mDoGph_Painter()'s per-eye HUD call site (replaces
+ // the flat mDoGph_drawHud2D() call there while in VR). Must run after the
+ // eye's real scene draw (so it draws on top) and needs `hudTex` already
+@@ -1261,35 +1296,8 @@ inline void drawHudBillboard(TGXTexObj* hudTex, const cXyz* armHandPos = nullptr
+     // as transparent too) but needs no per-material investigation.
+     // GX_TEV_SWAP1/2/3 are repurposed here as "alpha reads channel X"
+     // tables (SWAP0 is left as the untouched identity default for color).
+-    GXSetTevSwapModeTable(GX_TEV_SWAP1, GX_CH_RED, GX_CH_GREEN, GX_CH_BLUE, GX_CH_RED);
+-    GXSetTevSwapModeTable(GX_TEV_SWAP2, GX_CH_RED, GX_CH_GREEN, GX_CH_BLUE, GX_CH_GREEN);
+-    GXSetTevSwapModeTable(GX_TEV_SWAP3, GX_CH_RED, GX_CH_GREEN, GX_CH_BLUE, GX_CH_BLUE);
+-
+     GXSetNumTevStages(alphaScale < 1.f ? 4 : 3);
+-
+-    // Stage 0: real color; alpha = texture's red channel (via SWAP1).
+-    GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR_NULL);
+-    GXSetTevSwapMode(GX_TEVSTAGE0, GX_TEV_SWAP0, GX_TEV_SWAP1);
+-    GXSetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_TEXC);
+-    GXSetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+-    GXSetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_TEXA);
+-    GXSetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+-
+-    // Stage 1: color unchanged; alpha += texture's green channel (SWAP2).
+-    GXSetTevOrder(GX_TEVSTAGE1, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR_NULL);
+-    GXSetTevSwapMode(GX_TEVSTAGE1, GX_TEV_SWAP0, GX_TEV_SWAP2);
+-    GXSetTevColorIn(GX_TEVSTAGE1, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_CPREV);
+-    GXSetTevColorOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+-    GXSetTevAlphaIn(GX_TEVSTAGE1, GX_CA_TEXA, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+-    GXSetTevAlphaOp(GX_TEVSTAGE1, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+-
+-    // Stage 2: color unchanged; alpha += texture's blue channel (SWAP3).
+-    GXSetTevOrder(GX_TEVSTAGE2, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR_NULL);
+-    GXSetTevSwapMode(GX_TEVSTAGE2, GX_TEV_SWAP0, GX_TEV_SWAP3);
+-    GXSetTevColorIn(GX_TEVSTAGE2, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_CPREV);
+-    GXSetTevColorOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
+-    GXSetTevAlphaIn(GX_TEVSTAGE2, GX_CA_TEXA, GX_CA_ZERO, GX_CA_ZERO, GX_CA_APREV);
+-    GXSetTevAlphaOp(GX_TEVSTAGE2, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
++    setHudLumaKeyTevStages();
+ 
+     // Stage 3 (arm HUD fade only): alpha *= konst alpha.
+     if (alphaScale < 1.f) {
+@@ -1782,6 +1790,30 @@ inline void copyEncoderTaskCallback(const aurora::gfx::EncoderTaskContext& /*ctx
+ }
+ }  // namespace mirror_crop_detail
+ 
++// Centered rect of an eyeW x eyeH image with the window's aspect ratio.
++struct MirrorCrop {
++    uint32_t x = 0, y = 0, width = 0, height = 0;
++};
++inline bool computeMirrorCrop(uint32_t eyeW, uint32_t eyeH, uint32_t windowWidth, uint32_t windowHeight,
++                              MirrorCrop& out) {
++    if (eyeW == 0 || eyeH == 0 || windowWidth == 0 || windowHeight == 0) {
++        return false;
++    }
++    const double windowAspect = static_cast<double>(windowWidth) / static_cast<double>(windowHeight);
++    uint32_t w = eyeW;
++    uint32_t h = eyeH;
++    if (static_cast<double>(eyeW) / eyeH > windowAspect) {
++        w = static_cast<uint32_t>(std::lround(eyeH * windowAspect));
++    } else {
++        h = static_cast<uint32_t>(std::lround(eyeW / windowAspect));
++    }
++    out.width = std::clamp<uint32_t>(w, 1, eyeW);
++    out.height = std::clamp<uint32_t>(h, 1, eyeH);
++    out.x = (eyeW - out.width) / 2;
++    out.y = (eyeH - out.height) / 2;
++    return true;
++}
++
+ // `source` holds the left eye in its first eyeRegionWidth columns (half the
+ // width for single-pass stereo, all of it for two-pass). Returns targets for
+ // the cropped copy, or `source` unchanged if anything is missing.
+@@ -1789,22 +1821,17 @@ inline aurora::gfx::ResolvedTargets cropMirrorToSingleEye(const aurora::gfx::Res
+                                                           uint32_t eyeRegionWidth, uint32_t windowWidth,
+                                                           uint32_t windowHeight) {
+     using namespace mirror_crop_detail;
+-    if (!source.colorTexture || eyeRegionWidth == 0 || source.height == 0 || windowWidth == 0 ||
+-        windowHeight == 0) {
++    if (!source.colorTexture) {
+         return source;
+     }
+     const uint32_t eyeW = std::min(eyeRegionWidth, source.width);
+     const uint32_t eyeH = source.height;
+-    const double windowAspect = static_cast<double>(windowWidth) / static_cast<double>(windowHeight);
+-    uint32_t w = eyeW;
+-    uint32_t h = eyeH;
+-    if (static_cast<double>(eyeW) / eyeH > windowAspect) {
+-        w = static_cast<uint32_t>(std::lround(eyeH * windowAspect));
+-    } else {
+-        h = static_cast<uint32_t>(std::lround(eyeW / windowAspect));
++    MirrorCrop crop;
++    if (!computeMirrorCrop(eyeW, eyeH, windowWidth, windowHeight, crop)) {
++        return source;
+     }
+-    w = std::clamp<uint32_t>(w, 1, eyeW);
+-    h = std::clamp<uint32_t>(h, 1, eyeH);
++    const uint32_t w = crop.width;
++    const uint32_t h = crop.height;
+ 
+     if (!s_texture || s_width != w || s_height != h || s_format != source.colorFormat) {
+         const wgpu::TextureDescriptor desc{
+@@ -1836,7 +1863,7 @@ inline aurora::gfx::ResolvedTargets cropMirrorToSingleEye(const aurora::gfx::Res
+     }
+ 
+     const uint32_t index = s_nextSlot;
+-    s_slots[index] = Slot{source.colorTexture, s_texture, (eyeW - w) / 2, (eyeH - h) / 2, w, h};
++    s_slots[index] = Slot{source.colorTexture, s_texture, crop.x, crop.y, w, h};
+     if (!aurora::gfx::push_encoder_task(s_taskId, &index, sizeof(index))) {
+         s_slots[index] = {};
+         return source;
+@@ -1852,6 +1879,127 @@ inline aurora::gfx::ResolvedTargets cropMirrorToSingleEye(const aurora::gfx::Res
+     return out;
+ }
+ 
++// ---------------------------------------------------------------------------
++// Desktop mirror with a flat HUD ("Flat HUD in Window", game.vrMirrorFlatHud,
++// 2026-11-11)
++// ---------------------------------------------------------------------------
++//
++// The mirror is a copy of the left eye, so it used to show the VR HUD panel
++// floating in 3D wherever the left eye saw it. With this on, the window gets
++// the HUD flat over the whole image instead, like flatscreen, and the headset
++// keeps its panel:
++//  1. captureMirrorEyeBeforeHud(): an ordinary GXCopyTex of the left eye,
++//     taken inside the eye pass right before the HUD panel is drawn
++//     (mDoGph_Painter()'s HUD call site). aurora splits the protected eye
++//     pass for it and the eye carries on (see resolve_pass_into()). The copy
++//     comes out at the eye's real resolution, and under single-pass stereo
++//     copy_tex() already takes just the left half.
++//  2. composeMirrorWithFlatHud(): after the eye passes, a small offscreen
++//     pass at the window's aspect draws that copy (cropped like
++//     cropMirrorToSingleEye()) and then the captured HUD texture over all of
++//     it with the panel's own luma key (setHudLumaKeyTevStages()), so it
++//     looks the same as in the headset. Its resolve becomes the mirror.
++// The VR menu panel and the aim dot are drawn after the capture, so they
++// don't appear in the window either (RmlUi already draws the menu there).
++inline u8 g_mirrorEyeCopyKey[4]{};
++inline TGXTexObj g_mirrorEyeTexObj{};
++inline bool g_mirrorEyeCaptured = false;
++
++inline void captureMirrorEyeBeforeHud() {
++    GXSetTexCopySrc(0, 0, FB_WIDTH, FB_HEIGHT);
++    GXSetTexCopyDst(FB_WIDTH, FB_HEIGHT, GX_TF_RGBA8, GX_FALSE);
++    GXCopyTex(g_mirrorEyeCopyKey, GX_FALSE);
++    GXPixModeSync();
++    GXInvalidateTexAll();
++    g_mirrorEyeCaptured = true;
++}
++
++// eyeW/eyeH: one eye's resolution (the capture's size). False if there's no
++// capture this frame or the pass can't open; the caller then falls back to
++// the plain mirror. Must run with no offscreen pass open.
++inline bool composeMirrorWithFlatHud(TGXTexObj* hudTex, uint32_t eyeW, uint32_t eyeH, uint32_t windowWidth,
++                                     uint32_t windowHeight, aurora::gfx::ResolvedTargets& out) {
++    if (!g_mirrorEyeCaptured || hudTex == nullptr) {
++        return false;
++    }
++    g_mirrorEyeCaptured = false;
++    MirrorCrop crop;
++    if (!computeMirrorCrop(eyeW, eyeH, windowWidth, windowHeight, crop)) {
++        return false;
++    }
++    const float w = static_cast<float>(crop.width);
++    const float h = static_cast<float>(crop.height);
++    const float u0 = static_cast<float>(crop.x) / eyeW;
++    const float v0 = static_cast<float>(crop.y) / eyeH;
++    const float u1 = static_cast<float>(crop.x + crop.width) / eyeW;
++    const float v1 = static_cast<float>(crop.y + crop.height) / eyeH;
++
++    // Same texture-object setup the HUD capture uses (FB-sized; aurora
++    // resolves the key to the real, eye-resolution copy).
++    GXInitTexObj(&g_mirrorEyeTexObj, g_mirrorEyeCopyKey, FB_WIDTH, FB_HEIGHT, GX_TF_RGBA8, GX_CLAMP, GX_CLAMP,
++                 GX_FALSE);
++
++    if (!aurora::gfx::create_pass(crop.width, crop.height)) {
++        return false;
++    }
++    const uint64_t passId = aurora::gfx::current_pass_id();
++
++    Mtx44 projection;
++    C_MTXOrtho(projection, 0.0f, h, 0.0f, w, 0.0f, -1.0f);
++    GXSetProjection(projection, GX_ORTHOGRAPHIC);
++    GXLoadPosMtxImm(cMtx_getIdentity(), GX_PNMTX0);
++    GXSetCurrentMtx(GX_PNMTX0);
++    GXSetViewport(0.0f, 0.0f, w, h, 0.0f, 1.0f);
++    GXSetScissor(0, 0, crop.width, crop.height);
++    GXClearVtxDesc();
++    GXSetVtxDesc(GX_VA_POS, GX_DIRECT);
++    GXSetVtxDesc(GX_VA_TEX0, GX_DIRECT);
++    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
++    GXSetVtxAttrFmt(GX_VTXFMT0, GX_VA_TEX0, GX_TEX_ST, GX_F32, 0);
++    GXSetNumChans(0);
++    GXSetNumTexGens(1);
++    GXSetTexCoordGen(GX_TEXCOORD0, GX_TG_MTX2x4, GX_TG_TEX0, 0x3C);
++    GXSetZMode(GX_DISABLE, GX_ALWAYS, GX_DISABLE);
++    GXSetCullMode(GX_CULL_NONE);
++    GXSetAlphaCompare(GX_ALWAYS, 0, GX_AOP_OR, GX_ALWAYS, 0);
++
++    // The eye, opaque.
++    GXSetNumTevStages(1);
++    GXSetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD0, GX_TEXMAP0, GX_COLOR_NULL);
++    GXSetTevSwapMode(GX_TEVSTAGE0, GX_TEV_SWAP0, GX_TEV_SWAP0);
++    GXSetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_TEXC);
++    GXSetTevColorOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
++    GXSetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_TEXA);
++    GXSetTevAlphaOp(GX_TEVSTAGE0, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE, GX_TEVPREV);
++    GXSetBlendMode(GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_SET);
++    GXLoadTexObj(&g_mirrorEyeTexObj, GX_TEXMAP0);
++    GXBegin(GX_QUADS, GX_VTXFMT0, 4);
++    GXPosition3f32(0.0f, 0.0f, 0.0f); GXTexCoord2f32(u0, v0);
++    GXPosition3f32(w, 0.0f, 0.0f); GXTexCoord2f32(u1, v0);
++    GXPosition3f32(w, h, 0.0f); GXTexCoord2f32(u1, v1);
++    GXPosition3f32(0.0f, h, 0.0f); GXTexCoord2f32(u0, v1);
++    GXEnd();
++
++    // The HUD over the whole window, keyed exactly like the VR panel.
++    GXSetNumTevStages(3);
++    setHudLumaKeyTevStages();
++    GXSetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_SET);
++    GXLoadTexObj(hudTex, GX_TEXMAP0);
++    GXBegin(GX_QUADS, GX_VTXFMT0, 4);
++    GXPosition3f32(0.0f, 0.0f, 0.0f); GXTexCoord2f32(0.0f, 0.0f);
++    GXPosition3f32(w, 0.0f, 0.0f); GXTexCoord2f32(1.0f, 0.0f);
++    GXPosition3f32(w, h, 0.0f); GXTexCoord2f32(1.0f, 1.0f);
++    GXPosition3f32(0.0f, h, 0.0f); GXTexCoord2f32(0.0f, 1.0f);
++    GXEnd();
++
++    aurora::gfx::ResolvedTargets targets;
++    if (!aurora::gfx::resolve_pass_checked({.color = true}, targets, passId) || !targets.colorTexture) {
++        return false;
++    }
++    out = targets;
++    return true;
++}
++
+ inline void drawScreenModeBillboard(int eye = 0) {
+     if (g_screenModeTexWidth == 0 || g_screenModeTexHeight == 0) {
+         return;
+diff --git a/src/m_Do/m_Do_graphic.cpp b/src/m_Do/m_Do_graphic.cpp
+index 9e4e17a154..25ed6f1b6e 100644
+--- a/src/m_Do/m_Do_graphic.cpp
++++ b/src/m_Do/m_Do_graphic.cpp
+@@ -3107,6 +3107,9 @@ int mDoGph_Painter() {
+     if (!dusk::vr::isRenderingToHeadset() || dusk::vr::isVrScreenMode()) {
+         mDoGph_drawHud2D();
+     } else {
++        // Desktop mirror's "Flat HUD in Window": grab the left eye before the
++        // HUD panel lands in it (no-op unless that option is active).
++        dusk::vr::captureMirrorEyeBeforeHud();
+         dusk::vr::drawHudBillboard(mDoGph_gInf_c::getHudBillboardTexObj());
+     }
+ 

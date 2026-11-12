@@ -16287,3 +16287,41 @@ Skipped on Android: the mirror source size also sets the RmlUi canvas there. Sid
 RmlUi canvas (and so the VR menu panel's aspect) now follows the window's aspect instead of 2:1.
 Untested: push_encoder_task needs the EFB pass active at that point (falls back to the uncropped
 mirror if it returns false, with an aurora warning each frame).
+
+### "Flat HUD in Window" desktop mirror -- PARKED 2026-11-11 (code reverted, saved as `VR_FLAT_HUD_MIRROR.patch`)
+
+**Status:** built and tested once in PC VR the same day; user: "didn't seem to work", symptom
+"just a black screen where the hud would be". Asked to save the idea for later, no fix yet.
+Reading of the symptom (unverified): the compose pass did run (otherwise the window would have
+fallen back to the plain eye crop), so one of its two textures sampled black. Suspects, in
+order: (1) the in-eye-pass GXCopyTex was dropped or never resolved into g_mirrorEyeCopyKey --
+gfx.hpp still documents protected passes as silently DROPPING copies, which contradicts
+resolve_pass_into()'s newer "let it through" comment, so check which actually happens; (2) the
+FB-sized GXInitTexObj for the copy key doesn't match the eye-resolution texture aurora cached
+(copyTextureCache is keyed by dest+size); (3) the HUD quad drawn opaque-black (blend/alpha state). All code was reverted; the full change is in
+`VR_FLAT_HUD_MIRROR.patch` at the repo root (`git apply VR_FLAT_HUD_MIRROR.patch`, re-applies cleanly
+on top of add125a248 "Add option to show one eye in window"). Before resuming, ask what was seen
+(no HUD in the window? still the 3D panel? black/garbled window?) and add a one-shot log to tell
+which step fails: did captureMirrorEyeBeforeHud() fire (eye index 0, gate true), and did
+composeMirrorWithFlatHud() return true or fall back to the plain crop. Original design notes below.
+
+
+`game.vrMirrorFlatHud`, Video tab under "Mirror One Eye" (needs the desktop mirror + one-eye
+mirror; inactive while "HUD on Left Arm" is on, then the window keeps the plain left-eye view).
+Window shows the HUD flat over the whole image (same luma-keyed look as the VR panel), headset
+keeps its panel, no doubling. No aurora change was needed:
+- `dusk::vr::captureMirrorEyeBeforeHud()` (vr_main.cpp, gate `mirrorFlatHudActive()`, eye index 0)
+  is called in mDoGph_Painter() right before drawHudBillboard(): a plain GXCopyTex of
+  (0,0,FB_WIDTH,FB_HEIGHT) into `vr_render::g_mirrorEyeCopyKey`. Inside the protected eye pass
+  aurora's resolve_pass_into() splits the pass and the eye carries on; copy_tex() scales to the
+  eye's real resolution and, under single-pass stereo, takes the left half itself.
+- End of tick(): `vr_render::composeMirrorWithFlatHud()` opens an offscreen pass at the window-aspect
+  crop (`computeMirrorCrop()`, shared with cropMirrorToSingleEye()), draws the eye copy, then the
+  HUD capture texture over the full pass with `setHudLumaKeyTevStages()` (factored out of
+  drawHudBillboard() so the two can't drift), resolves, and that becomes the present source.
+  Falls back to the plain crop when there was no capture. `g_mirrorEyeCaptured` is cleared every
+  frame in the mirror block.
+- Side effects: the VR menu panel and the aim dot are drawn after the capture, so neither is in
+  the window anymore (RmlUi still draws the menu there). Unchecked: whether the HUD capture's
+  widescreen layout stretches correctly over a 16:9 window, and how sharp it is (it's the same
+  texture the VR panel uses).

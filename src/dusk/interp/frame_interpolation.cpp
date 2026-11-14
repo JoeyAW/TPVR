@@ -12,6 +12,7 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 #include <algorithm>
+#include <cmath>
 #include <vector>
 
 namespace dusk::interp {
@@ -78,6 +79,30 @@ void clear_live_this_frame() {
     g_live_this_frame_keys.clear();
 }
 
+// The matrices are blended element by element, which only works for small
+// rotations: a joint that turns ~180 degrees in one tick (Link snapping round
+// when you reverse the stick from standing) blends to a near-zero 3x3 at the
+// midpoint, so the whole model -- and its shadow -- flattens for a frame.
+// Past kSnapCos (135 degrees) show the new tick's matrix instead. The angle
+// comes from trace(Ra^T Rb) = 1 + 2cos, with each column normalized so
+// scaled models work; degenerate (zero-scale) matrices keep the plain blend.
+constexpr float kSnapCos = -0.7071f;
+
+bool rotation_too_large_to_blend(const Mtx& a, const Mtx& b) {
+    float trace = 0.0f;
+    for (size_t col = 0; col < 3; ++col) {
+        const float ax = a[0][col], ay = a[1][col], az = a[2][col];
+        const float bx = b[0][col], by = b[1][col], bz = b[2][col];
+        const float na = ax * ax + ay * ay + az * az;
+        const float nb = bx * bx + by * by + bz * bz;
+        if (na < 1e-8f || nb < 1e-8f) {
+            return false;
+        }
+        trace += (ax * bx + ay * by + az * bz) / std::sqrt(na * nb);
+    }
+    return (trace - 1.0f) * 0.5f < kSnapCos;
+}
+
 void interpolate_replacements() {
     clear_replacements();
     s_replacementsActive = dusk::interp::is_enabled() && !s_recording && !s_syncPresentation &&
@@ -89,7 +114,11 @@ void interpolate_replacements() {
         if (auto it = s_currentRecording.matrix_values.find(old.first);
             it != s_currentRecording.matrix_values.end())
         {
-            dusk::interp::lerp(g_replacements[old.first], old.second, it->second, s_step);
+            if (rotation_too_large_to_blend(old.second, it->second)) {
+                MTXCopy(it->second, g_replacements[old.first]);
+            } else {
+                dusk::interp::lerp(g_replacements[old.first], old.second, it->second, s_step);
+            }
         }
     }
 }

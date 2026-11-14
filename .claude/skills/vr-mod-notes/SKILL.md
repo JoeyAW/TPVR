@@ -16518,3 +16518,14 @@ Fix (built, NOT yet tested): VR first person + `checkReinRide()` -> joint 1 keep
 slope upright term (`-shape_angle.x`), no twist on joints 1/2; Full Body head anchor uses
 deltaYaw 0 while riding (translate only; head still follows the headset, elbow pole uses the
 hip yaw). Applies to all riding, not just aiming.
+
+### One-frame model "spaz" (and in the shadow) when reversing from standstill — fix built 2026-11-14, NOT yet tested
+
+Symptom: standing/stopped, push the stick opposite the last move (Link snaps ~180) -> the model
+and its shadow glitch for about one frame. Cause (code reading): `interpolate_replacements()`
+(src/dusk/interp/frame_interpolation.cpp, upstream code) blends recorded matrices element-wise
+(`lerp(Mtx)`); a ~180 degree rotation in one tick blends to a near-zero 3x3 mid-tick, flattening
+every joint. Full Body's hip-line yaw also reads that pose. Fix: `rotation_too_large_to_blend()`
+(cos from trace(Ra^T Rb) with column-normalized rotations) -> past 135 degrees the replacement is
+the current tick's matrix (snap). Applies to everything interpolated, flatscreen included. If a
+glitch remains on ~90 degree snaps, the next step is rescaling the blended columns (no snap).

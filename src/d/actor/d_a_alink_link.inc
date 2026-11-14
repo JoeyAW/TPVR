@@ -153,17 +153,7 @@ BOOL daAlink_c::setBodyAngleToCamera() {
                 // on, so the first shot is left, the second right, ...);
                 // everything else (bow, slingshot, boomerang) with the right.
                 // "Swap Sword/Shield Hands" doesn't affect this.
-                bool leftHand = false;
-                if (mEquipItem == dItemNo_HOOKSHOT_e || mEquipItem == dItemNo_COPY_ROD_e) {
-                    leftHand = true;
-                } else if (mEquipItem == dItemNo_W_HOOKSHOT_e) {
-                    leftHand = getHookshotLeft();
-                } else if (dusk::vr::isLeftHandedBow(this) || dusk::vr::isPhysicalBoomerangMode(this)) {
-                    // "Left-Handed Bow" / Physical Slingshot: the bow or
-                    // slingshot is in the left hand. Physical Boomerang: held
-                    // in the right, pointed with the left.
-                    leftHand = true;
-                }
+                const bool leftHand = getVrAimHandLeft();
                 // Physical Bow / Slingshot: aim along the loaded shot's line
                 // (the bow's arrow, the slingshot's pouch -> grip), so the aim
                 // dot matches it.
@@ -518,6 +508,22 @@ u32 daAlink_c::checkBoarRide() const {
 u32 daAlink_c::checkSpinnerRide() const {
     return mRideStatus == RIDETYPE_SPINNER;
 }
+
+#if TARGET_PC
+// VR: which controller aims the current item (see setBodyAngleToCamera()).
+// Also used to keep the aim dot on that hand between sim ticks.
+bool daAlink_c::getVrAimHandLeft() {
+    if (mEquipItem == dItemNo_HOOKSHOT_e || mEquipItem == dItemNo_COPY_ROD_e) {
+        return true;
+    }
+    if (mEquipItem == dItemNo_W_HOOKSHOT_e) {
+        return getHookshotLeft();
+    }
+    // "Left-Handed Bow" / Physical Slingshot: the bow or slingshot is in the
+    // left hand. Physical Boomerang: held in the right, pointed with the left.
+    return dusk::vr::isLeftHandedBow(this) || dusk::vr::isPhysicalBoomerangMode(this);
+}
+#endif
 
 MtxP daAlink_c::getLeftHandMatrix() {
     return mpLinkModel->getAnmMtx(mLeftHandJntNo);

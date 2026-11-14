@@ -129,6 +129,7 @@ UserSettings g_userSettings = {
         .vrPhysicalClimbing {"game.vrPhysicalClimbing", true},
         .vrPhysicalSwimming {"game.vrPhysicalSwimming", true},
         .vrMoveWhileAiming {"game.vrMoveWhileAiming", true},
+        .vrManualReel {"game.vrManualReel", true},
         .vrHideAimCrosshair {"game.vrHideAimCrosshair", false},
         // Key string deliberately kept as the original "game.vrSwapGripMirrorAxis"
         // (not renamed to match the C++ member) so a value the user already
@@ -476,6 +477,7 @@ void registerSettings() {
     Register(g_userSettings.game.vrPhysicalClimbing);
     Register(g_userSettings.game.vrPhysicalSwimming);
     Register(g_userSettings.game.vrMoveWhileAiming);
+    Register(g_userSettings.game.vrManualReel);
     Register(g_userSettings.game.vrHideAimCrosshair);
     Register(g_userSettings.game.vrSwapSwordGripMirrorAxis);
     Register(g_userSettings.game.vrSwapShieldGripMirrorAxis);

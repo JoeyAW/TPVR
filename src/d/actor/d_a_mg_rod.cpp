@@ -634,10 +634,70 @@ void dmg_rod_refreshTrackedPositionLive(dmg_rod_class* i_this) {
 
     rod_control(i_this);
 
+    // This frame's rod tip, for dmg_rod_vrAdjustLine().
+    i_this->mVrLiveTip = i_this->rod_tip_pos;
+    i_this->mVrLiveTipValid = true;
+
     i_this->field_0x6b8 = savedTipPrev;
     i_this->rod_tip_pos = savedTipCurr;
     i_this->field_0x6d4 = savedGripPrev;
     i_this->field_0x6c8 = savedGripCurr;
+
+    // Hook held in Link's free hand (uki_ready()): move the hook, bait and
+    // bobber with the hand since the tick, from the tick's transforms.
+    if (i_this->kind == MG_ROD_KIND_UKI && i_this->mVrHookHeld && i_this->mVrTickMtxValid) {
+        cXyz hand;
+        cXyz zero(0.0f, 0.0f, 0.0f);
+        mDoMtx_multVec(daAlink_getAlinkActorClass()->getLeftItemMatrix(), &zero, &hand);
+        const cXyz delta = hand - i_this->mVrTickHandPos;
+
+        auto place = [&delta](J3DModel* model, const Mtx tickMtx) {
+            if (model == NULL) {
+                return;
+            }
+            Mtx m;
+            MTXCopy(tickMtx, m);
+            m[0][3] += delta.x;
+            m[1][3] += delta.y;
+            m[2][3] += delta.z;
+            model->setBaseTRMtx(m);
+        };
+        place(i_this->hook_model[i_this->hook_kind], i_this->mVrTickHookMtx);
+        if (i_this->esa_kind != 0) {
+            place(i_this->esa_model[i_this->esa_kind - 1], i_this->mVrTickEsaMtx);
+        }
+        place(i_this->uki_model, i_this->mVrTickUkiMtx);
+        place(i_this->uki_saki_model, i_this->mVrTickUkiSakiMtx);
+    }
+}
+
+// VR: the line is drawn interpolated between sim ticks, so its rod-tip end
+// trailed the (per-frame) rod, and while the hook is held its hook end
+// trailed the hand. After each frame's interpolation write, move the tip end
+// to this frame's rod tip and, while held, the hook end to the hand-carried
+// hook, fading each shift out along the line. Inventory rod (UKI) only.
+void dmg_rod_vrAdjustLine(void* i_ctx, cXyz* io_points, int i_count) {
+    dmg_rod_class* i_this = (dmg_rod_class*)i_ctx;
+    if (!dusk::vr::isImmersiveVr() || i_this->kind != MG_ROD_KIND_UKI || !i_this->mVrLiveTipValid ||
+        i_count < 2) {
+        return;
+    }
+
+    const cXyz tipDelta = i_this->mVrLiveTip - io_points[0];
+    cXyz endDelta(0.0f, 0.0f, 0.0f);
+    if (i_this->mVrHookHeld && i_count == MG_ROD_UKI_LINE_LEN) {
+        cXyz hand;
+        cXyz zero(0.0f, 0.0f, 0.0f);
+        mDoMtx_multVec(daAlink_getAlinkActorClass()->getLeftItemMatrix(), &zero, &hand);
+        const cXyz hook = i_this->mVrTickHookPos + (hand - i_this->mVrTickHandPos);
+        endDelta = hook - io_points[i_count - 1];  // mg_line.pos[99] = the hook (line_control2_u())
+    }
+
+    const f32 last = (f32)(i_count - 1);
+    for (int i = 0; i < i_count; i++) {
+        const f32 w = (f32)i / last;
+        io_points[i] += tipDelta * (1.0f - w) + endDelta * w;
+    }
 }
 #endif
 
@@ -3662,6 +3722,13 @@ static void uki_ready(dmg_rod_class* i_this) {
         cLib_addCalc2(&actor->current.pos.z, sp18.z, 1.0f, i_this->field_0x1094);
         cLib_addCalc2(&i_this->field_0x1094, 200.0f, 1.0f, 10.0f);
     }
+#if TARGET_PC
+    // VR: the hook is in Link's free hand; dmg_rod_vrAdjustLine() and
+    // dmg_rod_refreshTrackedPositionLive() carry it with the hand per frame.
+    i_this->mVrHookHeld = true;
+    i_this->mVrTickHandPos = sp18;
+    i_this->mVrTickHookPos = actor->current.pos;
+#endif
 
     line_control2_u(i_this);
     uki_calc(i_this);
@@ -5975,6 +6042,19 @@ static int dmg_rod_Execute(dmg_rod_class* i_this) {
     if (mDoCPd_c::getHoldDown(PAD_1)) {
         i_this->reel_speed = 15.0f;
     }
+#if TARGET_PC
+    // VR "Manual Reeling": cranking the right hand reels, at a speed set by
+    // how fast it winds (vr_main.cpp). The buttons still work alongside.
+    {
+        const f32 vrReelSpeed = dusk::vr::getManualReelSpeed();
+        if (vrReelSpeed > 0.0f) {
+            if (i_this->reel_btn_flags == 0 || vrReelSpeed > i_this->reel_speed) {
+                i_this->reel_speed = vrReelSpeed;
+            }
+            i_this->reel_btn_flags |= 1;
+        }
+    }
+#endif
 
     if (i_this->rod_stick_x > 1.0f) {
         i_this->rod_stick_x = 1.0f;
@@ -6131,7 +6211,25 @@ static int dmg_rod_Execute(dmg_rod_class* i_this) {
         }
 
         cLib_addCalc2(&i_this->field_0xf74, var_f31, 0.1f, 1.0f + AREG_F(13));
+#if TARGET_PC
+        i_this->mVrHookHeld = false;  // set again by uki_ready() while held
+#endif
         uki_main(i_this);
+#if TARGET_PC
+        // VR: this tick's hook/bait/bobber transforms, which the per-frame
+        // refresh offsets by the hand's movement since (never accumulated).
+        if (i_this->mVrHookHeld) {
+            MTXCopy(i_this->hook_model[i_this->hook_kind]->getBaseTRMtx(), i_this->mVrTickHookMtx);
+            if (i_this->esa_kind != 0) {
+                MTXCopy(i_this->esa_model[i_this->esa_kind - 1]->getBaseTRMtx(), i_this->mVrTickEsaMtx);
+            }
+            MTXCopy(i_this->uki_model->getBaseTRMtx(), i_this->mVrTickUkiMtx);
+            MTXCopy(i_this->uki_saki_model->getBaseTRMtx(), i_this->mVrTickUkiSakiMtx);
+            i_this->mVrTickMtxValid = true;
+        } else {
+            i_this->mVrTickMtxValid = false;
+        }
+#endif
 
         for (int i = 0; i < MG_ROD_UKI_LINE_LEN; i++, line_posp++) {
             *line_posp = i_this->mg_line.pos[i];
@@ -6393,6 +6491,9 @@ static int useHeapInit(fopAc_ac_c* i_this) {
         if (!a_this->linemat.init(1, MG_ROD_UKI_LINE_LEN, 1)) {
             return 0;
         }
+#if TARGET_PC
+        a_this->linemat.setPresentAdjust(&dmg_rod_vrAdjustLine, a_this);
+#endif
 
         line_sizep = a_this->linemat.getSize(0);
         for (int i = 0; i < MG_ROD_UKI_LINE_LEN; i++, line_sizep++) {
@@ -6459,6 +6560,11 @@ static int useHeapInit(fopAc_ac_c* i_this) {
 static int dmg_rod_Create(fopAc_ac_c* i_this) {
     dmg_rod_class* rod = (dmg_rod_class*)i_this;
     fopAcM_ct(&rod->actor, dmg_rod_class);
+#if TARGET_PC
+    rod->mVrHookHeld = false;
+    rod->mVrTickMtxValid = false;
+    rod->mVrLiveTipValid = false;
+#endif
 
     rod->arg0 = fopAcM_GetParam(i_this);
     rod->arg1 = (fopAcM_GetParam(i_this) & 0xFF00) >> 8;

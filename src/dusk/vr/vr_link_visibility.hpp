@@ -3865,12 +3865,18 @@ inline bool s_bowArrowMtxValid = false;
 inline Mtx s_bowArrowMtx;
 inline float s_bowDrawnLatchSec = 0.0f;
 inline float s_bowPullUnits = 0.0f;
+// Drawstring sound: set when a pull starts, consumed by the game side
+// (checkUpperItemActionBow()). Re-armed once the string is let back to rest.
+inline bool s_bowDrawSoundEvent = false;
+inline bool s_bowDrawSoundArmed = true;
 }  // namespace detail
 
 constexpr float kBowNockRadiusUnits = 20.0f;   // draw hand this close to the grip nocks
 constexpr float kBowMaxPullUnits = 70.0f;      // arrow is 95 units long
 constexpr float kBowMinDrawPullUnits = 25.0f;  // pulled at least this far counts as drawn
 constexpr float kBowDrawnLatchSec = 0.15f;     // covers the 30Hz release check
+constexpr float kBowDrawSoundPullUnits = 8.0f;  // pull past this plays the drawstring sound
+constexpr float kBowDrawSoundRearmUnits = 3.0f; // back under this lets the next pull play it
 // Nocked: draw-hand-to-grip distance over which the aim fades from the bow
 // hand's own pointing to the two-point (draw hand -> grip) line.
 constexpr float kBowTwoPointAimStartUnits = 10.0f;
@@ -4263,6 +4269,8 @@ inline void updatePhysicalBowState(const Vec3f& rightAimForward, const Vec3f& le
         detail::s_bowNocked = false;
         detail::s_bowArrowMtxValid = false;
         detail::s_bowPullUnits = 0.0f;
+        detail::s_bowDrawSoundEvent = false;
+        detail::s_bowDrawSoundArmed = true;
     } else {
         dir.normalize();
         const cXyz grip(bowHandMtx[0][3], bowHandMtx[1][3], bowHandMtx[2][3]);
@@ -4290,6 +4298,12 @@ inline void updatePhysicalBowState(const Vec3f& rightAimForward, const Vec3f& le
             if (pull > kBowMaxPullUnits) pull = kBowMaxPullUnits;
             detail::s_bowPullUnits = pull;
             if (pull >= kBowMinDrawPullUnits) detail::s_bowDrawnLatchSec = kBowDrawnLatchSec;
+            if (detail::s_bowDrawSoundArmed && pull >= kBowDrawSoundPullUnits) {
+                detail::s_bowDrawSoundArmed = false;
+                detail::s_bowDrawSoundEvent = true;
+            } else if (pull <= kBowDrawSoundRearmUnits) {
+                detail::s_bowDrawSoundArmed = true;
+            }
 
             // Arrow origin is its tail; local +Z points along the shaft
             // (daArrow_c::setNormalMatrix()).
@@ -4319,6 +4333,13 @@ inline void updatePhysicalBowState(const Vec3f& rightAimForward, const Vec3f& le
 
 inline bool isPhysicalBowNocked() {
     return detail::s_bowNocked;
+}
+
+// True once per pull of a nocked arrow (drawstring sound, game side).
+inline bool consumePhysicalBowDrawSound() {
+    const bool e = detail::s_bowDrawSoundEvent;
+    detail::s_bowDrawSoundEvent = false;
+    return e;
 }
 
 // Bow string follows the arrow once nocked: BARELORD's frame is picked so its string position matches
@@ -4443,6 +4464,9 @@ inline DrawAnimJoint s_slingPouch;  // PRELORD
 inline DrawAnimJoint s_slingRest;  // PSHOOT
 inline bool s_slingAnchorValid = false;
 inline cXyz s_slingAnchorInHand;
+// Band-stretch sound, same scheme as the bow's s_bowDrawSoundEvent.
+inline bool s_slingDrawSoundEvent = false;
+inline bool s_slingDrawSoundArmed = true;
 }  // namespace detail
 
 constexpr float kSlingNockRadiusUnits = 20.0f;   // pinch point this close to the band loads the seed
@@ -4452,6 +4476,13 @@ constexpr float kSlingShotPosHoldSec = 0.25f;    // covers the tick that makes t
 
 inline bool isPhysicalSlingshotNocked() {
     return detail::s_slingNocked;
+}
+
+// True once per pull of the loaded band (stretch sound, game side).
+inline bool consumePhysicalSlingshotDrawSound() {
+    const bool e = detail::s_slingDrawSoundEvent;
+    detail::s_slingDrawSoundEvent = false;
+    return e;
 }
 
 inline bool isPhysicalSlingshotDrawn() {
@@ -4501,6 +4532,8 @@ inline void updatePhysicalSlingshotState(const Vec3f& leftAimForward, float dt) 
         detail::s_slingNocked = false;
         detail::s_slingPouchValid = false;
         detail::s_slingPullUnits = 0.0f;
+        detail::s_slingDrawSoundEvent = false;
+        detail::s_slingDrawSoundArmed = true;
         return;
     }
     dir.normalize();
@@ -4533,6 +4566,12 @@ inline void updatePhysicalSlingshotState(const Vec3f& leftAimForward, float dt) 
     if (pull > kSlingMaxPullUnits) pull = kSlingMaxPullUnits;
     detail::s_slingPullUnits = pull;
     if (pull >= kSlingMinDrawPullUnits) detail::s_slingDrawnLatchSec = kBowDrawnLatchSec;
+    if (detail::s_slingDrawSoundArmed && pull >= kBowDrawSoundPullUnits) {
+        detail::s_slingDrawSoundArmed = false;
+        detail::s_slingDrawSoundEvent = true;
+    } else if (pull <= kBowDrawSoundRearmUnits) {
+        detail::s_slingDrawSoundArmed = true;
+    }
 
     const cXyz pouch = grip - dir * pull;
     detail::s_slingPouchPos = pouch;
@@ -5775,6 +5814,45 @@ inline bool getTrackedItemJointMtx(bool isLeft, Mtx outMtx) {
     return true;
 }
 
+// Aim dot at frame rate. daAlink_c::mSight (the aim point the dot is drawn
+// at) is only recomputed once per sim tick, so the dot stepped behind the
+// aiming hand at 30Hz. On the first draw after each tick, store the point in
+// the aiming controller's frame (daAlink_c::getVrAimHandLeft(), the hand
+// setBodyAngleToCamera() aims with); every frame, carry it with that hand.
+// The hit distance still updates per tick. First person only (Third Person
+// aims with the headset); otherwise returns the tick's point.
+namespace detail {
+inline cXyz s_aimSightLocal;
+inline cXyz s_aimSightTickPos;
+inline uint64_t s_aimSightTickSeq = 0;
+inline bool s_aimSightLeft = false;
+inline bool s_aimSightLocalValid = false;
+}  // namespace detail
+
+inline cXyz getLiveAimSightPos(daAlink_c* link) {
+    const cXyz tickPos = *link->getLineTopPosP();
+    if (!detail::s_handMtxValid || !isFirstPerson(link) || isHandTrackingSuspended(link)) {
+        detail::s_aimSightLocalValid = false;
+        return tickPos;
+    }
+    const bool left = link->getVrAimHandLeft();
+    MtxP hand = left ? detail::s_leftHandMtx : detail::s_rightHandMtx;
+    const uint64_t seq = dusk::interp::sim_tick_seq();
+    if (!detail::s_aimSightLocalValid || seq != detail::s_aimSightTickSeq ||
+        left != detail::s_aimSightLeft || tickPos != detail::s_aimSightTickPos) {
+        Mtx inv;
+        if (!MTXInverse(hand, inv)) return tickPos;
+        mDoMtx_multVec(inv, &tickPos, &detail::s_aimSightLocal);
+        detail::s_aimSightTickSeq = seq;
+        detail::s_aimSightLeft = left;
+        detail::s_aimSightTickPos = tickPos;
+        detail::s_aimSightLocalValid = true;
+    }
+    cXyz out;
+    mDoMtx_multVec(hand, &detail::s_aimSightLocal, &out);
+    return out;
+}
+
 // Tracked stand-in for daAlink_c::getLeftHandMatrix()/getRightHandMatrix()
 // (body hand joints 9/0xE): s_left/rightHandMtx take those joints' place,
 // as in refreshTrackedItemJointMtxLive() above, so the game's hand-local
@@ -5986,13 +6064,16 @@ inline void refreshTrackedBoomerangMtxLive() {
 // itself touches per kind/action, matching markModelJointsLive()'s own
 // established "small models, negligible extra cost" reasoning.
 inline void refreshTrackedFishingRodMtxLive() {
+    fopAc_ac_c* rodActor = fopAcM_SearchByName(fpcNm_MG_ROD_e);
+    if (!rodActor) return;
+    dmg_rod_class* rod = reinterpret_cast<dmg_rod_class*>(rodActor);
+    // The line's per-frame adjust (dmg_rod_vrAdjustLine()) only trusts a tip
+    // refreshed this frame.
+    dmg_rod_invalidateLiveTip(rod);
+
     auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
     if (!link || !isFirstPerson(link)) return;
 
-    fopAc_ac_c* rodActor = fopAcM_SearchByName(fpcNm_MG_ROD_e);
-    if (!rodActor) return;
-
-    dmg_rod_class* rod = reinterpret_cast<dmg_rod_class*>(rodActor);
     dmg_rod_refreshTrackedPositionLive(rod);
 
     auto markLive = [](J3DModel* m) {
@@ -6053,6 +6134,18 @@ inline bool isFishingHookInWater() {
 // refreshTrackedFishingRodMtxLive() -- no new plumbing needed.
 inline bool isFishingRodActive() {
     return fopAcM_SearchByName(fpcNm_MG_ROD_e) != nullptr;
+}
+
+// Which hand holds the fishing rod (rod_control(), d_a_mg_rod.cpp): the
+// lure rod in the left item joint while checkFishingRodGrabLeft(), anything
+// else (the inventory rod, whose hook sits in the left hand) in the right.
+// "Manual Reeling" cranks with the other hand.
+inline bool isFishingRodInLeftHand() {
+    fopAc_ac_c* rodActor = fopAcM_SearchByName(fpcNm_MG_ROD_e);
+    auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
+    if (!rodActor || !link) return false;
+    dmg_rod_class* rod = reinterpret_cast<dmg_rod_class*>(rodActor);
+    return rod->kind == MG_ROD_KIND_LURE && link->checkFishingRodGrabLeft();
 }
 
 // VR fix (2026-08-12): the clawshot's hand-grip tracking -- deliberately

@@ -415,6 +415,13 @@ bool isPhysicalBowDrawn();
 bool getPhysicalBowArrowMtx(unsigned int arrowId, float (*outMtx)[4]);
 // Physical bow: an arrow is nocked on the bow right now.
 bool isPhysicalBowNocked();
+// "Manual Reeling" (game.vrManualReel): reel speed from the right hand's
+// crank gesture while fishing, 5..15 like the game's B / D-pad-down reel;
+// 0 when not cranking. Read by d_a_mg_rod.cpp each tick.
+float getManualReelSpeed();
+// Physical bow: true once when a pull of the nocked arrow starts (the game
+// plays the drawstring sound then instead of at reload).
+bool consumePhysicalBowDrawSound();
 // "Left-Handed Bow" (game.vrLeftHandedBow): bow in the left hand, arrow in
 // the right, aiming with the left controller.
 bool isLeftHandedBow(daAlink_c* link);
@@ -432,6 +439,9 @@ float getPhysicalBowStringFrame(float frameMax);
 // far enough to shoot (latched like the bow's).
 bool isPhysicalSlingshotMode(daAlink_c* link);
 bool isPhysicalSlingshotNocked();
+// Physical slingshot: true once when a pull of the loaded band starts (the
+// game plays the stretch sound then instead of at reload).
+bool consumePhysicalSlingshotDrawSound();
 bool isPhysicalSlingshotDrawn();
 // Where the stone should leave from (the pouch, or where it was let go).
 bool getPhysicalSlingshotShotPos(float& outX, float& outY, float& outZ);

@@ -305,6 +305,21 @@ public:
     cXyz mLineInterpCurr[MG_ROD_LURE_LINE_LEN];
     bool mLineInterpPrevValid;
     bool mLineInterpCurrValid;
+    // VR: the hook/bait/bobber held in Link's free hand before a cast
+    // (uki_ready()) follow that hand per frame instead of per tick. The tick's
+    // hand point and model transforms, and the rod tip from this frame's live
+    // rod_control() (dmg_rod_refreshTrackedPositionLive()); see
+    // dmg_rod_vrAdjustLine().
+    bool mVrHookHeld;
+    cXyz mVrTickHandPos;
+    cXyz mVrTickHookPos;
+    Mtx mVrTickHookMtx;
+    Mtx mVrTickEsaMtx;
+    Mtx mVrTickUkiMtx;
+    Mtx mVrTickUkiSakiMtx;
+    bool mVrTickMtxValid;
+    bool mVrLiveTipValid;
+    cXyz mVrLiveTip;
 #endif
 };
 
@@ -327,6 +342,10 @@ public:
 // can call it after finding the live actor via
 // fopAcM_SearchByName(fpcNm_MG_ROD_e).
 void dmg_rod_refreshTrackedPositionLive(dmg_rod_class* i_this);
+// VR: present-adjust callback for linemat (see m_Do_ext.h setPresentAdjust()).
+void dmg_rod_vrAdjustLine(void* i_ctx, cXyz* io_points, int i_count);
+// VR: the live rod tip from the last refresh is stale until the next one.
+inline void dmg_rod_invalidateLiveTip(dmg_rod_class* i_this) { i_this->mVrLiveTipValid = false; }
 #endif
 
 #endif /* D_A_MG_ROD_H */

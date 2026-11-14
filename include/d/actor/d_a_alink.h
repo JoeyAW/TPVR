@@ -4046,6 +4046,10 @@ public:
 #endif
 
     cXyz* getLineTopPosP() { return mSight.getPosP(); }
+#if TARGET_PC
+    // VR: true if the left controller aims the current item.
+    bool getVrAimHandLeft();
+#endif
 
     // VR fix (2026-08-12): mSight is the SAME shared sight/aim-point object
     // driven by setBowSight() (bow/slingshot), setHookshotSight(), AND

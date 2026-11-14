@@ -240,10 +240,20 @@ void daAlink_c::setBowReloadAnime() {
     if (mEquipItem == dItemNo_PACHINKO_e) {
         changeItemBck(dRes_ID_ALANM_BCK_PRELORD_e, mpHIO->mItem.mBow.m.mLoadAnm.mStartFrame);
         field_0x2f97 = 5;
+#if TARGET_PC
+        // VR physical slingshot: played when the band is actually pulled
+        // instead (checkUpperItemActionBow()).
+        if (!dusk::vr::isPhysicalSlingshotMode(this))
+#endif
         seStartOnlyReverb(Z2SE_AL_PACHINKO_DRAW);
     } else {
         changeItemBck(dRes_ID_ALANM_BCK_BARELORD_e, mpHIO->mItem.mBow.m.mLoadAnm.mStartFrame);
         field_0x2f97 = 7;
+#if TARGET_PC
+        // VR physical bow: played when the string is actually pulled instead
+        // (checkUpperItemActionBow()).
+        if (!dusk::vr::isPhysicalBowMode(this))
+#endif
         seStartOnlyReverb(Z2SE_AL_DRAW_BOW);
     }
 
@@ -261,6 +271,12 @@ BOOL daAlink_c::checkUpperItemActionBow() {
         // VR physical slingshot: the stone (and the aim line) leave from the
         // pouch in the right hand, or where it was just let go.
         dusk::vr::getPhysicalSlingshotShotPos(mHeldItemRootPos.x, mHeldItemRootPos.y, mHeldItemRootPos.z);
+        // Band-stretch sound on each pull (setBowReloadAnime() skips it in
+        // this mode). Here rather than in the charge-wait block: the band can
+        // be pulled during the reload too.
+        if (dusk::vr::isPhysicalSlingshotMode(this) && dusk::vr::consumePhysicalSlingshotDrawSound()) {
+            seStartOnlyReverb(Z2SE_AL_PACHINKO_DRAW);
+        }
 #endif
     }
 
@@ -275,6 +291,11 @@ BOOL daAlink_c::checkUpperItemActionBow() {
         // by hand; the slingshot has no charge).
         const bool vrPhysicalSling = dusk::vr::isPhysicalSlingshotMode(this);
         const bool vrSlingDrawn = vrPhysicalSling && dusk::vr::isPhysicalSlingshotDrawn();
+        // Drawstring sound on each pull of the nocked arrow (setBowReloadAnime()
+        // skips it in this mode, since loading no longer pulls the string).
+        if (vrPhysicalBow && dusk::vr::consumePhysicalBowDrawSound()) {
+            seStartOnlyReverb(Z2SE_AL_DRAW_BOW);
+        }
 #else
         const bool vrPhysicalBow = false;
         const bool vrBowDrawn = false;

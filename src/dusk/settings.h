@@ -504,6 +504,9 @@ struct UserSettings {
         // Lets the stick move Link while aiming the bow, slingshot,
         // boomerang, clawshot or Dominion Rod (strafing, like Z-target aim).
         ConfigVar<bool> vrMoveWhileAiming;
+        // Fishing: winding the free (non-rod) hand in circles reels the line in
+        // (faster circles reel faster), alongside holding B.
+        ConfigVar<bool> vrManualReel;
         // Hides the world-space aim dot (drawAimCrosshair()) for every aimed
         // item (bow, slingshot, hookshot, boomerang).
         ConfigVar<bool> vrHideAimCrosshair;

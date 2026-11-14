@@ -16529,3 +16529,54 @@ every joint. Full Body's hip-line yaw also reads that pose. Fix: `rotation_too_l
 (cos from trace(Ra^T Rb) with column-normalized rotations) -> past 135 degrees the replacement is
 the current tick's matrix (snap). Applies to everything interpolated, flatscreen included. If a
 glitch remains on ~90 degree snaps, the next step is rescaling the blended columns (no snap).
+
+### Physical Bow drawstring sound on the pull — built 2026-11-14, NOT yet tested in-headset
+
+The game plays `Z2SE_AL_DRAW_BOW` in `setBowReloadAnime()` (arrow loaded = string drawn in the
+flatscreen anim). With Physical Bow that's skipped; instead `updatePhysicalBowState()` sets
+`s_bowDrawSoundEvent` when a nocked pull passes `kBowDrawSoundPullUnits` (8), re-armed when the
+pull drops to `kBowDrawSoundRearmUnits` (3) or the arrow is un-nocked; `checkUpperItemActionBow()`
+(charge-wait block) consumes it via `dusk::vr::consumePhysicalBowDrawSound()` and plays the sound.
+One sound per pull, not continuous/pitch-following.
+**Slingshot (same day, built, NOT yet tested):** same scheme with `Z2SE_AL_PACHINKO_DRAW` --
+`s_slingDrawSoundEvent` set in `updatePhysicalSlingshotState()` (same 8/3 unit thresholds),
+consumed at the top of `checkUpperItemActionBow()` (PACHINKO branch, since the band can be pulled
+during the reload too); `setBowReloadAnime()` skips the load-time sound in Physical Slingshot mode.
+
+### Fishing: "Manual Reeling" crank gesture + right-stick turning while fishing — built 2026-11-14, NOT yet tested in-headset
+
+**Reel**: the game reels while `reel_btn_flags` (hold B = speed 5, D-pad down = 15; d_a_mg_rod.cpp
+input block, ~line 5973). New `game.vrManualReel` (default ON, VR tab after Move While Aiming):
+vr_main.cpp tick() (after the Physical Boomerang block) measures how fast the RIGHT controller's
+smoothed velocity (tau 0.04s) turns, raw tracking space, only while speed > 0.25 m/s and per-frame
+turn <= 1 rad (rejects reversals); smoothed rev/s (tau 0.25s) 0.6..1.6 -> reel speed 5..15
+(`g_manualReelSpeed`, `dusk::vr::getManualReelSpeed()`), 0 below. Gated on isFishingRodActive().
+The rod code ORs it into reel_btn_flags and takes the higher speed. Right hand only (the rod is
+in the left), any plane. Tunables are the kReel* constants in that block.
+**Right stick while fishing**: was fully rebound to the C-stick (2026-08-14). Now only Y goes to
+substickY (cast pull/flick, pull-up checks); X turns (smooth/snap) again; dominant axis wins
+(|y| >= |x| -> no turn). substickX is no longer fed in VR while fishing (left stick still does
+the lure-menu / uki steering it shares), and a real pad's C-stick X doesn't turn while fishing.
+
+### Aim dot + held fishing hook at frame rate (and the crank hand) — built 2026-11-14, NOT yet tested in-headset
+
+User: "the crosshair and the lure that you hold in your left hand when holding the inventory
+fishing rod are both laggy and seem to only update 30 times a second."
+- **Aim dot** (all items): `mSight` is set once per sim tick. New `vr_link::getLiveAimSightPos()`
+  stores the tick's point in the aiming controller's frame on the first draw after each tick
+  (`dusk::interp::sim_tick_seq()`), then carries it with that hand every frame; hit distance
+  still per tick. Aiming hand = new `daAlink_c::getVrAimHandLeft()` (factored out of
+  setBodyAngleToCamera(), d_a_alink_link.inc). First person only.
+- **Held hook (inventory/UKI rod)**: the rod is in the RIGHT item joint; in `uki_ready()` the
+  hook (actor current.pos) chases the LEFT item joint per tick and uki_main() places
+  hook/bait/bobber from it. Now uki_ready() records the tick hand point + hook pos
+  (`mVrHookHeld`, `mVrTickHandPos/HookPos`), dmg_rod_Execute snapshots the four model transforms
+  after uki_main(), and `dmg_rod_refreshTrackedPositionLive()` re-places them each frame as
+  snapshot + (live left item point - tick hand point). Also records this frame's rod tip
+  (`mVrLiveTip`, invalidated each frame in refreshTrackedFishingRodMtxLive()).
+- **Line** (UKI only): `dmg_rod_vrAdjustLine()` on linemat's present-adjust hook moves point 0 to
+  the live tip and, while held, point 99 (= the hook, line_control2_u()) to the hand-carried hook,
+  linear fade between. The lure rod's line (6 rod-line points first) is not adjusted.
+- **Manual Reeling hand fix**: the crank now uses the hand NOT holding the rod
+  (`vr_link::isFishingRodInLeftHand()`: lure rod && checkFishingRodGrabLeft() -> left, else right),
+  so the inventory rod cranks with the LEFT hand.

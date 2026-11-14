@@ -668,6 +668,14 @@ bool isFishingRodActive() {
     return vr_link::isFishingRodActive();
 }
 
+// "Manual Reeling" (game.vrManualReel): reel speed from the right hand's
+// crank gesture this frame (0 = not cranking). Set in tick().
+float g_manualReelSpeed = 0.0f;
+
+float getManualReelSpeed() {
+    return isImmersiveVr() ? g_manualReelSpeed : 0.0f;
+}
+
 bool isRealCutsceneRunning() {
     return vr_link::isRealCutsceneRunning();
 }
@@ -802,6 +810,10 @@ bool isPhysicalBowNocked() {
     return isImmersiveVr() && vr_link::isPhysicalBowNocked();
 }
 
+bool consumePhysicalBowDrawSound() {
+    return isImmersiveVr() && vr_link::consumePhysicalBowDrawSound();
+}
+
 bool isLeftHandedBow(daAlink_c* link) {
     return isImmersiveVr() && vr_link::isLeftHandedBow(link);
 }
@@ -878,6 +890,10 @@ bool consumePhysicalSwimStroke() {
 
 bool isPhysicalSlingshotNocked() {
     return isImmersiveVr() && vr_link::isPhysicalSlingshotNocked();
+}
+
+bool consumePhysicalSlingshotDrawSound() {
+    return isImmersiveVr() && vr_link::consumePhysicalSlingshotDrawSound();
 }
 
 bool isPhysicalSlingshotDrawn() {
@@ -2452,6 +2468,84 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
             pacing.dt);
     }
 
+    // "Manual Reeling" (game.vrManualReel): while fishing, winding the right
+    // hand in circles reels in (d_a_mg_rod.cpp reads getManualReelSpeed()
+    // alongside its hold-B reel). A circle is measured by how fast the hand's
+    // (smoothed) velocity turns, which works in any plane and ignores
+    // straight back-and-forth motion: a reversal passes through low speed,
+    // where nothing is counted. Only the hand NOT holding the rod
+    // (vr_link::isFishingRodInLeftHand(); the inventory rod is in the right
+    // hand), in raw tracking space, so sweeping the rod, walking and turning
+    // don't reel.
+    // Speed maps kReelStartRevPerSec..kReelFullRevPerSec to the game's two
+    // reel speeds, 5 (B) .. 15 (D-pad down).
+    {
+        constexpr float kReelVelSmoothSec = 0.04f;
+        constexpr float kReelMinHandSpeed = 0.25f;     // m/s, slower motion isn't counted
+        constexpr float kReelMaxTurnPerFrame = 1.0f;   // rad; more is a reversal, not a circle
+        constexpr float kReelRateSmoothSec = 0.25f;
+        constexpr float kReelStartRevPerSec = 0.6f;
+        constexpr float kReelFullRevPerSec = 1.6f;
+        static XrVector3f s_prevPos{};
+        static bool s_hasPrevPos = false;
+        static XrVector3f s_vel{};
+        static XrVector3f s_prevVel{};
+        static bool s_prevVelValid = false;
+        static float s_revPerSec = 0.0f;
+
+        const float dt = static_cast<float>(pacing.dt);
+        const bool reelActive = !screenMode && dusk::getSettings().game.vrManualReel.getValue() &&
+                                dusk::vr::isFishingRodActive() && dt > 0.0f;
+        if (!reelActive) {
+            s_hasPrevPos = false;
+            s_prevVelValid = false;
+            s_vel = XrVector3f{};
+            s_revPerSec = 0.0f;
+            dusk::vr::g_manualReelSpeed = 0.0f;
+        } else {
+            // Crank with the hand that isn't holding the rod.
+            const XrVector3f pos =
+                vr_link::isFishingRodInLeftHand() ? rightPose.position : leftPose.position;
+            float turnRad = 0.0f;
+            if (s_hasPrevPos) {
+                const float a = 1.0f - std::exp(-dt / kReelVelSmoothSec);
+                s_vel.x += ((pos.x - s_prevPos.x) / dt - s_vel.x) * a;
+                s_vel.y += ((pos.y - s_prevPos.y) / dt - s_vel.y) * a;
+                s_vel.z += ((pos.z - s_prevPos.z) / dt - s_vel.z) * a;
+                const float speed = std::sqrt(s_vel.x * s_vel.x + s_vel.y * s_vel.y + s_vel.z * s_vel.z);
+                if (speed > kReelMinHandSpeed) {
+                    if (s_prevVelValid) {
+                        const float prevSpeed = std::sqrt(s_prevVel.x * s_prevVel.x +
+                                                          s_prevVel.y * s_prevVel.y +
+                                                          s_prevVel.z * s_prevVel.z);
+                        const float c = std::clamp((s_vel.x * s_prevVel.x + s_vel.y * s_prevVel.y +
+                                                    s_vel.z * s_prevVel.z) / (speed * prevSpeed),
+                                                   -1.0f, 1.0f);
+                        const float angle = std::acos(c);
+                        if (angle <= kReelMaxTurnPerFrame) turnRad = angle;
+                    }
+                    s_prevVel = s_vel;
+                    s_prevVelValid = true;
+                } else {
+                    s_prevVelValid = false;
+                }
+            }
+            s_prevPos = pos;
+            s_hasPrevPos = true;
+
+            const float instRevPerSec = turnRad / dt / (2.0f * 3.14159265f);
+            s_revPerSec += (instRevPerSec - s_revPerSec) * (1.0f - std::exp(-dt / kReelRateSmoothSec));
+            if (s_revPerSec >= kReelStartRevPerSec) {
+                const float t = std::clamp((s_revPerSec - kReelStartRevPerSec) /
+                                               (kReelFullRevPerSec - kReelStartRevPerSec),
+                                           0.0f, 1.0f);
+                dusk::vr::g_manualReelSpeed = 5.0f + t * 10.0f;
+            } else {
+                dusk::vr::g_manualReelSpeed = 0.0f;
+            }
+        }
+    }
+
     // Getting a shield bash to actually register is a genuinely different
     // problem than the sword's B-latch fix above, not just a copy-paste of
     // it. Traced the real game logic first rather than assuming (d_a_alink.cpp):
@@ -2611,12 +2705,27 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     // from earlier this session is left in place, not reverted -- this is
     // an additional/alternative control, not a replacement.
     // Screen mode restores the right stick to the normal game-camera C-stick.
-    if (screenMode || dusk::vr::isFishingRodActive()) {
+    //
+    // 2026-11-14 (user request): while fishing only the right stick's Y goes
+    // to the C-stick (cast pull-back/flick and the rod's pull-up checks, the
+    // parts that matter in VR -- the tracked rod already steers the line);
+    // its X turns like normal again. Whichever axis the stick is pushed
+    // further along wins, so a cast flick doesn't also turn.
+    const bool fishingRightStick = !screenMode && dusk::vr::isFishingRodActive();
+    if (screenMode) {
         if (std::abs(rightStick.x) > kStickDeadzone || std::abs(rightStick.y) > kStickDeadzone) {
             padStatus.substickX = static_cast<s8>(std::clamp(rightStick.x, -1.f, 1.f) * 127.f);
             padStatus.substickY = static_cast<s8>(std::clamp(rightStick.y, -1.f, 1.f) * 127.f);
         }
     } else {
+        float vrTurnStickX = rightStick.x;
+        if (fishingRightStick) {
+            const bool vertical = std::abs(rightStick.y) >= std::abs(rightStick.x);
+            if (vertical && std::abs(rightStick.y) > kStickDeadzone) {
+                padStatus.substickY = static_cast<s8>(std::clamp(rightStick.y, -1.f, 1.f) * 127.f);
+            }
+            if (vertical) vrTurnStickX = 0.f;
+        }
         // Real physical gamepad's C-stick (2026-08-19, explicit user
         // request: "make the c stick function, c left and c right, rotate
         // the camera left and right in the same way that moving the right
@@ -2645,8 +2754,9 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         // stick value); for snap turn it's required -- the edge detector
         // (g_snapTurnArmed) must see one combined signal, or a held
         // C-stick would keep the VR stick's snaps disarmed and vice versa.
-        const float realCStickX = mDoCPd_c::getSubStickX(PAD_1);
-        const float turnStickX = std::clamp(rightStick.x + realCStickX, -1.f, 1.f);
+        // A real gamepad's C-stick still only fishes while fishing.
+        const float realCStickX = fishingRightStick ? 0.f : mDoCPd_c::getSubStickX(PAD_1);
+        const float turnStickX = std::clamp(vrTurnStickX + realCStickX, -1.f, 1.f);
         const auto& turnSettings = dusk::getSettings().game;
         if (turnSettings.vrSnapTurn.getValue()) {
             dusk::vr::updateSnapTurn(turnStickX,
@@ -3842,7 +3952,7 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
 
         if (auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer())) {
             if (link->getAimSightVisible() && !dusk::getSettings().game.vrHideAimCrosshair.getValue()) {
-                vr_render::drawAimCrosshair(*link->getLineTopPosP());
+                vr_render::drawAimCrosshair(vr_link::getLiveAimSightPos(link));
             }
         }
         if (menuVisible) {
@@ -3974,7 +4084,7 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         // (vr_stereo_render.hpp) for the full "all items" scoping.
         if (auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer())) {
             if (link->getAimSightVisible() && !dusk::getSettings().game.vrHideAimCrosshair.getValue()) {
-                vr_render::drawAimCrosshair(*link->getLineTopPosP());
+                vr_render::drawAimCrosshair(vr_link::getLiveAimSightPos(link));
             }
         }
 

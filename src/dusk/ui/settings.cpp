@@ -1308,6 +1308,14 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                             "clawshot or Dominion Rod, strafing like when Z-targeting. "
                             "Off keeps you standing still while you aim, like the game does."
             });
+        config_bool_select(leftPane, rightPane, getSettings().game.vrManualReel,
+            {
+                .key = "Manual Reeling",
+                .helpText = "While fishing, wind your free hand (the one not holding the rod) in "
+                            "circles like turning a reel's handle to reel the line in. Faster "
+                            "circles reel faster. "
+                            "Holding B still reels too."
+            });
         config_bool_select(leftPane, rightPane, getSettings().game.vrHideAimCrosshair,
             {
                 .key = "Hide Aim Crosshair",

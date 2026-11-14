@@ -27,6 +27,18 @@
 #include "dusk/interp/frame_interpolation.h"
 #include "dusk/interp/particle.h"
 #include "d/actor/d_a_crod.h"
+#include "d/actor/d_a_npc_ne.h"   // Physical Grabbing: cat model
+#include "d/actor/d_a_ni.h"       // Physical Grabbing: cucco model
+#include "d/actor/d_a_do.h"       // Physical Grabbing: dog model
+#include "d/actor/d_a_obj_pumpkin.h"
+#include "d/actor/d_a_obj_wdStick.h"
+#include "d/actor/d_a_obj_food.h"
+#include "d/actor/d_a_obj_gpTaru.h"
+#include "d/actor/d_a_obj_onsenTaru.h"
+#include "d/actor/d_a_obj_kanban2.h"
+#include "JSystem/J3DGraphBase/J3DShape.h"
+#include "f_op/f_op_actor_iter.h" // Physical Grabbing: touch search
+#include "m_Do/m_Do_mtx.h"
 #include "f_op/f_op_view.h"
 #include "JSystem/J3DGraphAnimator/J3DModel.h"
 #include "JSystem/J3DGraphAnimator/J3DModelData.h"
@@ -3145,10 +3157,16 @@ inline J3DModel* getCarriedModel(fopAc_ac_c* actor) {
     }
 }
 
+namespace detail {
+// True while Physical Grabbing ("game.vrPhysicalGrab", further down) owns the
+// carried object's placement -- refreshPhysicalGrabLive() places it then.
+inline bool s_physGrabOwnsCarry = false;
+}  // namespace detail
+
 inline void refreshCarriedItemLive() {
     auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
     if (!link || !detail::s_handMtxValid || !detail::s_grabTickMidValid || !isFirstPerson(link) ||
-        isHandTrackingSuspended(link)) return;
+        isHandTrackingSuspended(link) || detail::s_physGrabOwnsCarry) return;
     fopAc_ac_c* actor = link->mGrabItemAcKeep.getActor();
     J3DModel* model = getCarriedModel(actor);
     if (!model) {
@@ -3382,6 +3400,72 @@ inline void refreshTrackedItemMtxLive() {
     }
 }
 
+// Re-roots an emitter's emitter-following particles (status 0x20 -- JPA
+// itself resets their offset to the emitter's global position each calc) at
+// the emitter's CURRENT global position, optionally rotating their local
+// offsets by rotDelta, and marks everything live so the particle
+// interpolation draws these positions instead of the per-tick history.
+// Particles without 0x20 are world-space by design and are left alone.
+inline void reRootFollowParticlesLive(JPABaseEmitter* emitter, MtxP rotDelta) {
+    JGeometry::TVec3<f32> root;
+    emitter->calcEmitterGlobalPosition(&root);
+    const JGeometry::TVec3<f32>& scl = emitter->mGlobalScl;  // JPA's work->mPublicScale
+    JPANode<JPABaseParticle>* lists[2][2] = {
+        {emitter->mAlivePtclBase.getFirst(), emitter->mAlivePtclBase.getEnd()},
+        {emitter->mAlivePtclChld.getFirst(), emitter->mAlivePtclChld.getEnd()},
+    };
+    for (auto& list : lists) {
+        for (JPANode<JPABaseParticle>* node = list[0]; node != list[1]; node = node->getNext()) {
+            JPABaseParticle* ptcl = node->getObject();
+            if (!ptcl->checkStatus(0x20)) continue;
+            if (rotDelta) {
+                MTXMultVecSR(rotDelta, &ptcl->mLocalPosition, &ptcl->mLocalPosition);
+            }
+            ptcl->mOffsetPosition.set(root);
+            ptcl->mPosition.set(root.x + ptcl->mLocalPosition.x * scl.x,
+                                root.y + ptcl->mLocalPosition.y * scl.y,
+                                root.z + ptcl->mLocalPosition.z * scl.z);
+            dusk::interp::mark_live_this_frame(ptcl);
+            dusk::interp::particle::mark_live_position(ptcl);
+        }
+    }
+    dusk::interp::particle::mark_live_position(emitter);
+}
+
+// Sword charge glow (holding B for a spin attack, setSwordChargeEffect(),
+// d_a_alink_effect.inc). The game pins it to the sword once per sim tick;
+// in VR the sword then moves with the tracked hand every real frame, so the
+// glow trailed/sat off the blade. Re-pins the three emitters to the sword
+// just placed by refreshTrackedItemMtxLive() (call right after it). The
+// blade glint (0) takes the full matrix; its particles are rotated by the
+// change too, so the streak stays along the blade. setSwordChargeEffect()
+// uses the same tracked matrix at tick time, so the emitter's rotation
+// always matches the frame its particles are in.
+inline void refreshSwordChargeEffectLive() {
+    auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
+    if (!link || !link->getSwordModel()) return;
+    Mtx swordMtx;
+    if (!getTrackedSwordMtx(swordMtx)) return;
+
+    if (JPABaseEmitter* glint = dComIfGp_particle_getEmitter(link->getSwordChargeParticleId(0))) {
+        Mtx newRot, curRotT, rotDelta;
+        JGeometry::TVec3<f32> unusedTrs;
+        JPASetRMtxTVecfromMtx(swordMtx, newRot, &unusedTrs);
+        MTXTranspose(glint->mGlobalRot, curRotT);
+        MTXConcat(newRot, curRotT, rotDelta);
+        glint->setGlobalRTMatrix(swordMtx);
+        reRootFollowParticlesLive(glint, rotDelta);
+    }
+
+    const cXyz glowPos = link->getSwordChargeGlowPos(swordMtx);
+    for (int j = 1; j <= 2; ++j) {
+        if (JPABaseEmitter* glow = dComIfGp_particle_getEmitter(link->getSwordChargeParticleId(j))) {
+            glow->setGlobalTranslation(glowPos.x, glowPos.y, glowPos.z);
+            reRootFollowParticlesLive(glow, nullptr);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Held-item (mHeldItemModel / mpKanteraModel) tracked-hand attachment
 // ---------------------------------------------------------------------------
@@ -3559,7 +3643,10 @@ inline bool consumePhysicalBoomerangThrow() {
 
 inline void refreshTrackedHeldItemMtxLive() {
     detail::s_heldItemTrackedThisFrame = false;
-    dusk::interp::particle::clear_live_positions();  // re-marked below while the lantern is held
+    // particle::clear_live_positions() used to run here, which wiped the
+    // marks refreshBootsLive() (inside refreshFullBodyIkLive(), earlier in
+    // the frame) had just made. tick() now clears once, before the first
+    // refresh that marks (vr_main.cpp, before the Full Body IK block).
     auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
     if (!link) return;
     if (!isFirstPerson(link)) return;
@@ -4804,6 +4891,661 @@ inline int consumeSheathHapticEvent() {
     const int e = detail::s_sheathHapticEvent;
     detail::s_sheathHapticEvent = 0;
     return e;
+}
+
+// ---- "Physical Grabbing" (game.vrPhysicalGrab) ----
+// Anything the A button can lift (pots, boxes, barrels, rocks, cats, cuccos,
+// bombs...; not CARRY_ITEM pick-ups like keys) can be grabbed by touching it
+// with a hand and squeezing that hand's grip. Touching gives a light tap,
+// grabbing a stronger one (like Physical Sheathing). While a hand touches a
+// grabbable or holds one, its grip doesn't press its usual button (R on the
+// left, X on the right).
+//
+// One hand: the object snaps against that palm, its up/forward following the
+// controller (actor up = grip +Y, actor forward = grip -Z). Second hand
+// touching it and squeezing: both drawn hands snap to the object's sides and
+// it's held between them -- centred between the controllers, its side axis
+// along the hand-to-hand line, up from the two grips. Letting go of one hand
+// goes back to one-handed on the other. Letting go of the last hand throws it
+// with that hand's velocity, or drops it if the hand was nearly still.
+//
+// The game side (daAlink_c, d_a_alink.cpp): consumePhysicalGrabStart() in
+// checkNextActionFromButton() starts the carry (setGrabItemActor(), sword put
+// away instantly, no lift animation); setGrabItemPos() takes the pose from
+// getPhysicalGrabPose(); consumePhysicalGrabRelease() frees it with the
+// throw velocity. OpenXR grip axes: +X is the palm normal on the left hand
+// and the back of the hand on the right; -Z points forward through the fist.
+inline constexpr float kGrabGripPress = 0.6f, kGrabGripRelease = 0.4f;
+inline constexpr float kGrabTouchMargin = 6.0f;      // units past the object's box
+inline constexpr float kGrabPalmGap = 3.0f;          // palm surface to object surface
+inline constexpr float kGrabMinHalf = 5.0f, kGrabMaxHalf = 40.0f;
+inline constexpr float kGrabSearchRange = 200.0f;    // prefilter, actor origin to hand
+inline constexpr float kGrabThrowMinSpeed = 150.0f;  // units/s (1.5 m/s); slower = drop
+inline constexpr float kGrabThrowScale = 1.3f;       // VR arm throws are short
+inline constexpr float kGrabSimHz = 30.0f;           // game speeds are units per tick
+inline constexpr float kGrabVelSmoothingSec = 0.04f;
+inline constexpr float kGrabStartLatchSec = 0.3f;
+
+namespace detail {
+inline bool s_physGrabGripHeld[2] = {false, false};
+inline bool s_physGrabGripOwned[2] = {false, false};  // squeeze that grabbed, still held
+inline fpc_ProcID s_physGrabTouchId[2] = {fpcM_ERROR_PROCESS_ID_e, fpcM_ERROR_PROCESS_ID_e};
+inline bool s_physGrabSuppress[2] = {false, false};   // read by the pad mapping (next frame)
+inline int s_physGrabHapticEvent[2] = {0, 0};         // 1 touch, 2 grab
+inline cXyz s_physGrabHandPrev[2];
+inline cXyz s_physGrabHandVel[2];                      // world units/s, smoothed
+inline bool s_physGrabHandPrevValid = false;
+
+inline fpc_ProcID s_physGrabId = fpcM_ERROR_PROCESS_ID_e;  // held (or being started)
+inline bool s_physGrabHolding[2] = {false, false};
+inline bool s_physGrabConfirmed = false;  // the game's grab actor is s_physGrabId
+inline float s_physGrabStartSec = 0.0f;   // start request still waiting for the game
+inline cXyz s_physGrabCenterLocal;        // box centre in the actor's frame
+inline float s_physGrabHalfX = 15.0f;     // half width along the actor's X (hands' side axis)
+inline float s_physGrabRadius = 20.0f;    // largest half extent, for the second hand's touch
+inline Mtx s_physGrabPose;                // desired actor frame (rot + current.pos), world
+inline bool s_physGrabPoseValid = false;
+inline Mtx s_physGrabModelOffset;         // model base relative to the actor frame
+// Animated actors: a body joint pinned to where it sat at rest (in the actor
+// frame), so an animation that moves the body away from the model root (the
+// cat's carry anim lifts it up to Link's arms) doesn't push it off the hand.
+inline int s_physGrabAnchorJoint = -1;
+inline cXyz s_physGrabAnchorLocal;
+
+inline fpc_ProcID s_physGrabReleaseId = fpcM_ERROR_PROCESS_ID_e;
+inline cXyz s_physGrabReleaseVel;         // units per tick
+inline Mtx s_physGrabReleasePose;
+}  // namespace detail
+
+inline bool isPhysicalGrabMode(daAlink_c* link) {
+    return link && dusk::getSettings().game.vrPhysicalGrab.getValue() && isFirstPerson(link) &&
+           !link->checkWolf() && !isPhysicalClimbActive() && !isHandTrackingSuspended(link) &&
+           detail::s_handMtxValid;
+}
+
+// Whether the game can start a carry right now, from what the VR side can
+// see (the game re-checks when it consumes the request). Only bare hands or
+// the sword (put away on grab), on foot.
+inline bool canStartPhysicalGrab(daAlink_c* link) {
+    return link->mGrabItemAcKeep.getActor() == nullptr &&
+           (link->mEquipItem == dItemNo_NONE_e || link->mEquipItem == 0x103) &&
+           !link->checkModeFlg(daAlink_c::MODE_RIDING | daAlink_c::MODE_SWIMMING) && !link->checkEventRun();
+}
+
+// CARRY_ITEM actors normally go through procPickUp (keys, swords, the lantern,
+// bags...). Only these are plain objects worth grabbing; the game holds them as
+// the one-handed "picked up" item (mEquipItem 0x102) -- small broken sign
+// pieces, sticks, and the Castle Town dog bone / ball (obj_food). Bigger sign
+// pieces have no carry type and lift like pots.
+inline bool isPhysicalGrabPickupItem(fopAc_ac_c* actor) {
+    const s16 name = fopAcM_GetName(actor);
+    return name == fpcNm_OBJ_KANBAN2_e || name == fpcNm_Obj_WdStick_e || name == fpcNm_OBJ_FOOD_e;
+}
+
+// The model(s) drawn for a grabbed actor, for the per-frame placement, and
+// its morf if it's animated (the animation only applies through
+// morf->modelCalc()). Actors not listed still follow at tick rate (they build
+// their model from the pose the game sets).
+struct PhysGrabModels {
+    J3DModel* models[18];
+    int count = 0;
+    mDoExt_McaMorf* morf = nullptr;
+    // A shape the actor doesn't draw right now, left out of the size.
+    J3DShape* skipShape = nullptr;
+};
+
+inline void getPhysicalGrabModels(fopAc_ac_c* actor, PhysGrabModels* out) {
+    out->count = 0;
+    out->morf = nullptr;
+    out->skipShape = nullptr;
+    if (!actor || !fopAc_IsActor(actor)) return;
+    auto add = [out](J3DModel* m) {
+        if (m && out->count < 18) out->models[out->count++] = m;
+    };
+    switch (fopAcM_GetName(actor)) {
+    case fpcNm_NPC_NE_e:
+        out->morf = static_cast<npc_ne_class*>(actor)->mpMorf;
+        break;
+    case fpcNm_NI_e:
+        out->morf = static_cast<ni_class*>(actor)->mpMorf;
+        break;
+    case fpcNm_DO_e:
+        out->morf = static_cast<do_class*>(actor)->mpMorf;
+        break;
+    case fpcNm_OBJ_PUMPKIN_e: {
+        auto* pumpkin = static_cast<daObj_Pumpkin_c*>(actor);
+        add(pumpkin->mpModel);
+        // Material 0's shape (the planted leaves) is hidden once the pumpkin
+        // has been pulled (daObj_Pumpkin_c::Draw(), field_0xBA8), but it's
+        // still in the model and made the box far bigger than the pumpkin.
+        // Skipped even while still planted: the size is measured once, at
+        // the grab, and pulling it hides the leaves right away.
+        if (pumpkin->mpModel) {
+            if (J3DMaterial* mat = pumpkin->mpModel->getModelData()->getMaterialNodePointer(0)) {
+                out->skipShape = mat->getShape();
+            }
+        }
+        break;
+    }
+    case fpcNm_OBJ_FOOD_e:
+        add(static_cast<obj_food_class*>(actor)->mpModel);
+        break;
+    case fpcNm_Obj_WdStick_e:
+        add(static_cast<daWdStick_c*>(actor)->mModel);
+        break;
+    case fpcNm_Obj_GpTaru_e:
+        add(static_cast<daGpTaru_c*>(actor)->mpModel);
+        break;
+    case fpcNm_Obj_OnsenTaru_e:
+        add(static_cast<daOnsTaru_c*>(actor)->mpModel);
+        break;
+    case fpcNm_OBJ_KANBAN2_e: {
+        // A whole sign, or the pieces still attached to this one; every
+        // piece gets the same matrix (daObj_Kanban2_c::mtx_set()).
+        auto* sign = static_cast<daObj_Kanban2_c*>(actor);
+        constexpr u32 kAllParts = 0x3FFFF;  // PARTS_ALL in d_a_obj_kanban2.cpp
+        if (sign->mPartFlags == kAllParts) {
+            add(sign->mpModel);
+        } else {
+            for (int i = 0; i < 18; ++i) {
+                if (sign->mPartFlags & (1u << i)) add(sign->mpPartModel[i]);
+            }
+        }
+        break;
+    }
+    default:
+        add(getCarriedModel(actor));
+        break;
+    }
+    if (out->morf) add(out->morf->getModel());
+}
+
+// The actor's box as a world centre, world half extents along its own axes,
+// and the distance from a world point to its surface (0 inside). From the
+// model's own shape bounds when there is a model (the cull box/sphere is often
+// much bigger than the object, which held things far off the palm), else the
+// cull box/sphere in cullMtx space.
+struct PhysGrabBox {
+    cXyz center;
+    cXyz half;
+    float dist;
+};
+
+inline bool physGrabModelBox(J3DModel* model, const cXyz& point, PhysGrabBox* out,
+                             const J3DShape* skipShape = nullptr) {
+    J3DModelData* data = model->getModelData();
+    if (!data || data->getShapeNum() == 0) return false;
+    Vec mn{1e9f, 1e9f, 1e9f}, mx{-1e9f, -1e9f, -1e9f};
+    for (u16 i = 0; i < data->getShapeNum(); ++i) {
+        J3DShape* shape = data->getShapeNodePointer(i);
+        if (!shape || shape == skipShape) continue;
+        const Vec* a = shape->getMin();
+        const Vec* b = shape->getMax();
+        mn.x = std::min(mn.x, a->x); mn.y = std::min(mn.y, a->y); mn.z = std::min(mn.z, a->z);
+        mx.x = std::max(mx.x, b->x); mx.y = std::max(mx.y, b->y); mx.z = std::max(mx.z, b->z);
+    }
+    if (mn.x > mx.x || mn.y > mx.y || mn.z > mx.z) return false;
+    MtxP m = model->getBaseTRMtx();
+    const Vec* bs = model->getBaseScale();
+    Mtx scaleMtx, ms;
+    MTXScale(scaleMtx, bs->x, bs->y, bs->z);
+    MTXConcat(m, scaleMtx, ms);
+    const float sx = std::sqrt(ms[0][0] * ms[0][0] + ms[1][0] * ms[1][0] + ms[2][0] * ms[2][0]);
+    const float sy = std::sqrt(ms[0][1] * ms[0][1] + ms[1][1] * ms[1][1] + ms[2][1] * ms[2][1]);
+    const float sz = std::sqrt(ms[0][2] * ms[0][2] + ms[1][2] * ms[1][2] + ms[2][2] * ms[2][2]);
+    Mtx inv;
+    if (sx < 0.0001f || sy < 0.0001f || sz < 0.0001f || !MTXInverse(ms, inv)) return false;
+    cXyz local;
+    MTXMultVec(inv, &point, &local);
+    const cXyz c((mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f, (mn.z + mx.z) * 0.5f);
+    MTXMultVec(ms, &c, &out->center);
+    out->half.set((mx.x - mn.x) * 0.5f * sx, (mx.y - mn.y) * 0.5f * sy, (mx.z - mn.z) * 0.5f * sz);
+    const float dx = std::max({mn.x - local.x, 0.0f, local.x - mx.x}) * sx;
+    const float dy = std::max({mn.y - local.y, 0.0f, local.y - mx.y}) * sy;
+    const float dz = std::max({mn.z - local.z, 0.0f, local.z - mx.z}) * sz;
+    out->dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+    return true;
+}
+
+inline bool physGrabBox(fopAc_ac_c* actor, const cXyz& point, PhysGrabBox* out) {
+    PhysGrabModels models;
+    getPhysicalGrabModels(actor, &models);
+    if (models.count > 0) {
+        // Several sign pieces: the union of their boxes isn't needed for a
+        // touch test -- the nearest piece decides.
+        bool any = false;
+        for (int i = 0; i < models.count; ++i) {
+            PhysGrabBox b;
+            if (physGrabModelBox(models.models[i], point, &b, models.skipShape) && (!any || b.dist < out->dist)) {
+                *out = b;
+                any = true;
+            }
+        }
+        if (any) return true;
+    }
+    MtxP m = actor->cullMtx;
+    if (!m) {
+        out->center = actor->current.pos + cXyz(0.0f, 20.0f, 0.0f);
+        out->half.set(20.0f, 20.0f, 20.0f);
+        out->dist = std::max(0.0f, (point - out->center).abs() - 20.0f);
+        return true;
+    }
+    const float sx = std::sqrt(m[0][0] * m[0][0] + m[1][0] * m[1][0] + m[2][0] * m[2][0]);
+    const float sy = std::sqrt(m[0][1] * m[0][1] + m[1][1] * m[1][1] + m[2][1] * m[2][1]);
+    const float sz = std::sqrt(m[0][2] * m[0][2] + m[1][2] * m[1][2] + m[2][2] * m[2][2]);
+    if (sx < 0.0001f || sy < 0.0001f || sz < 0.0001f) return false;
+    Mtx inv;
+    if (!MTXInverse(m, inv)) return false;
+    cXyz local;
+    MTXMultVec(inv, &point, &local);
+
+    const int type = fopAcM_GetCullSize(actor);
+    if (fopAcM_CULLSIZE_IS_BOX(type)) {
+        const cull_box& box = type == fopAc_CULLBOX_CUSTOM_e ? actor->cull.box
+                                                            : l_cullSizeBox[fopAcM_CULLSIZE_IDX(type)];
+        const cXyz c((box.min.x + box.max.x) * 0.5f, (box.min.y + box.max.y) * 0.5f,
+                     (box.min.z + box.max.z) * 0.5f);
+        MTXMultVec(m, &c, &out->center);
+        out->half.set((box.max.x - box.min.x) * 0.5f * sx, (box.max.y - box.min.y) * 0.5f * sy,
+                      (box.max.z - box.min.z) * 0.5f * sz);
+        const float dx = std::max({box.min.x - local.x, 0.0f, local.x - box.max.x}) * sx;
+        const float dy = std::max({box.min.y - local.y, 0.0f, local.y - box.max.y}) * sy;
+        const float dz = std::max({box.min.z - local.z, 0.0f, local.z - box.max.z}) * sz;
+        out->dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+    } else {
+        const cull_sphere& sph = type == fopAc_CULLSPHERE_CUSTOM_e
+                                     ? actor->cull.sphere
+                                     : l_cullSizeSphere[fopAcM_CULLSIZE_Q_IDX(type)];
+        MTXMultVec(m, &sph.center, &out->center);
+        const float r = sph.radius * std::max({sx, sy, sz});
+        out->half.set(r, r, r);
+        out->dist = std::max(0.0f, (point - out->center).abs() - r);
+    }
+    return true;
+}
+
+namespace detail {
+struct PhysGrabSearch {
+    cXyz hand;
+    daAlink_c* link;
+    fopAc_ac_c* best;
+    float bestDist;
+};
+
+inline void* physGrabSearchCb(void* p, void* data) {
+    auto* s = static_cast<PhysGrabSearch*>(data);
+    auto* actor = static_cast<fopAc_ac_c*>(p);
+    if (!actor || actor == s->link || !fopAc_IsActor(actor)) return nullptr;
+    if (!(actor->attention_info.flags & fopAc_AttnFlag_CARRY_e)) return nullptr;
+    // No carry type is normal (skulls, big sign pieces): the A button lifts
+    // anything with the CARRY attention flag.
+    if (fopAcM_CheckCarryType(actor, fopAcM_CARRY_ITEM) && !isPhysicalGrabPickupItem(actor)) return nullptr;
+    if (fopAcM_checkCarryNow(actor)) return nullptr;
+    if ((actor->current.pos - s->hand).abs() > kGrabSearchRange) return nullptr;
+    PhysGrabBox box;
+    if (!physGrabBox(actor, s->hand, &box) || box.dist > kGrabTouchMargin) return nullptr;
+    if (box.dist < s->bestDist) {
+        s->bestDist = box.dist;
+        s->best = actor;
+    }
+    return nullptr;  // keep looking for a closer one
+}
+
+// The actor frame (rotation + current.pos) as the game builds it from
+// shape_angle (ZXY, the order setGrabItemPos() and daObjCarry_c use).
+inline void physGrabActorFrame(const fopAc_ac_c* actor, Mtx out) {
+    mDoMtx_stack_c::transS(actor->current.pos);
+    mDoMtx_stack_c::ZXYrotM(actor->shape_angle);
+    MTXCopy(mDoMtx_stack_c::get(), out);
+}
+
+inline void physGrabClear() {
+    s_physGrabId = fpcM_ERROR_PROCESS_ID_e;
+    s_physGrabHolding[0] = s_physGrabHolding[1] = false;
+    s_physGrabConfirmed = false;
+    s_physGrabStartSec = 0.0f;
+    s_physGrabPoseValid = false;
+    s_physGrabAnchorJoint = -1;
+    s_physGrabOwnsCarry = false;
+}
+
+// The game holds it: as the carried actor, or as the one-handed picked-up
+// item (sign pieces, sticks: mEquipItem 0x102).
+inline bool physGrabGameHolds(daAlink_c* link, fpc_ProcID id) {
+    if (link->getGrabActorID() == id) return true;
+    fopAc_ac_c* item = link->mItemAcKeep.getActor();
+    return link->mEquipItem == 0x102 && item != nullptr && fopAcM_GetID(item) == id;
+}
+
+inline cXyz physGrabNormalize(const cXyz& v, const cXyz& fallback) {
+    const float len = v.abs();
+    return len > 0.0001f ? v * (1.0f / len) : fallback;
+}
+}  // namespace detail
+
+// Once per real frame from tick(), after the tracked hand matrices are built
+// and before anything poses the hands/arms (same spot as the climb update).
+// grips are the left/right controller grip poses (tracking space), yawRad the
+// smooth-turn yaw, squeezes the grip values, sheathOwns[] whether Physical
+// Sheathing has that hand this frame.
+inline void updatePhysicalGrabState(const XrPosef& leftGrip, const XrPosef& rightGrip, float yawRad,
+                                    float leftSqueeze, float rightSqueeze, const bool sheathOwns[2],
+                                    float dt) {
+    using namespace detail;
+    const float squeeze[2] = {leftSqueeze, rightSqueeze};
+    bool pressed[2], released[2];
+    for (int h = 0; h < 2; ++h) {
+        const bool was = s_physGrabGripHeld[h];
+        s_physGrabGripHeld[h] = was ? squeeze[h] > kGrabGripRelease : squeeze[h] > kGrabGripPress;
+        pressed[h] = s_physGrabGripHeld[h] && !was;
+        released[h] = !s_physGrabGripHeld[h] && was;
+        if (!s_physGrabGripHeld[h]) s_physGrabGripOwned[h] = false;
+    }
+
+    auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
+    if (!isPhysicalGrabMode(link)) {
+        // Lost the mode (cutscene, menu, wolf...): leave any carry to the game.
+        physGrabClear();
+        for (int h = 0; h < 2; ++h) {
+            s_physGrabTouchId[h] = fpcM_ERROR_PROCESS_ID_e;
+            s_physGrabSuppress[h] = false;
+        }
+        s_physGrabHandPrevValid = false;
+        return;
+    }
+
+    MtxP handMtx[2] = {s_leftHandMtx, s_rightHandMtx};
+    const cXyz hand[2] = {ikPos(handMtx[0]), ikPos(handMtx[1])};
+    for (int h = 0; h < 2; ++h) {
+        if (s_physGrabHandPrevValid && dt > 0.0001f) {
+            const cXyz raw = (hand[h] - s_physGrabHandPrev[h]) * (1.0f / dt);
+            const float a = 1.0f - std::exp(-dt / kGrabVelSmoothingSec);
+            s_physGrabHandVel[h] += (raw - s_physGrabHandVel[h]) * a;
+        } else {
+            s_physGrabHandVel[h].set(0.0f, 0.0f, 0.0f);
+        }
+        s_physGrabHandPrev[h] = hand[h];
+    }
+    s_physGrabHandPrevValid = true;
+
+    // Grip frames in the world (smooth-turned, same mapping as buildHandMtx()).
+    cXyz gx[2], gy[2], gz[2];
+    const XrPosef* grips[2] = {&leftGrip, &rightGrip};
+    for (int h = 0; h < 2; ++h) {
+        const XrQuaternionf q = dusk::vr::rotateYawQuat(grips[h]->orientation, yawRad);
+        const Vec3f x = rotateVecByQuat(q.x, q.y, q.z, q.w, Vec3f{1.f, 0.f, 0.f});
+        const Vec3f y = rotateVecByQuat(q.x, q.y, q.z, q.w, Vec3f{0.f, 1.f, 0.f});
+        const Vec3f z = rotateVecByQuat(q.x, q.y, q.z, q.w, Vec3f{0.f, 0.f, 1.f});
+        gx[h].set(x.x, x.y, x.z);
+        gy[h].set(y.x, y.y, y.z);
+        gz[h].set(z.x, z.y, z.z);
+    }
+
+    // Is the held object still ours?
+    fopAc_ac_c* held = nullptr;
+    if (s_physGrabId != fpcM_ERROR_PROCESS_ID_e) {
+        held = fopAcM_SearchByID(s_physGrabId);
+        const bool gameHolds = held && physGrabGameHolds(link, s_physGrabId);
+        if (gameHolds) {
+            s_physGrabConfirmed = true;
+        } else if (s_physGrabConfirmed || !held) {
+            held = nullptr;  // the game let go (A put/throw, damage, event) or it's gone
+            physGrabClear();
+        } else {
+            s_physGrabStartSec -= dt;
+            if (s_physGrabStartSec <= 0.0f) {
+                held = nullptr;  // the game never took it
+                physGrabClear();
+            }
+        }
+    }
+
+    // What each free hand touches.
+    const bool canStart = held == nullptr && canStartPhysicalGrab(link);
+    for (int h = 0; h < 2; ++h) {
+        fpc_ProcID touch = fpcM_ERROR_PROCESS_ID_e;
+        if (!sheathOwns[h] && !s_physGrabHolding[h]) {
+            if (held != nullptr) {
+                // The second hand only needs to reach the held object.
+                cXyz center;
+                MTXMultVec(s_physGrabPose, &s_physGrabCenterLocal, &center);
+                if ((hand[h] - center).abs() <= s_physGrabRadius + kGrabTouchMargin) touch = s_physGrabId;
+            } else if (canStart) {
+                PhysGrabSearch search{hand[h], link, nullptr, kGrabTouchMargin + 1.0f};
+                fopAcIt_Judge(physGrabSearchCb, &search);
+                if (search.best) touch = fopAcM_GetID(search.best);
+            }
+        }
+        if (touch != fpcM_ERROR_PROCESS_ID_e && touch != s_physGrabTouchId[h]) {
+            s_physGrabHapticEvent[h] = std::max(s_physGrabHapticEvent[h], 1);
+        }
+        s_physGrabTouchId[h] = touch;
+    }
+
+    // Grab.
+    for (int h = 0; h < 2; ++h) {
+        if (!pressed[h] || s_physGrabTouchId[h] == fpcM_ERROR_PROCESS_ID_e) continue;
+        if (held != nullptr) {
+            if (s_physGrabTouchId[h] == s_physGrabId && !s_physGrabHolding[h]) {
+                s_physGrabHolding[h] = true;  // second hand
+                s_physGrabGripOwned[h] = true;
+                s_physGrabHapticEvent[h] = 2;
+            }
+            continue;
+        }
+        if (s_physGrabId != fpcM_ERROR_PROCESS_ID_e) continue;  // a start is already pending
+        fopAc_ac_c* actor = fopAcM_SearchByID(s_physGrabTouchId[h]);
+        PhysGrabBox box;
+        if (!actor || !physGrabBox(actor, hand[h], &box)) continue;
+
+        s_physGrabId = s_physGrabTouchId[h];
+        s_physGrabHolding[h] = true;
+        s_physGrabGripOwned[h] = true;
+        s_physGrabConfirmed = false;
+        s_physGrabStartSec = kGrabStartLatchSec;
+        s_physGrabHapticEvent[h] = 2;
+
+        // Box centre and size in the actor's own frame, and the model's
+        // offset from that frame, measured at rest. At rest the actor is
+        // usually only yawed, where every actor's rotation order agrees.
+        Mtx frame, frameInv;
+        physGrabActorFrame(actor, frame);
+        MTXInverse(frame, frameInv);
+        MTXMultVec(frameInv, &box.center, &s_physGrabCenterLocal);
+        s_physGrabHalfX = std::clamp(std::min(box.half.x, box.half.z), kGrabMinHalf, kGrabMaxHalf);
+        s_physGrabRadius = std::clamp(std::max({box.half.x, box.half.y, box.half.z}), kGrabMinHalf,
+                                      kGrabMaxHalf * 1.5f);
+        PhysGrabModels models;
+        getPhysicalGrabModels(actor, &models);
+        s_physGrabAnchorJoint = -1;
+        if (models.count > 0) {
+            // Sign pieces all share one matrix, so one offset serves them all.
+            MTXConcat(frameInv, models.models[0]->getBaseTRMtx(), s_physGrabModelOffset);
+            if (models.morf) {
+                J3DModel* m = models.models[models.count - 1];
+                float best = 1e9f;
+                for (u16 j = 0; j < m->getModelData()->getJointNum(); ++j) {
+                    const float d = (ikPos(m->getAnmMtx(j)) - box.center).abs();
+                    if (d < best) {
+                        best = d;
+                        s_physGrabAnchorJoint = j;
+                    }
+                }
+                if (s_physGrabAnchorJoint >= 0) {
+                    const cXyz jw = ikPos(m->getAnmMtx(s_physGrabAnchorJoint));
+                    MTXMultVec(frameInv, &jw, &s_physGrabAnchorLocal);
+                }
+            }
+        }
+        held = actor;
+    }
+
+    // Let go.
+    for (int h = 0; h < 2; ++h) {
+        if (!released[h] || !s_physGrabHolding[h]) continue;
+        s_physGrabHolding[h] = false;
+        if (s_physGrabHolding[1 - h]) continue;  // the other hand keeps it
+        if (s_physGrabConfirmed && s_physGrabPoseValid) {
+            cXyz v = s_physGrabHandVel[h];
+            if (v.abs() < kGrabThrowMinSpeed) {
+                v.set(0.0f, 0.0f, 0.0f);
+            } else {
+                v *= kGrabThrowScale / kGrabSimHz;
+            }
+            s_physGrabReleaseId = s_physGrabId;
+            s_physGrabReleaseVel = v;
+            MTXCopy(s_physGrabPose, s_physGrabReleasePose);
+        }
+        physGrabClear();
+        held = nullptr;
+    }
+
+    // Pose: one hand against the palm, two hands between them.
+    s_physGrabPoseValid = false;
+    if (held != nullptr && (s_physGrabHolding[0] || s_physGrabHolding[1])) {
+        cXyz ax, ay, az, center;
+        const float reach = s_physGrabHalfX + kGrabPalmGap;
+        if (s_physGrabHolding[0] && s_physGrabHolding[1]) {
+            // Actor +X is its left: from the right hand toward the left.
+            ax = physGrabNormalize(hand[0] - hand[1], gx[1] * -1.0f);
+            cXyz up = gy[0] + gy[1];
+            up = up - ax * up.inprod(ax);
+            const cXyz worldUp(0.0f, 1.0f, 0.0f);
+            ay = physGrabNormalize(up, worldUp - ax * ax.y);
+            az = physGrabNormalize(ax.outprod(ay), gz[0] * -1.0f);
+            ay = az.outprod(ax);
+            center = (hand[0] + hand[1]) * 0.5f;
+            // Both drawn hands onto the object's sides.
+            const cXyz snap[2] = {center + ax * reach, center - ax * reach};
+            for (int h = 0; h < 2; ++h) {
+                handMtx[h][0][3] = snap[h].x;
+                handMtx[h][1][3] = snap[h].y;
+                handMtx[h][2][3] = snap[h].z;
+            }
+        } else {
+            const int h = s_physGrabHolding[0] ? 0 : 1;
+            ax = gx[h] * -1.0f;
+            ay = gy[h];
+            az = gz[h] * -1.0f;
+            // The palm faces +grip X on the left hand, -grip X on the right,
+            // i.e. toward -actor X / +actor X: the object sits on that side.
+            center = h == 0 ? hand[h] - ax * reach : hand[h] + ax * reach;
+        }
+        Mtx& p = s_physGrabPose;
+        p[0][0] = ax.x; p[0][1] = ay.x; p[0][2] = az.x;
+        p[1][0] = ax.y; p[1][1] = ay.y; p[1][2] = az.y;
+        p[2][0] = ax.z; p[2][1] = ay.z; p[2][2] = az.z;
+        p[0][3] = p[1][3] = p[2][3] = 0.0f;
+        cXyz offset;
+        MTXMultVecSR(p, &s_physGrabCenterLocal, &offset);
+        p[0][3] = center.x - offset.x;
+        p[1][3] = center.y - offset.y;
+        p[2][3] = center.z - offset.z;
+        s_physGrabPoseValid = true;
+    }
+    s_physGrabOwnsCarry = s_physGrabPoseValid && s_physGrabConfirmed;
+
+    // Grip buttons stay off while touching, holding, or still squeezing the
+    // grip that grabbed.
+    for (int h = 0; h < 2; ++h) {
+        s_physGrabSuppress[h] = !sheathOwns[h] && (s_physGrabTouchId[h] != fpcM_ERROR_PROCESS_ID_e ||
+                                                   s_physGrabHolding[h] || s_physGrabGripOwned[h]);
+    }
+}
+
+// Per real frame, after refreshTrackedItemMtxLive(): puts the grabbed
+// object's model on the hand pose computed this frame (the game only places
+// the actor once per tick). Model base = pose * offset measured at grab.
+inline void refreshPhysicalGrabLive() {
+    using namespace detail;
+    if (!s_physGrabOwnsCarry) return;
+    fopAc_ac_c* actor = fopAcM_SearchByID(s_physGrabId);
+    if (!actor) return;
+    PhysGrabModels models;
+    getPhysicalGrabModels(actor, &models);
+    if (models.count == 0) return;
+
+    // The cat's carried pose is the end of its "being lifted" anim. The cat
+    // syncs that anim to Link's own lift animation (npc_ne_carry() copies his
+    // base anime frame and rate), which a physical grab skips, so it stood
+    // there on whatever frame Link's walk/wait anim was on.
+    if (fopAcM_GetName(actor) == fpcNm_NPC_NE_e && models.morf) {
+        auto* cat = static_cast<npc_ne_class*>(actor);
+        if (cat->mAction == npc_ne_class::ACT_CARRY) {
+            models.morf->setPlaySpeed(0.0f);
+            models.morf->setFrame(models.morf->getEndFrame());
+        }
+    }
+
+    Mtx base;
+    MTXConcat(s_physGrabPose, s_physGrabModelOffset, base);
+    if (models.morf) {
+        J3DModel* m = models.morf->getModel();
+        m->setBaseTRMtx(base);
+        models.morf->modelCalc();
+        if (s_physGrabAnchorJoint >= 0 && s_physGrabAnchorJoint < m->getModelData()->getJointNum()) {
+            cXyz want;
+            MTXMultVec(s_physGrabPose, &s_physGrabAnchorLocal, &want);
+            const cXyz d = want - ikPos(m->getAnmMtx(s_physGrabAnchorJoint));
+            if (d.abs() > 0.5f) {
+                base[0][3] += d.x;
+                base[1][3] += d.y;
+                base[2][3] += d.z;
+                m->setBaseTRMtx(base);
+                models.morf->modelCalc();
+            }
+        }
+        markModelJointsLive(m);
+        return;
+    }
+    for (int i = 0; i < models.count; ++i) {
+        models.models[i]->setBaseTRMtx(base);
+        models.models[i]->calc();
+        markModelJointsLive(models.models[i]);
+    }
+}
+
+// Whether that hand's grip (0 left, 1 right) must not press its button. From
+// the last update, which runs after the pad mapping in tick().
+inline bool isPhysicalGrabSuppressingGrip(int hand) {
+    return detail::s_physGrabSuppress[hand];
+}
+
+// 0 none, 1 touched something grabbable (light tap), 2 grabbed. Once.
+inline int consumePhysicalGrabHapticEvent(int hand) {
+    const int e = detail::s_physGrabHapticEvent[hand];
+    detail::s_physGrabHapticEvent[hand] = 0;
+    return e;
+}
+
+// Game side, once per tick: an actor to start carrying, or the error id.
+inline fpc_ProcID consumePhysicalGrabStart() {
+    if (detail::s_physGrabId == fpcM_ERROR_PROCESS_ID_e || detail::s_physGrabConfirmed ||
+        detail::s_physGrabStartSec <= 0.0f) {
+        return fpcM_ERROR_PROCESS_ID_e;
+    }
+    return detail::s_physGrabId;
+}
+
+// Game side: where the held actor goes this tick (actor frame: rotation +
+// current.pos).
+inline bool getPhysicalGrabPose(fpc_ProcID id, Mtx out) {
+    if (id == fpcM_ERROR_PROCESS_ID_e || id != detail::s_physGrabId || !detail::s_physGrabPoseValid) {
+        return false;
+    }
+    MTXCopy(detail::s_physGrabPose, out);
+    return true;
+}
+
+// Game side: a let-go to apply, with its pose and velocity (units per tick;
+// zero = drop). Once.
+inline bool consumePhysicalGrabRelease(fpc_ProcID* id, cXyz* vel, Mtx pose) {
+    if (detail::s_physGrabReleaseId == fpcM_ERROR_PROCESS_ID_e) return false;
+    *id = detail::s_physGrabReleaseId;
+    *vel = detail::s_physGrabReleaseVel;
+    MTXCopy(detail::s_physGrabReleasePose, pose);
+    detail::s_physGrabReleaseId = fpcM_ERROR_PROCESS_ID_e;
+    return true;
 }
 
 // Stick input for the game's climb procs from the pull still owed: the

@@ -470,6 +470,11 @@ struct UserSettings {
         // grip to draw the sword; bring it back there and let go to put it
         // away. B and A ("Put Away") still work.
         ConfigVar<bool> vrPhysicalSheath;
+        // Physical grabbing: touch a liftable object (pot, rock, box, cat...)
+        // and squeeze that hand's grip to pick it up; it snaps to the hand.
+        // A second hand holds it between both. Let go to throw (hand
+        // velocity) or drop. Default on.
+        ConfigVar<bool> vrPhysicalGrab;
         // Physical bow: nock the arrow by bringing the draw hand to the bow,
         // pull it back along the bow's aim, release the item button to fire.
         ConfigVar<bool> vrPhysicalBow;
@@ -644,6 +649,9 @@ struct UserSettings {
         // Turn the VR view with Epona while riding (adds her yaw change to
         // the smooth-turn yaw each frame). Default on.
         ConfigVar<bool> vrTurnWithEpona;
+        // Turn the VR view a full 360 with Link's spin attack (first person
+        // only). Default on.
+        ConfigVar<bool> vrSpinAttackCameraSpin;
         // Tilt the VR view with Link while Iron Boots hold him to a magnetic
         // wall or ceiling, so "up" is his up. Default on.
         ConfigVar<bool> vrIronBootsCameraFlip;
@@ -781,7 +789,16 @@ void registerSettings();
 void applyInternalResolutionScale(int scale);
 void applyResampler(Resampler resampler);
 
+namespace vr {
+bool isImmersiveVr();  // vr_main.hpp
+}
+
 inline bool isLetterboxingDisabled(bool inCutscene) {
+    // Immersive VR never letterboxes: the black bars the game adds for
+    // cutscenes and Z-targeting would sit stuck across the headset view.
+    if (vr::isImmersiveVr()) {
+        return true;
+    }
     const auto mode = getSettings().game.disableLetterboxing.getValue();
     return mode == LetterboxMode::On ||
            (mode == LetterboxMode::CutsceneOnly && inCutscene) ||

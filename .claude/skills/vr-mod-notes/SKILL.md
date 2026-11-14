@@ -16325,3 +16325,154 @@ keeps its panel, no doubling. No aurora change was needed:
   the window anymore (RmlUi still draws the menu there). Unchecked: whether the HUD capture's
   widescreen layout stretches correctly over a 16:9 window, and how sharp it is (it's the same
   texture the VR panel uses).
+
+### Spin-attack camera spin + no letterbox bars in VR — BUILT 2026-11-13, NOT yet tested in-headset
+
+**Spin With Spin Attack** (`game.vrSpinAttackCameraSpin`, default ON, VR tab >
+"Turning" section, under "Turn With Epona"): `vr_main.cpp`, block after
+"Turn With Epona". While `link->mProcID == PROC_CUT_TURN` and
+`isVrFirstPerson()`, adds a full 360 to `g_smoothTurnYawRad` via
+`snapScriptedCameraYaw()`, driven by the anim frame (`mUnderFrameCtrl[0]`)
+smoothstepped across the HIO attack window (`mRight/LeftAttackStart/EndFrame`,
+6..22 right / 7..24 left), eased per real frame (0.04s) since the frame only
+advances per sim tick. Direction: `mProcVar4.field_0x3010 == 1` = right turn
+= clockwise = negative yaw (same sign as smooth-turning right; derived from
+`getCutTurnDirection()`/stick-angle convention, unverified in-headset — if it
+spins the wrong way, flip `dir`). Early exit still finishes the 360. Chosen
+over reading Link's joint yaw because it always nets exactly 360 and can't
+feed back through Full Body IK. Third person deliberately excluded.
+Not covered: snowboard spin (`PROC_BOARD_CUT_TURN`), great-spin jump land.
+
+**Letterbox**: `dusk::isLetterboxingDisabled()` (`settings.h`) returns true
+whenever `vr::isImmersiveVr()` — removes both the Z-target ("vista", trim 1)
+and cutscene ("cinemascope", trim 2/3) bars, which are the same
+`dCamera_c::mTrimHeight` scissor. Also used by `d_msg_scrn_place.cpp` so
+message boxes don't offset for bars. Screen mode keeps the user's setting.
+`widezoom_correction()`'s wide-zoom pillarbox path untouched.
+
+### Spin-attack charge glow off the sword — FIXED (built) 2026-11-13, NOT yet tested in-headset
+
+User report: "when you hold the B button for a spin attack the sword glow doesn't
+line up with the sword." `setSwordChargeEffect()` (d_a_alink_effect.inc) pins
+KIRARI_A (blade glint, full RT matrix) and KIRARI_B/C (point of light at
+`base + X*(btkFrame+1)*(topLocal.x/15)`) to `mSwordModel->getBaseTRMtx()` —
+but `setEffect()` runs AFTER `setItemMatrix()` in execute(), so that's the
+animated-hand placement, not the tracked sword (spawned particles were
+oriented along the wrong blade too). Fix:
+- `setSwordChargeEffect()` uses `dusk::vr::getTrackedSwordMtx()` when
+  `isVrFirstPerson(this)` (same source as setSwordPos()'s Physical Sword).
+- New `vr_link::refreshSwordChargeEffectLive()` (tick(), right after
+  refreshTrackedItemMtxLive()) re-pins all 3 emitters to the live tracked
+  sword every frame; generic helper `reRootFollowParticlesLive(emitter,
+  rotDelta)` re-roots status-0x20 (follow-emitter) particles at
+  `calcEmitterGlobalPosition()` and marks them live. KIRARI_A's particles are
+  also rotated by newRot * curRot^T — valid because the tick-time set and the
+  per-frame set both use the tracked matrix, so the emitter's rotation always
+  matches the frame its particles are in. New accessors
+  `daAlink_c::getSwordChargeParticleId(j)`, `getSwordChargeGlowPos(mtx)`.
+- **Side bug fixed**: `particle::clear_live_positions()` ran at the top of
+  refreshTrackedHeldItemMtxLive(), AFTER refreshFullBodyIkLive() ->
+  refreshBootsLive() had marked the Iron Boots magnet-zap particles, so those
+  marks were wiped every frame (the 2026-10-28 boots zap fix could not have
+  fully worked). The clear now runs once in tick() before the Full Body IK
+  block. Retest the boots zap too.
+
+### "Physical Grabbing" (default ON) — built 2026-11-13, NOT yet tested in-headset
+
+User request: touch a liftable object (cats, rocks, boxes...) with a hand, haptic like
+sheathing, squeeze that hand's grip to grab (grip's own button suppressed), object snaps
+to that hand; second hand grabs too -> both drawn hands snap to the object, held/rotated
+by two points. User choices: release = physical throw (hand velocity; slow = drop),
+sword out = auto-sheathe. `game.vrPhysicalGrab`, VR tab > Combat after Physical Sheathing.
+- **No "holding" proc exists in the game**: after procGrabUp Link returns to normal
+  wait/move procs with `mGrabItemAcKeep` set + the grab upper anime (checkGrabAnime() ->
+  checkNextActionGrab() handles A put/throw/doors). So the grab just calls
+  setGrabItemActor() (like setForceGrab()), skipping stoop/lift.
+- VR side (`vr_link_visibility.hpp`, section after Physical Sheathing):
+  `updatePhysicalGrabState()` (tick(), right after updatePhysicalClimbState(), before
+  IK/hand draw). Touch = hand within 6 units of the actor's cull box/sphere in
+  `cullMtx` space (same data fopAcM_cullingCheck() uses; cullMtx scale folded in;
+  `actor->scale` NOT applied -- daObjCarry's base TR has no scale), candidates via
+  fopAcIt_Judge: attention flag CARRY, carryType != 0, not CARRY_ITEM (keys etc. use
+  procPickUp), not already carried, within 200 units. Grip hysteresis 0.6/0.4.
+- Pose: OpenXR grip axes (spec): +X = left palm normal / right back-of-hand, -Z forward
+  through the fist; mapped to world with rotateYawQuat + rotateVecByQuat (no axis flip,
+  same as buildHandMtx()/aim forward). Actor frame (+X is the actor's LEFT, Y up, Z fwd):
+  one hand = (-gripX, gripY, -gripZ), object centre = hand +/- X*(halfX+3) on the palm
+  side; two hands = X along right->left hand line, Y from the summed grip ups, centred
+  between the controllers, drawn hand matrices' translations moved to centre +/- X*reach
+  (same in-place edit as the climb hand lock). Box centre offset in the actor frame and
+  halfX measured once at grab. Play-space tilt (Iron Boots) not applied.
+- Per frame: `refreshPhysicalGrabLive()` (after refreshCarriedItemLive(), which now
+  skips via `s_physGrabOwnsCarry`) sets the model to pose * offset, where offset =
+  inv(actor frame at rest) * model base, captured at grab -- correct for any rotation
+  order (cats build YXZ, cuccos Y+Z only, daObjCarry ZXY + a leftover roll quat). Model
+  getters: daObjCarry/daNbomb/daObjStone (getCarriedModel) + npc_ne (cat) + ni (cucco).
+  Every other carryable follows at tick rate from the pose the game sets.
+- Game side (`d_a_alink_grab.inc` end, TARGET_PC): `startVrPhysicalGrabFromRequest()`
+  in checkNextActionFromButton()'s human branch right before decideDoStatus() (the A
+  lift's own gate); sword -> allUnequip+commonChangeItem+resetUpperAnime (sheath's instant
+  put-away), other equipped items refuse; sets RFLG0_GRAB_UP_START/END + lift voice.
+  `setGrabItemPos()` early-returns with the VR pose (ZXY via mDoMtx_MtxToRot).
+  `updateVrPhysicalGrabRelease()` right before setGrabItemPos(): places at the release
+  pose, speedF/speed.y/angle.y from the hand velocity (units/s * 1.3 / 30; < 1.5 m/s =
+  drop with zero speed), RFLG0_GRAB_THROW + voice, freeGrabItem(). **daObjCarry_c
+  replaces any nonzero release speed with its own data().m_throwInitSpeed** in
+  mode_proc_carry(), so the hand velocity is re-applied on the next tick (Link executes
+  before room objects) -- daObjCarry only.
+- VR state clears if the game lets go on its own (A put/throw, damage, events), if the
+  start isn't taken within 0.3s, or if the mode drops (cutscene/wolf/third person/menu;
+  the game then carries it its normal overhead way).
+- Untested risks: palm side/canonical orientation (if objects sit on the back of the hand
+  or face backwards, flip the sign in the one-hand branch); cull boxes may be generous
+  (touch from too far / object floats off the palm -- halfX clamped 5..40); a held object
+  near Link's body may push him via its collider; the throw scale/threshold; whether
+  objects that care about procGrabUp (heavy rebound, CARRY_TYPE_8 front-carry) behave
+  without it.
+
+**Follow-up 2026-11-13 (first in-headset test: "it works but not seamlessly"). Four
+reports, all fixed, built, NOT yet retested:**
+1. **Pumpkin lagged** (tick rate, like carried items before refreshCarriedItemLive): it had
+   no per-frame model. `getPhysicalGrabModel()` -> `getPhysicalGrabModels()` (a list +
+   optional morf): pumpkin, wdStick, gpTaru, onsenTaru, kanban2 (whole sign or every
+   attached part -- they share one matrix, `mtx_set()`), cat/cucco/dog morfs, + the old
+   getCarriedModel() trio.
+2. **Objects (pumpkin, cat) held far from the hand**: the cull box/sphere is much bigger
+   than the object (daObjCarry's is the root joint radius; presets are generous), and the
+   palm offset was its half width. Touch + size now come from the model's own SHP1 shape
+   bounds (union of `J3DShape::getMin/getMax`, model space, x base TR x base scale);
+   cull box/sphere only as a fallback for actors with no listed model.
+3. **Cat never went into its held pose**: npc_ne_carry() inits ANM_TO_CARRY_B with LINK's
+   base anime frame + rate (synced to his ANM_CARRY lift), which the physical grab skips.
+   refreshPhysicalGrabLive() now holds the cat's morf at the anim's end frame (rate 0) while
+   `mAction == ACT_CARRY`. Morf actors are recalculated with `morf->modelCalc()` (a bare
+   model->calc() doesn't apply the morf's anim). Since that anim lifts the body far above the
+   model root (the game puts a carried cat's root near Link's feet), a body joint (nearest the
+   rest-pose box centre, measured at grab) is pinned to its rest spot in the actor frame each
+   frame (base shifted by the error, recalculated).
+4. **Broken signs and skulls ("bones") couldn't be grabbed**: the search required
+   `carryType != 0`, but skulls (daObjCarry TYPE_DOKURO) and bigger sign pieces have no carry
+   type -- the A button only needs the CARRY attention flag. Filter removed. Small sign pieces
+   are `fopAcM_CARRY_UNK_30` (LIGHT|ITEM): the procPickUp one-handed item path. Now allowed for
+   OBJ_KANBAN2 and Obj_WdStick only (`isPhysicalGrabPickupItem()`; keys/swords/lantern/bags
+   still excluded): start = procPickUp's end state (setCarryNow, mEquipItem 0x102,
+   mItemAcKeep, field_0x2f94 = 3, GRAB_UP_START); placement = setGrabItemPos()'s 0x102 branch;
+   release = deleteEquipItem(FALSE, FALSE) (how the game drops it on item change). VR side's
+   "game holds it" check covers both (`physGrabGameHolds()`).
+
+**Follow-up 2026-11-13 (retest): everything else held right; only the pumpkin still floated.**
+Cause: daObj_Pumpkin_c's model has a second shape on material 0 -- the planted leaves --
+that Draw() hides once the pumpkin is pulled (`field_0xBA8 == 0`), but the shape-bounds union
+still counted it, so the box (and the palm offset) was far bigger than the pumpkin. Planted
+pumpkins start with field_0xBA8 = 1 and the size is measured once at the grab, so that
+shape is now always skipped for pumpkins (`PhysGrabModels::skipShape`, passed to
+physGrabModelBox()). Also made physGrabModelBox()'s MTXConcat non-aliasing. Built, NOT
+yet retested. If another prop floats, look for a hidden/toggled shape the same way.
+
+**Follow-up 2026-11-13: CONFIRMED in-headset ("everything works great"), incl. the pumpkin
+fix.** "Bones" meant the Castle Town dog bone (obj_food, "Bone / Ball"), not skulls. It's
+CARRY_UNK_30 (pick-up item path), so `isPhysicalGrabPickupItem()` + the game-side check now
+also allow fpcNm_OBJ_FOOD_e; model getter added. Its food_carry() replaces any nonzero
+release speed with a fixed throw (speedF 70, speed.y 50, Link's facing), so it gets the
+same next-tick velocity re-apply as daObjCarry_c. Its own food status (thrown -> dogs chase,
+FOOD_1) is still set by that code. Built, NOT yet retested.

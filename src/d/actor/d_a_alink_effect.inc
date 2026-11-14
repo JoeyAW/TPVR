@@ -817,13 +817,28 @@ void daAlink_c::setSwordChargeEffect() {
         var_f30 = l_swordTopLocalN.x;
     }
 
+    // VR: the glow belongs on the sword drawn in the tracked hand. At this
+    // point in execute() mSwordModel's base matrix is setItemMatrix()'s
+    // animated-hand placement, so new glow particles spawned along the wrong
+    // blade. Use the tracked sword from the last real frame instead (same
+    // source setSwordPos() uses for Physical Sword);
+    // vr_link::refreshSwordChargeEffectLive() keeps it on the sword between
+    // ticks.
+    MtxP swordMtx = mSwordModel->getBaseTRMtx();
+#if TARGET_PC
+    Mtx vrSwordMtx;
+    if (dusk::vr::isVrFirstPerson(this) && dusk::vr::getTrackedSwordMtx(vrSwordMtx)) {
+        swordMtx = vrSwordMtx;
+    }
+#endif
+
     f32 var_f31 = m_nSwordBtk->getFrame();
     if (var_f31 > 0.0f) {
         cXyz sp50;
         if (!checkWoodSwordEquip()) {
             emitter = setEmitter(&field_0x321c, ID_ZI_J_SWA_KIRARI_A, &current.pos, NULL);
             if (emitter != NULL) {
-                emitter->setGlobalRTMatrix(mSwordModel->getBaseTRMtx());
+                emitter->setGlobalRTMatrix(swordMtx);
 
                 if (isMasterSwordEquip) {
                     emitter->setGlobalParticleScale(lightAParticleScale);
@@ -833,8 +848,8 @@ void daAlink_c::setSwordChargeEffect() {
         }
 
         cXyz sp44;
-        mDoMtx_multVecSR(mSwordModel->getBaseTRMtx(), &cXyz::BaseX, &sp50);
-        mDoMtx_multVecZero(mSwordModel->getBaseTRMtx(), &sp44);
+        mDoMtx_multVecSR(swordMtx, &cXyz::BaseX, &sp50);
+        mDoMtx_multVecZero(swordMtx, &sp44);
 
         if (var_f31 >= 14.0f) {
             var_f31 = 14.0f;
@@ -859,7 +874,7 @@ void daAlink_c::setSwordChargeEffect() {
             if (alpha > 17) {
                 emitter = setEmitter(&field_0x321c, ID_ZI_J_SWA_KIRARI_A, &current.pos, NULL);
                 if (emitter != NULL) {
-                    emitter->setGlobalRTMatrix(mSwordModel->getBaseTRMtx());
+                    emitter->setGlobalRTMatrix(swordMtx);
                     emitter->setGlobalAlpha(alpha - 17);
                 }
             } else {
@@ -870,6 +885,19 @@ void daAlink_c::setSwordChargeEffect() {
         stopDrawParticle(field_0x3220);
         stopDrawParticle(field_0x3224);
     }
+}
+
+// Same placement as sp50 in setSwordChargeEffect() above.
+cXyz daAlink_c::getSwordChargeGlowPos(MtxP swordMtx) {
+    const f32 topX = checkMasterSwordEquip() ? l_swordTopLocalM.x : l_swordTopLocalN.x;
+    f32 frame = m_nSwordBtk->getFrame();
+    if (frame >= 14.0f) {
+        frame = 14.0f;
+    }
+    cXyz axis, base;
+    mDoMtx_multVecSR(swordMtx, &cXyz::BaseX, &axis);
+    mDoMtx_multVecZero(swordMtx, &base);
+    return base + ((axis * (frame + 1.0f)) * (topX / 15.0f));
 }
 
 void daAlink_c::setElecDamageEffect() {

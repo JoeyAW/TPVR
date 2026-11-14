@@ -441,6 +441,15 @@ bool consumePhysicalBoomerangThrow();
 // Physical sheathing (game.vrPhysicalSheath): 1 = draw the sword, 2 = put it
 // away, 0 = nothing. Once per gesture.
 int consumePhysicalSheathRequest();
+// Physical grabbing (game.vrPhysicalGrab), see vr_link_visibility.hpp. All
+// for daAlink_c, once per tick. Actor ids are fpc_ProcID.
+// The actor a hand just grabbed, to start carrying; 0xFFFFFFFF if none.
+unsigned int consumePhysicalGrabStart();
+// Where the held actor goes (actor frame: rotation + current.pos).
+bool getPhysicalGrabPose(unsigned int actorId, float (*outMtx)[4]);
+// The last hand let go: actor, velocity (units per tick, zero = drop) and
+// the pose to release it at (3 floats + a 3x4 matrix). Once.
+bool consumePhysicalGrabRelease(unsigned int* actorId, float* vel, float (*outPose)[4]);
 // Moves a matrix built from getLeftItemMatrix() onto the right tracked hand,
 // in place. False (matrix left alone) if not in this mode or not tracked.
 // flipModelFlat: true for the boomerang model, false for its effect models.

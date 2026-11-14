@@ -201,6 +201,21 @@ void daAlink_c::setGrabItemPos() {
         grabActor->tevStr.YukaCol = tevStr.YukaCol;
         fopAcM_SetRoomNo(grabActor, roomNo);
 
+#if TARGET_PC
+        // VR Physical Grabbing: the object is in the hand(s), posed by
+        // vr_link::updatePhysicalGrabState() (ZXY shape_angle, the order
+        // this function itself uses for carried actors).
+        {
+            Mtx vrGrabPose;
+            if (dusk::vr::getPhysicalGrabPose(fopAcM_GetID(grabActor), vrGrabPose)) {
+                grabActor->current.pos.set(vrGrabPose[0][3], vrGrabPose[1][3], vrGrabPose[2][3]);
+                mDoMtx_MtxToRot(vrGrabPose, &grabActor->shape_angle);
+                grabActor->current.angle.y = grabActor->shape_angle.y;
+                return;
+            }
+        }
+#endif
+
         BOOL isGrabCarryActor = checkGrabCarryActor();
         s16 spE;
         s16 spC;
@@ -383,6 +398,17 @@ void daAlink_c::setGrabItemPos() {
 
     if (mEquipItem == 0x102) {
         fopAc_ac_c* itemActor = mItemAcKeep.getActor();
+#if TARGET_PC
+        // VR Physical Grabbing: a sign piece/stick picked up by hand.
+        if (itemActor != NULL) {
+            Mtx vrGrabPose;
+            if (dusk::vr::getPhysicalGrabPose(fopAcM_GetID(itemActor), vrGrabPose)) {
+                itemActor->current.pos.set(vrGrabPose[0][3], vrGrabPose[1][3], vrGrabPose[2][3]);
+                mDoMtx_MtxToRot(vrGrabPose, &itemActor->shape_angle);
+                return;
+            }
+        }
+#endif
         if (itemActor != NULL) {
             mDoMtx_stack_c::copy(mpLinkModel->getAnmMtx(mLeftItemJntNo));
             mDoMtx_stack_c::transM(7.0f, -2.0f, 1.0f);
@@ -2588,3 +2614,143 @@ int daAlink_c::procGoronMove() {
 
     return 1;
 }
+
+#if TARGET_PC
+// ---- VR Physical Grabbing (game.vrPhysicalGrab, vr_link_visibility.hpp) ----
+// A hand touched a liftable actor and squeezed grip. Start carrying it right
+// away: no stoop/lift animation (the object goes straight to the hand), the
+// sword and shield put away instantly like Physical Sheathing does. Called
+// from checkNextActionFromButton() under the same gate as the A button's lift.
+// After this Link carries it the normal way (mGrabItemAcKeep + the grab upper
+// anime), so walking, A to put down/throw, doors and talking all still work;
+// only setGrabItemPos() takes its pose from the hand instead.
+BOOL daAlink_c::startVrPhysicalGrabFromRequest() {
+    const fpc_ProcID id = dusk::vr::consumePhysicalGrabStart();
+    if (id == fpcM_ERROR_PROCESS_ID_e || mGrabItemAcKeep.getActor() != NULL || checkWolf() ||
+        !dusk::vr::isVrFirstPerson(this))
+    {
+        return FALSE;
+    }
+    fopAc_ac_c* actor = fopAcM_SearchByID(id);
+    if (actor == NULL || fopAcM_checkCarryNow(actor) || !(actor->attention_info.flags & fopAc_AttnFlag_CARRY_e)) {
+        return FALSE;
+    }
+    // CARRY_ITEM: only the plain objects vr_link::isPhysicalGrabPickupItem()
+    // lets through (small sign pieces, sticks, the dog bone/ball); never keys, swords, the
+    // lantern...
+    const BOOL isPickupItem = fopAcM_CheckCarryType(actor, fopAcM_CARRY_ITEM);
+    if (isPickupItem && fopAcM_GetName(actor) != fpcNm_OBJ_KANBAN2_e && fopAcM_GetName(actor) != fpcNm_Obj_WdStick_e &&
+        fopAcM_GetName(actor) != fpcNm_OBJ_FOOD_e)
+    {
+        return FALSE;
+    }
+
+    if (mEquipItem == 0x103) {
+        allUnequip(FALSE);
+        commonChangeItem();
+        resetUpperAnime(UPPER_2, 3.0f);
+    } else if (mEquipItem != dItemNo_NONE_e) {
+        return FALSE;
+    }
+
+    if (isPickupItem) {
+        // Where procPickUp() ends up: held as the one-handed item (the one
+        // B swings), placed by setGrabItemPos()'s 0x102 branch.
+        fopAcM_setCarryNow(actor, TRUE);
+        mEquipItem = 0x102;
+        mItemAcKeep.setData(actor);
+        field_0x2f94 = 3;
+        onResetFlg0(RFLG0_GRAB_UP_START);
+        return TRUE;
+    }
+
+    setGrabItemActor(actor);
+    fopAcM_setStageLayer(actor);
+    if (fopAcM_CheckCarryType(actor, fopAcM_CARRY(fopAcM_CARRY_UNK_40 | fopAcM_CARRY_HEAVY))) {
+        voiceStart(Z2SE_AL_V_LIFTUP_L);
+    } else {
+        voiceStart(Z2SE_AL_V_LIFTUP_S);
+    }
+    // What procGrabUp() reports at its start and end, for objects that react
+    // to being lifted (e.g. daObjCarry_c's mode_proc_carry()).
+    onResetFlg0(RFLG0_GRAB_UP_START);
+    onResetFlg0(RFLG0_GRAB_UP_END);
+    setGrabUpperAnime(mpHIO->mBasic.m.mBasicInterpolation);
+    return TRUE;
+}
+
+namespace {
+// A physical throw to re-apply on the tick after release: some objects
+// (daObjCarry_c's mode_proc_carry()) replace the speed they're let go with by
+// their own fixed throw speed when they notice they're free.
+fpc_ProcID s_vrGrabThrowFixId = fpcM_ERROR_PROCESS_ID_e;
+f32 s_vrGrabThrowSpeedF = 0.0f;
+f32 s_vrGrabThrowSpeedY = 0.0f;
+s16 s_vrGrabThrowAngleY = 0;
+}  // namespace
+
+// Once per tick, before setGrabItemPos(): the last hand let go, so let go of
+// the object at the hand with the hand's velocity (zero = just drop it).
+void daAlink_c::updateVrPhysicalGrabRelease() {
+    if (s_vrGrabThrowFixId != fpcM_ERROR_PROCESS_ID_e) {
+        fopAc_ac_c* thrown = fopAcM_SearchByID(s_vrGrabThrowFixId);
+        if (thrown != NULL && !fopAcM_checkCarryNow(thrown) &&
+            (thrown->speedF != s_vrGrabThrowSpeedF || thrown->current.angle.y != s_vrGrabThrowAngleY))
+        {
+            thrown->speedF = s_vrGrabThrowSpeedF;
+            thrown->speed.y = s_vrGrabThrowSpeedY;
+            thrown->current.angle.y = s_vrGrabThrowAngleY;
+        }
+        s_vrGrabThrowFixId = fpcM_ERROR_PROCESS_ID_e;
+    }
+
+    unsigned int id;
+    f32 vel[3];
+    Mtx pose;
+    if (!dusk::vr::consumePhysicalGrabRelease(&id, vel, pose)) {
+        return;
+    }
+    fopAc_ac_c* actor = mGrabItemAcKeep.getActor();
+    const bool isPickupItem = actor == NULL && mEquipItem == 0x102;
+    if (isPickupItem) {
+        actor = mItemAcKeep.getActor();
+    }
+    if (actor == NULL || fopAcM_GetID(actor) != id) {
+        return;
+    }
+
+    actor->current.pos.set(pose[0][3], pose[1][3], pose[2][3]);
+    mDoMtx_MtxToRot(pose, &actor->shape_angle);
+    const f32 speedXZ = std::sqrt(vel[0] * vel[0] + vel[2] * vel[2]);
+    const bool isThrow = speedXZ > 0.0f || vel[1] != 0.0f;
+    if (isThrow) {
+        actor->current.angle.y = speedXZ > 0.01f ? cM_atan2s(vel[0], vel[2]) : shape_angle.y;
+        actor->speedF = speedXZ;
+        actor->speed.y = vel[1];
+        actor->current.angle.x = 0;
+        if (dBomb_c::checkBombActor(actor)) {
+            voiceStart(Z2SE_AL_V_ATTACK_S);
+        } else {
+            voiceStart(Z2SE_AL_V_THROW_S);
+        }
+        onResetFlg0(RFLG0_GRAB_THROW);
+        // Both replace a nonzero release speed with their own fixed throw
+        // (daObjCarry_c::mode_proc_carry(), obj_food's food_carry()).
+        if (fopAcM_GetName(actor) == fpcNm_Obj_Carry_e || fopAcM_GetName(actor) == fpcNm_OBJ_FOOD_e) {
+            s_vrGrabThrowFixId = id;
+        }
+        s_vrGrabThrowSpeedF = actor->speedF;
+        s_vrGrabThrowSpeedY = actor->speed.y;
+        s_vrGrabThrowAngleY = actor->current.angle.y;
+    } else {
+        actor->speedF = 0.0f;
+        actor->speed.y = 0.0f;
+    }
+    if (isPickupItem) {
+        // How the game drops the picked-up item when switching items.
+        deleteEquipItem(FALSE, FALSE);
+    } else {
+        freeGrabItem();
+    }
+}
+#endif

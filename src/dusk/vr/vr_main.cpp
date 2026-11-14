@@ -839,6 +839,23 @@ int consumePhysicalSheathRequest() {
     return isImmersiveVr() ? static_cast<int>(vr_link::consumePhysicalSheathRequest()) : 0;
 }
 
+unsigned int consumePhysicalGrabStart() {
+    return isImmersiveVr() ? vr_link::consumePhysicalGrabStart() : fpcM_ERROR_PROCESS_ID_e;
+}
+
+bool getPhysicalGrabPose(unsigned int actorId, float (*outMtx)[4]) {
+    return isImmersiveVr() && vr_link::getPhysicalGrabPose(actorId, outMtx);
+}
+
+bool consumePhysicalGrabRelease(unsigned int* actorId, float* vel, float (*outPose)[4]) {
+    cXyz v;
+    if (!vr_link::consumePhysicalGrabRelease(actorId, &v, outPose)) return false;
+    vel[0] = v.x;
+    vel[1] = v.y;
+    vel[2] = v.z;
+    return true;
+}
+
 bool retargetBoomerangMtxToRightHand(daAlink_c* link, float (*mtx)[4], bool flipModelFlat) {
     return isImmersiveVr() && vr_link::retargetBoomerangMtxToRightHand(link, mtx, flipModelFlat);
 }
@@ -2527,7 +2544,13 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     // While physically climbing the squeezes grab (vr_link::
     // updatePhysicalClimbState()) instead of pressing X / R.
     const bool squeezeClimbs = !screenMode && vr_link::isPhysicalClimbActive();
-    if (rightSqueeze > kSqueezeThreshold && !squeezeClimbs && !sheathHoldsRightSqueeze) {
+    // Physical grabbing: a hand touching or holding a grabbable object keeps
+    // its grip for the grab (state from the last frame's update, which runs
+    // later in tick()).
+    const bool grabHoldsLeftSqueeze = !screenMode && vr_link::isPhysicalGrabSuppressingGrip(0);
+    const bool grabHoldsRightSqueeze = !screenMode && vr_link::isPhysicalGrabSuppressingGrip(1);
+    if (rightSqueeze > kSqueezeThreshold && !squeezeClimbs && !sheathHoldsRightSqueeze &&
+        !grabHoldsRightSqueeze) {
         padStatus.button |= PAD_BUTTON_X;  // was Z
     }
     if (rightTrigger > kTriggerDeadzone) padStatus.button |= PAD_BUTTON_Y;   // was analog R
@@ -2540,7 +2563,8 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     // why a plain OR isn't enough by itself -- the force-release phase can
     // override an existing squeeze-hold to guarantee spActionTrigger() sees
     // a real 0->1 edge).
-    bool rWantsHeld = leftSqueeze > kTriggerDeadzone && !squeezeClimbs && !sheathHoldsLeftSqueeze;
+    bool rWantsHeld = leftSqueeze > kTriggerDeadzone && !squeezeClimbs && !sheathHoldsLeftSqueeze &&
+                      !grabHoldsLeftSqueeze;
     if (rightThrustForceRelease) {
         rWantsHeld = false;
     } else if (rightThrustForceHold) {
@@ -2776,6 +2800,80 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
             s_eponaLastYawS = yawS;
         }
         s_eponaWasActive = horse != nullptr;
+    }
+
+    // --- Spin with spin attack ---
+    //
+    // "game.vrSpinAttackCameraSpin" (default on, first person only). The
+    // spin attack's 360 is in the animation itself -- shape_angle never
+    // changes -- so the view is turned a full 360 driven by the animation
+    // frame: eased across the attack window (the same frames the game uses
+    // for the hitbox), right turns clockwise like smooth-turning right.
+    // Frame-driven rather than read from Link's joints: the turn is always
+    // exactly 360 (no leftover offset), and Full Body IK rewriting the body
+    // can't feed back into it. The anim frame only advances per sim tick, so
+    // the applied turn eases toward the target per real frame. If the spin
+    // ends early (cancel, damage), the turn still finishes, so the view
+    // always ends facing where it started.
+    {
+        constexpr float kTwoPi = 2.f * 3.14159265358979323846f;
+        constexpr float kSpinSmoothingSec = 0.04f;
+        static bool s_spinActive = false;  // a turn is in progress
+        static float s_spinTargetRad = 0.f;
+        static float s_spinAppliedRad = 0.f;
+        static float s_spinLastFrame = 0.f;
+        static float s_spinDir = 0.f;  // -1 right (clockwise), +1 left
+
+        bool inSpin = false;
+        float frame = 0.f;
+        float spinStart = 0.f;
+        float spinEnd = 0.f;
+        float dir = 0.f;
+        auto* spinLink = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
+        if (dusk::getSettings().game.vrSpinAttackCameraSpin.getValue() && spinLink != nullptr &&
+            spinLink->mProcID == daAlink_c::PROC_CUT_TURN && dusk::vr::isVrFirstPerson(spinLink))
+        {
+            const auto& cutTurn = spinLink->mpHIO->mCut.mCutTurn.m;
+            const bool right = spinLink->mProcVar4.field_0x3010 == 1;
+            spinStart = right ? cutTurn.mRightAttackStartFrame : cutTurn.mLeftAttackStartFrame;
+            spinEnd = right ? cutTurn.mRightAttackEndFrame : cutTurn.mLeftAttackEndFrame;
+            dir = right ? -1.f : 1.f;
+            frame = spinLink->mUnderFrameCtrl[0].getFrame();
+            inSpin = spinEnd > spinStart;
+        }
+
+        if (inSpin) {
+            // A new spin (fresh entry, or a re-entry that restarted the
+            // animation): finish any turn still in progress first.
+            const bool restarted = s_spinActive && (frame < s_spinLastFrame || dir != s_spinDir);
+            if (restarted) {
+                dusk::vr::snapScriptedCameraYaw(s_spinTargetRad - s_spinAppliedRad);
+            }
+            if (!s_spinActive || restarted) {
+                s_spinActive = true;
+                s_spinAppliedRad = 0.f;
+                s_spinDir = dir;
+            }
+            float t = std::clamp((frame - spinStart) / (spinEnd - spinStart), 0.f, 1.f);
+            t = t * t * (3.f - 2.f * t);  // smoothstep
+            s_spinTargetRad = s_spinDir * kTwoPi * t;
+            s_spinLastFrame = frame;
+        } else if (s_spinActive) {
+            s_spinTargetRad = s_spinDir * kTwoPi;  // left the spin: finish the turn
+        }
+
+        if (s_spinActive) {
+            const float gap = s_spinTargetRad - s_spinAppliedRad;
+            const float alpha =
+                1.f - std::exp(-static_cast<float>(pacing.dt) / kSpinSmoothingSec);
+            const bool closing = std::abs(gap) < 0.002f;
+            const float step = closing ? gap : gap * alpha;
+            s_spinAppliedRad = closing ? s_spinTargetRad : s_spinAppliedRad + step;
+            dusk::vr::snapScriptedCameraYaw(step);
+            if (!inSpin && closing) {
+                s_spinActive = false;
+            }
+        }
     }
 
     // --- Cutscenes: jump-cut detection only ---
@@ -3213,6 +3311,28 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     // Physical climbing: grab/pull from the squeezes, gripped hand held on
     // its grab point.
     vr_link::updatePhysicalClimbState(leftSqueeze, rightSqueeze);
+    // Physical grabbing: touch + grip picks up carryable objects; the held
+    // object's pose (and, two-handed, the drawn hands) come from here.
+    {
+        const bool sheathOwns[2] = {sheathHoldsLeftSqueeze, sheathHoldsRightSqueeze};
+        vr_link::updatePhysicalGrabState(leftPose, rightPose, dusk::vr::getSmoothTurnYawRad(),
+                                         leftSqueeze, rightSqueeze, sheathOwns,
+                                         static_cast<float>(pacing.dt));
+    }
+    for (int grabHand = 0; grabHand < 2; ++grabHand) {
+        const int grabEvent = vr_link::consumePhysicalGrabHapticEvent(grabHand);
+        if (grabEvent == 0) continue;
+        XrHapticActionInfo info{XR_TYPE_HAPTIC_ACTION_INFO};
+        info.action = g_hapticAction;
+        info.subactionPath = grabHand == 0 ? g_leftHandPath : g_rightHandPath;
+        XrHapticVibration vib{XR_TYPE_HAPTIC_VIBRATION};
+        // Same feel as Physical Sheathing: light tap on touch, stronger on grab.
+        vib.duration = grabEvent == 2 ? 40'000'000 : 15'000'000;  // ns
+        vib.frequency = XR_FREQUENCY_UNSPECIFIED;
+        vib.amplitude = grabEvent == 2 ? 0.6f : 0.25f;
+        xrApplyHapticFeedback(g_session->session(), &info,
+                              reinterpret_cast<const XrHapticBaseHeader*>(&vib));
+    }
     // Physical swimming: arm strokes -> push (vr_link_visibility.hpp).
     vr_link::updatePhysicalSwimState(pacing.dt);
     // Physical sheathing: a light tap when the sword hand reaches the hilt, a
@@ -3257,6 +3377,11 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     // live fix here.
     dusk::vr::logVrBodyRotationDiagLive(dusk::vr::getHeadMoveAngleS());
 
+    // Particles/emitters re-placed live this frame (boot magnet zap, sword
+    // charge glow, lantern flame) are marked by the refreshes below; clear
+    // last frame's marks once, before any of them run.
+    dusk::interp::particle::clear_live_positions();
+
     // Full body IK: poses the body's arms onto the tracked hands. Before
     // the item refreshes, which read the body's item joints.
     if (view_class* ikView = dComIfGd_getView()) {
@@ -3273,8 +3398,13 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     // -- user-confirmed hands fixed, sword/shield still laggy, same root
     // cause). See refreshTrackedItemMtxLive()'s own comment.
     dusk::vr::refreshTrackedItemMtxLive();
+    // Spin-attack charge glow follows the tracked sword (needs the sword
+    // placement just above).
+    vr_link::refreshSwordChargeEffectLive();
     // Carried pots/bombs/rocks follow the hands at frame rate.
     vr_link::refreshCarriedItemLive();
+    // Physically grabbed objects: placed on this frame's hand pose.
+    vr_link::refreshPhysicalGrabLive();
 
     // Same fix, extended further to mHeldItemModel/mpKanteraModel (bow,
     // bottles, lantern, etc.). See refreshTrackedHeldItemMtxLive()'s own

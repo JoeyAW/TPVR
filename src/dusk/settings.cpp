@@ -119,6 +119,7 @@ UserSettings g_userSettings = {
         .vrSwapSwordShieldHands {"game.vrSwapSwordShieldHands", false},
         .vrPhysicalSword {"game.vrPhysicalSword", true},
         .vrPhysicalSheath {"game.vrPhysicalSheath", true},
+        .vrPhysicalGrab {"game.vrPhysicalGrab", true},
         .vrPhysicalBow {"game.vrPhysicalBow", true},
         .vrLeftHandedBow {"game.vrLeftHandedBow", true},
         .vrBowSwapMirrorAxis {"game.vrBowSwapMirrorAxis", 2},
@@ -188,6 +189,7 @@ UserSettings g_userSettings = {
         .vrSnapTurn {"game.vrSnapTurn", false},
         .vrSnapTurnAngle {"game.vrSnapTurnAngle", 45},
         .vrTurnWithEpona {"game.vrTurnWithEpona", true},
+        .vrSpinAttackCameraSpin {"game.vrSpinAttackCameraSpin", true},
         .vrIronBootsCameraFlip {"game.vrIronBootsCameraFlip", true},
         .vrSmoothStartStop {"game.vrSmoothStartStop", true},
         .vrInstantStartFacing {"game.vrInstantStartFacing", true},
@@ -464,6 +466,7 @@ void registerSettings() {
     Register(g_userSettings.game.vrSwapSwordShieldHands);
     Register(g_userSettings.game.vrPhysicalSword);
     Register(g_userSettings.game.vrPhysicalSheath);
+    Register(g_userSettings.game.vrPhysicalGrab);
     Register(g_userSettings.game.vrPhysicalBow);
     Register(g_userSettings.game.vrLeftHandedBow);
     Register(g_userSettings.game.vrBowSwapMirrorAxis);
@@ -492,6 +495,7 @@ void registerSettings() {
     Register(g_userSettings.game.vrSnapTurn);
     Register(g_userSettings.game.vrSnapTurnAngle);
     Register(g_userSettings.game.vrTurnWithEpona);
+    Register(g_userSettings.game.vrSpinAttackCameraSpin);
     Register(g_userSettings.game.vrIronBootsCameraFlip);
     Register(g_userSettings.game.vrSmoothStartStop);
     Register(g_userSettings.game.vrInstantStartFacing);

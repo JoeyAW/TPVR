@@ -12638,6 +12638,13 @@ BOOL daAlink_c::checkNextActionFromButton() {
                 )
             )
         {
+#if TARGET_PC
+            // VR Physical Grabbing: a hand grabbed a liftable object. Same
+            // gate as the A button's lift below (checkNormalAction()).
+            if (!checkWolf() && startVrPhysicalGrabFromRequest()) {
+                return 1;
+            }
+#endif
             decideDoStatus();
 
             if (checkNormalAction()) {
@@ -19112,6 +19119,9 @@ int daAlink_c::execute() {
             }
 
             mSight.update();
+#if TARGET_PC
+            updateVrPhysicalGrabRelease();
+#endif
             setGrabItemPos();
 
             checkRoofRestart();

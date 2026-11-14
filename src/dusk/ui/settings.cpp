@@ -1110,6 +1110,13 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                             "she turns. You can still look anywhere with the headset. On by "
                             "default.",
             });
+        config_bool_select(leftPane, rightPane, getSettings().game.vrSpinAttackCameraSpin,
+            {
+                .key = "Spin With Spin Attack",
+                .helpText = "In first person, your view spins a full 360 degrees with Link "
+                            "when he does a spin attack, ending where it started. Off keeps "
+                            "the view still. On by default.",
+            });
         config_bool_select(leftPane, rightPane, getSettings().game.vrIronBootsCameraFlip,
             {
                 .key = "Flip With Iron Boots",
@@ -1237,6 +1244,16 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                             "to draw the sword. To put it away, bring the sword back over that "
                             "shoulder and let go of grip. Grip doesn't raise the shield while "
                             "your hand is there. The attack and Put Away buttons still work."
+            });
+        config_bool_select(leftPane, rightPane, getSettings().game.vrPhysicalGrab,
+            {
+                .key = "Physical Grabbing",
+                .helpText = "Touch something you can lift (pots, rocks, boxes, cats...) and "
+                            "squeeze that hand's grip to pick it up; it snaps to your hand. Grab "
+                            "it with your other hand too to hold it between both. Let go to "
+                            "throw it, or to drop it if your hand is still. Grip doesn't press "
+                            "its usual button while touching or holding. The A button still "
+                            "lifts and throws as normal."
             });
         config_bool_select(leftPane, rightPane, getSettings().game.vrPhysicalBow,
             {

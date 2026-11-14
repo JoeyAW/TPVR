@@ -1500,6 +1500,9 @@ public:
     void setHandIndex(daAlink_c::daAlink_ANM);
     void setSwordAtCollision(int);
     bool checkVrPhysicalSword();
+    // VR Physical Grabbing (d_a_alink_grab.inc).
+    BOOL startVrPhysicalGrabFromRequest();
+    void updateVrPhysicalGrabRelease();
     void startVrPhysicalSwordCut();
     void updateVrPhysicalSwordCut();
     void accumulateVrPhysicalSwing();
@@ -3758,6 +3761,15 @@ public:
     u32 getKandelaarParticleId() const { return field_0x31c4; }
     // Iron Boots magnet zap emitters (setMagneBootsEffect()): [foot][effect].
     u32 getMagneBootsParticleId(int foot, int j) const { return field_0x3228[foot][j]; }
+    // Sword charge glow emitters (setSwordChargeEffect()): 0 = blade glint
+    // (KIRARI_A, follows the sword matrix), 1/2 = the growing point of light
+    // (KIRARI_B/C, at getSwordChargeGlowPos()).
+    u32 getSwordChargeParticleId(int j) const {
+        return j == 0 ? field_0x321c : (j == 1 ? field_0x3220 : field_0x3224);
+    }
+    // Where setSwordChargeEffect() puts KIRARI_B/C for the given sword base
+    // matrix (VR re-places them on the tracked sword every frame).
+    cXyz getSwordChargeGlowPos(MtxP swordMtx);
     // The clawshot's SECOND hand-grip model -- setHookshotPos()/
     // applyTrackedHookshotGripTransforms() swap which of mHeldItemModel/
     // this one represents the left vs right hand via field_0x3020

@@ -19,6 +19,10 @@
 #include "JSystem/JAudio2/JAUSectionHeap.h"
 #include <cmath>
 #include <cstring>
+#if TARGET_PC
+#include "dusk/settings.h"
+#include "dusk/vr/vr_main.hpp"
+#endif
 
 #define ANM_HS_BACK_WALK           6
 #define ANM_HS_WALK_START          7
@@ -624,6 +628,9 @@ int daHorse_c::createHeap() {
     if (!m_reinLine.init(1, 75, texImg, 0)) {
         return 0;
     }
+#if TARGET_PC
+    m_reinLine.setPresentAdjust(&daHorse_c::vrAdjustReinLine, this);
+#endif
 
     m_rein[0].field_0x8[1] = 35;
     m_rein[1].field_0x8[1] = 35;
@@ -1983,6 +1990,26 @@ int daHorse_c::setSpeedAndAngle() {
             }
             cLib_addCalcAngleS(&shape_angle.y, current.angle.y, 2, 0x2000, 0x100);
         }
+#if TARGET_PC
+        // VR "Move While Aiming": the controllers aim, so the stick steers
+        // Epona while aiming from horseback (the game keeps her straight).
+        // Relative to her own facing: the flatscreen camera that normal
+        // steering is relative to follows the aim in this mode. Same formula
+        // as setStickData() with her yaw in place of the camera's. Only while
+        // moving (no turn-in-place animation here), and pulling back doesn't
+        // turn her around.
+        else if (dusk::vr::isImmersiveVr() && dusk::getSettings().game.vrMoveWhileAiming.getValue() &&
+                 checkStateFlg0(FLG0_UNK_1) && !checkStateFlg0(FLG0_UNK_100000) && checkInputOnR() &&
+                 speedF > 0.05f)
+        {
+            s16 steer = (s16)(mDoCPd_c::getStickAngle3D(PAD_1) - 0x8000);
+            if (abs(steer) <= 0x6000) {
+                steer = cLib_minMaxLimit<s16>(steer, -0x4000, 0x4000);
+                cLib_addCalcAngleS(&current.angle.y, shape_angle.y + steer, 5, field_0x16c2, m_hio->m.min_turn);
+                shape_angle.y = current.angle.y;
+            }
+        }
+#endif
 
         return 0;
     }
@@ -3091,6 +3118,50 @@ void daHorse_c::setReinPosHandSubstance(int param_0) {
 
     copyReinPos();
 }
+
+#if TARGET_PC
+// VR: the reins are simulated once per sim tick (setReinPosHandSubstance(),
+// reading the tracked hand through daAlink_c::getHorseReinHandPos()) and
+// drawn interpolated, so on their own the hand ends trail the controller by a
+// tick or two -- very visible at a gallop. Called by m_reinLine after each
+// frame's interpolation write: moves each hand end to where the tracked hand
+// is now and fades that shift out along the rein toward the bit, so the rein
+// still meets Epona's mouth. Line layout is copyReinPos()'s: rein[0] bit ->
+// hand, then rein[2] (only with both hands), then rein[1] hand -> bit.
+// Only runs while the reins are held in tracked hands (one-hand types 1/2).
+void daHorse_c::vrAdjustReinLine(void* i_ctx, cXyz* io_points, int i_count) {
+    daHorse_c* horse = (daHorse_c*)i_ctx;
+    daAlink_c* player = daAlink_getAlinkActorClass();
+    if (horse == NULL || player == NULL || dComIfGp_getHorseActor() != horse || !player->checkHorseRide()) {
+        return;
+    }
+
+    const int countA = horse->m_rein[0].field_0x8[0];
+    const int countCenter = horse->m_rein[2].field_0x8[0] > 1 ? horse->m_rein[2].field_0x8[0] : 0;
+    const int countB = horse->m_rein[1].field_0x8[0];
+    if (countCenter != 0 || countA < 2 || countB < 2 || countA + countB != i_count) {
+        return;
+    }
+
+    cXyz liveA, liveB;
+    if (!player->getVrTrackedReinHandPos(&liveA, &liveB)) {
+        return;
+    }
+
+    const int handA = countA - 1;
+    const int handB = countA;
+    const int last = i_count - 1;
+    const cXyz deltaA = liveA - io_points[handA];
+    const cXyz deltaB = liveB - io_points[handB];
+
+    for (int i = 1; i <= handA; i++) {
+        io_points[i] += deltaA * ((f32)i / (f32)handA);
+    }
+    for (int i = handB; i < last; i++) {
+        io_points[i] += deltaB * ((f32)(last - i) / (f32)(last - handB));
+    }
+}
+#endif
 
 void daHorse_c::setReinPosNormalSubstance() {
     static DUSK_CONSTEXPR cXyz saddleLeft(29.0f, -2.0f, 30.0f);

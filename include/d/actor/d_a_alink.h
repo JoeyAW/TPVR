@@ -4020,6 +4020,22 @@ public:
 
     BOOL checkHorseRideReady() const { return checkHorseRideOn() || checkHorseGetOffMode(); }
 
+#if TARGET_PC
+    // VR: the hand the reins are held in -- the tracked controller in first
+    // person, else the animated hand joint (getLeft/RightHandMatrix()).
+    MtxP getReinHandMatrix(bool i_left);
+    // VR: where the reins' hand ends are right now with tracked hands (types
+    // 1/2 only, same points as getHorseReinHandPos()); false otherwise.
+    bool getVrTrackedReinHandPos(cXyz* o_handPosA, cXyz* o_handPosB);
+
+    void getHorseReinCenterLeftPos(cXyz* o_pos) {
+        mDoMtx_multVec(getReinHandMatrix(true), &m_handLeftInSidePos, o_pos);
+    }
+
+    void getHorseReinCenterRightPos(cXyz* o_pos) {
+        mDoMtx_multVec(getReinHandMatrix(false), &m_handRightInSidePos, o_pos);
+    }
+#else
     void getHorseReinCenterLeftPos(cXyz* o_pos) {
         mDoMtx_multVec(getLeftHandMatrix(), &m_handLeftInSidePos, o_pos);
     }
@@ -4027,6 +4043,7 @@ public:
     void getHorseReinCenterRightPos(cXyz* o_pos) {
         mDoMtx_multVec(getRightHandMatrix(), &m_handRightInSidePos, o_pos);
     }
+#endif
 
     cXyz* getLineTopPosP() { return mSight.getPosP(); }
 

@@ -3053,7 +3053,12 @@ inline void refreshFullBodyIkLive(const cXyz& cameraEye, s16 headYawS, const Mtx
         static const Vec kLocalEye = {12.0f, -8.0f, 0.0f};  // setBodyPartPos()'s human localEye
         cXyz eye;
         MTXMultVec(model->getAnmMtx(link->field_0x30b4), &kLocalEye, &eye);
-        const s16 deltaYaw = static_cast<s16>(headYawS - bodyYaw);
+        // On Epona the hips are fixed to the saddle: turning the body to the
+        // head yaw spun Link around the camera on her back (worst while
+        // aiming, looking off to the side). Only move it to the camera there;
+        // the head itself still follows the headset (ikAttachHeadToHeadset).
+        const bool riding = link->checkReinRide();
+        const s16 deltaYaw = riding ? static_cast<s16>(0) : static_cast<s16>(headYawS - bodyYaw);
         Mtx rot;
         MTXRotRad(rot, 'Y', cM_s2rad(deltaYaw));
         if (onSurface) {
@@ -3076,7 +3081,7 @@ inline void refreshFullBodyIkLive(const cXyz& cameraEye, s16 headYawS, const Mtx
             MTXCopy(out, model->getAnmMtx(j));
         }
         detail::s_bodyAnchorValid = true;
-        bodyYaw = headYawS;
+        if (!riding) bodyYaw = headYawS;
 
         if (headWorldRot != nullptr) {
             const int headJ = link->field_0x30b4;
@@ -5767,6 +5772,17 @@ inline void refreshTrackedItemJointMtxLive() {
 inline bool getTrackedItemJointMtx(bool isLeft, Mtx outMtx) {
     if (!detail::s_trackedItemJointMtxValid) return false;
     MTXCopy(isLeft ? detail::s_trackedLeftItemJointMtx : detail::s_trackedRightItemJointMtx, outMtx);
+    return true;
+}
+
+// Tracked stand-in for daAlink_c::getLeftHandMatrix()/getRightHandMatrix()
+// (body hand joints 9/0xE): s_left/rightHandMtx take those joints' place,
+// as in refreshTrackedItemJointMtxLive() above, so the game's hand-local
+// offsets (e.g. the rein grip points) apply unchanged. Same validity as the
+// item joints. Used for Epona's reins (daAlink_c::getReinHandMatrix()).
+inline bool getTrackedHandJointMtx(bool isLeft, Mtx outMtx) {
+    if (!detail::s_trackedItemJointMtxValid) return false;
+    MTXCopy(isLeft ? detail::s_leftHandMtx : detail::s_rightHandMtx, outMtx);
     return true;
 }
 

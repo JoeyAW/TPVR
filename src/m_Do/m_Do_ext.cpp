@@ -3103,6 +3103,9 @@ void refresh_3dline_geometry(Material* material, dusk::interp::line::Points poin
     }
 
     dusk::interp::line::write(material, points);
+    if (points.strands != NULL && points.strand_count > 0) {
+        material->runPresentAdjust(points.strands[0].field_0x0, points.point_count);
+    }
     if (kind == LINE_UNIFORM_WIDTH) {
         material->update(points.point_count, width, color, taper, tevStr);
     } else if (kind == LINE_PER_POINT_WIDTH) {

@@ -196,6 +196,9 @@ public:
     void copyReinPos();
     void setReinPosHandSubstance(int);
     void setReinPosNormalSubstance();
+#if TARGET_PC
+    static void vrAdjustReinLine(void* i_ctx, cXyz* io_points, int i_count);
+#endif
     void bgCheck();
     bool checkSpecialWallHitSubstance(cXyz const&) const;
     void setServiceWaitTimer();

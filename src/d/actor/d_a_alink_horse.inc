@@ -296,17 +296,65 @@ BOOL daAlink_c::checkHorseNoUpperAnime() const {
     return checkHorseTiredAnime() || checkNoUpperAnime() || checkHorseSwordUpAnime();
 }
 
+#if TARGET_PC
+// VR: the reins follow the tracked hand instead of the riding animation's
+// hand. Epona's rein simulation reads these once per sim tick; her
+// vrAdjustReinLine() then moves the drawn hand ends to the live hand each
+// frame (getVrTrackedReinHandPos()).
+MtxP daAlink_c::getReinHandMatrix(bool i_left) {
+    if (dusk::vr::isImmersiveVr()) {
+        static Mtx s_vrReinHandMtx[2];
+        if (dusk::vr::getTrackedHandJointMtx(i_left, s_vrReinHandMtx[i_left ? 1 : 0])) {
+            return s_vrReinHandMtx[i_left ? 1 : 0];
+        }
+    }
+    return i_left ? getLeftHandMatrix() : getRightHandMatrix();
+}
+
+bool daAlink_c::getVrTrackedReinHandPos(cXyz* o_handPosA, cXyz* o_handPosB) {
+    if (!dusk::vr::isImmersiveVr()) {
+        return false;
+    }
+
+    int hand_type = getReinHandType();
+    if (hand_type != 1 && hand_type != 2) {
+        return false;
+    }
+
+    Mtx hand;
+    if (!dusk::vr::getTrackedHandJointMtx(hand_type == 1, hand)) {
+        return false;
+    }
+
+    if (hand_type == 2) {
+        mDoMtx_multVec(hand, &m_handRightInSidePos, o_handPosA);
+        mDoMtx_multVec(hand, &m_handRightOutSidePos, o_handPosB);
+    } else {
+        mDoMtx_multVec(hand, &m_handLeftOutSidePos, o_handPosA);
+        mDoMtx_multVec(hand, &m_handLeftInSidePos, o_handPosB);
+    }
+    return true;
+}
+#endif
+
 void daAlink_c::getHorseReinHandPos(cXyz* o_handPosA, cXyz* o_handPosB) {
+#if TARGET_PC
+    MtxP leftHand = getReinHandMatrix(true);
+    MtxP rightHand = getReinHandMatrix(false);
+#else
+    MtxP leftHand = getLeftHandMatrix();
+    MtxP rightHand = getRightHandMatrix();
+#endif
     int hand_type = getReinHandType();
     if (hand_type == 2) {
-        mDoMtx_multVec(getRightHandMatrix(), &m_handRightInSidePos, o_handPosA);
-        mDoMtx_multVec(getRightHandMatrix(), &m_handRightOutSidePos, o_handPosB);
+        mDoMtx_multVec(rightHand, &m_handRightInSidePos, o_handPosA);
+        mDoMtx_multVec(rightHand, &m_handRightOutSidePos, o_handPosB);
     } else if (hand_type == 1) {
-        mDoMtx_multVec(getLeftHandMatrix(), &m_handLeftOutSidePos, o_handPosA);
-        mDoMtx_multVec(getLeftHandMatrix(), &m_handLeftInSidePos, o_handPosB);
+        mDoMtx_multVec(leftHand, &m_handLeftOutSidePos, o_handPosA);
+        mDoMtx_multVec(leftHand, &m_handLeftInSidePos, o_handPosB);
     } else {
-        mDoMtx_multVec(getLeftHandMatrix(), &m_handLeftOutSidePos, o_handPosA);
-        mDoMtx_multVec(getRightHandMatrix(), &m_handRightOutSidePos, o_handPosB);
+        mDoMtx_multVec(leftHand, &m_handLeftOutSidePos, o_handPosA);
+        mDoMtx_multVec(rightHand, &m_handRightOutSidePos, o_handPosB);
     }
 }
 

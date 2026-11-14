@@ -16476,3 +16476,45 @@ also allow fpcNm_OBJ_FOOD_e; model getter added. Its food_carry() replaces any n
 release speed with a fixed throw (speedF 70, speed.y 50, Link's facing), so it gets the
 same next-tick velocity re-apply as daObjCarry_c. Its own food status (thrown -> dogs chase,
 FOOD_1) is still set by that code. Built, NOT yet retested.
+
+### Epona reins in the tracked hand + steering while aiming on horseback — built 2026-11-14, NOT yet tested in-headset
+
+**Reins.** Epona's reins are a 3D line (`daHorse_c::m_reinLine`) simulated once per sim tick in
+`setReinPosHandSubstance()`, whose hand ends come from `daAlink_c::getHorseReinHandPos()` /
+`getHorseReinCenterLeft/RightPos()` (game hand joints 9/0xE * `m_hand{Left,Right}{In,Out}SidePos`).
+- Tick level: those now go through new `daAlink_c::getReinHandMatrix(left)` (d_a_alink_horse.inc),
+  which returns the tracked hand (`dusk::vr::getTrackedHandJointMtx()` -> `s_left/rightHandMtx`,
+  same validity as the item joints: first person, hands tracked, not suspended) and falls back to
+  the animated joint. The boar (d_a_e_wb) uses the same getter.
+- Frame level: the rein line is drawn interpolated, so the ends would trail the hand by a tick or
+  two. New PC hook on `mDoExt_3DlineMat_c` (`setPresentAdjust()` / `runPresentAdjust()`, called in
+  m_Do_ext.cpp's `refresh_3dline_geometry()` right after `line::write()`, before the geometry
+  rebuild). `daHorse_c::vrAdjustReinLine()` moves each hand end to the live tracked hand
+  (`daAlink_c::getVrTrackedReinHandPos()`, hand types 1/2 only) and fades the shift linearly to 0
+  at the bit. Layout = copyReinPos(): rein[0] bit->hand, rein[2] only with both hands (skipped),
+  rein[1] hand->bit. Rein hand = whatever the game picks (type 2 = right by default);
+  "Swap Sword/Shield Hands" does NOT move the reins.
+- Untested risks: rein grip offsets vs the tracked hand model (should match, same joint frame);
+  the hand pose may not be a fist if the game's hand material differs; if write() is skipped
+  some frame the adjust runs on last frame's points (delta ~0, harmless).
+
+**Steering while aiming.** `daHorse_c::setSpeedAndAngle()` returns early with no turning while
+`checkHorseSubjectivity()` (horse bow/hookshot/boomerang subject procs). In VR with
+`game.vrMoveWhileAiming` (reused, no new setting), riding, not FLG0_UNK_100000/200000, stick
+input and speedF > 0.05: steer toward `shape_angle.y + clamp(stick - 0x8000, +-0x4000)` with
+`cLib_addCalcAngleS(.., 5, field_0x16c2, min_turn)` -- setStickData()'s formula with Epona's yaw
+in place of the flatscreen camera's (that camera follows the aim in subject mode). Stick pulled
+back (|steer| > 0x6000) does nothing; no turning while standing still. Untested: turn rate feel,
+interaction with Turn With Epona (view should turn with her as usual).
+
+**Follow-up (2026-11-14): reins + steering CONFIRMED WORKING in-headset ("both work now").** New report:
+with Full Body, aiming on Epona made the body orbit the camera and bob up/down when aiming
+up. Causes (code reading): (1) `jointControll()` joints 1/2 apply mBodyAngle on horseback --
+pitch `mBodyAngle.x - shape_angle.x` and twist `field_0x30c8` (= mBodyAngle.y/2, each joint),
+which setRideSubjectAngle() drives to the aim; that moves the head, and the Full Body head
+anchor then drags the whole body to keep the eye on the camera. (2) `refreshFullBodyIkLive()`
+turns the body to the head yaw, i.e. Link turns on the saddle when you look/aim sideways.
+Fix (built, NOT yet tested): VR first person + `checkReinRide()` -> joint 1 keeps only the
+slope upright term (`-shape_angle.x`), no twist on joints 1/2; Full Body head anchor uses
+deltaYaw 0 while riding (translate only; head still follows the headset, elbow pole uses the
+hip yaw). Applies to all riding, not just aiming.

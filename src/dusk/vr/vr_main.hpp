@@ -219,6 +219,10 @@ void refreshTrackedItemJointMtxLive();
 // raw joint matrix in that case.
 bool getTrackedItemJointMtx(bool isLeft, float (*outMtx)[4]);
 
+// Same, for the hand joints themselves (mLeftHandJntNo/mRightHandJntNo):
+// the tracked hand matrix. Used to put Epona's reins in the tracked hand.
+bool getTrackedHandJointMtx(bool isLeft, float (*outMtx)[4]);
+
 // VR fix (2026-08-12): re-runs daBoomerang_c::applyTrackedKeepTransforms()
 // (the visual-transform half of setKeepMatrix(), split out for exactly
 // this purpose) once per real frame -- fixes the held boomerang's own

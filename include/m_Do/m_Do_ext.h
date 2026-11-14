@@ -561,7 +561,24 @@ public:
     /* 0x4 */ mDoExt_3DlineMat_c* field_0x4;
 
 #if TARGET_PC
+public:
+    // Lets the owner move the points after refreshGeometryForPresentation()'s
+    // per-frame interpolation write, before the geometry is rebuilt. VR uses
+    // it to pin Epona's reins to the tracked hand (daHorse_c::vrAdjustReinLine).
+    typedef void (*PresentAdjustFn)(void* i_ctx, cXyz* io_points, int i_count);
+    void setPresentAdjust(PresentAdjustFn i_fn, void* i_ctx) {
+        mPresentAdjust = i_fn;
+        mPresentAdjustCtx = i_ctx;
+    }
+    void runPresentAdjust(cXyz* io_points, int i_count) {
+        if (mPresentAdjust != NULL) {
+            mPresentAdjust(mPresentAdjustCtx, io_points, i_count);
+        }
+    }
+
 protected:
+    PresentAdjustFn mPresentAdjust = NULL;
+    void* mPresentAdjustCtx = NULL;
     u8 mInterpKind;
     f32 mInterpWidth;
     u16 mInterpTaper;

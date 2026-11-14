@@ -2204,12 +2204,36 @@ int daAlink_c::jointControll(int i_jointNo) {
             sp8 = mBodyAngle.x;
         }
 
-        if (sp8 || field_0x30c8 != 0 || mBodyAngle.z != 0) {
-            setMatrixWorldAxisRot(mpLinkModel->getAnmMtx(1), sp8, field_0x30c8, mBodyAngle.z, 1, NULL);
+        s16 waistTwist = field_0x30c8;
+#if TARGET_PC
+        // VR: on horseback the game twists/pitches the upper body toward the
+        // aim (mBodyAngle, horse subject procs and guarding). In first person
+        // the controllers aim and the arms follow the tracked hands, and the
+        // twist only moves the head -- with Full Body that swung the whole body
+        // around the camera and bobbed it when aiming up/down. Keep just the
+        // upright correction for Epona's slope (-shape_angle.x).
+        if (checkReinRide() && dusk::vr::isImmersiveVr() && dusk::vr::isVrFirstPerson(this)) {
+            if (!checkHorseLieAnime() && mProcID != PROC_HORSE_RUN && mProcID != PROC_BOAR_RUN) {
+                sp8 = (s16)-shape_angle.x;
+            } else {
+                sp8 = 0;
+            }
+            waistTwist = 0;
+        }
+#endif
+        if (sp8 || waistTwist != 0 || mBodyAngle.z != 0) {
+            setMatrixWorldAxisRot(mpLinkModel->getAnmMtx(1), sp8, waistTwist, mBodyAngle.z, 1, NULL);
         }
     } else if (i_jointNo == 2) {
-        if (field_0x30c8 != 0) {
-            setMatrixWorldAxisRot(mpLinkModel->getAnmMtx(2), 0, field_0x30c8, 0, 1, NULL);
+        s16 spineTwist = field_0x30c8;
+#if TARGET_PC
+        // See joint 1 above.
+        if (checkReinRide() && dusk::vr::isImmersiveVr() && dusk::vr::isVrFirstPerson(this)) {
+            spineTwist = 0;
+        }
+#endif
+        if (spineTwist != 0) {
+            setMatrixWorldAxisRot(mpLinkModel->getAnmMtx(2), 0, spineTwist, 0, 1, NULL);
         }
     } else if (i_jointNo == 0) {
         if (mProcID == PROC_TOOL_DEMO || mProcID == PROC_GANON_FINISH) {

@@ -648,6 +648,10 @@ bool getTrackedItemJointMtx(bool isLeft, float (*outMtx)[4]) {
     return vr_link::getTrackedItemJointMtx(isLeft, outMtx);
 }
 
+bool getTrackedHandJointMtx(bool isLeft, float (*outMtx)[4]) {
+    return vr_link::getTrackedHandJointMtx(isLeft, outMtx);
+}
+
 void refreshTrackedBoomerangMtxLive() {
     vr_link::refreshTrackedBoomerangMtxLive();
 }

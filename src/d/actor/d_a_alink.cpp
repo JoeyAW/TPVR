@@ -6632,7 +6632,15 @@ void daAlink_c::setAtCollision() {
         dComIfG_Ccsp()->Set(&mAtCps[0]);
     } else if (mProcID == PROC_BOTTLE_OPEN) {
         if (mEquipItem == dItemNo_WATER_BOTTLE_e && mProcVar4.field_0x3010 != 0) {
-            mDoMtx_multVec(mHeldItemModel->getBaseTRMtx(), &bottleTopPos, &spC8);
+            MtxP bottleMtx = mHeldItemModel->getBaseTRMtx();
+#if TARGET_PC
+            // VR Physical Bottle: water comes out of the bottle in your hand.
+            Mtx vrBottleMtx;
+            if (dusk::vr::isPhysicalBottleMode(this) && dusk::vr::getPhysicalBottleMtx(vrBottleMtx)) {
+                bottleMtx = vrBottleMtx;
+            }
+#endif
+            mDoMtx_multVec(bottleMtx, &bottleTopPos, &spC8);
 
             if (field_0x27c8.getKeepMinY() < spC8.y) {
                 mAtCyl.SetH(spC8.y - field_0x27c8.getKeepMinY());
@@ -11594,6 +11602,15 @@ int daAlink_c::checkItemChangeAutoAction() {
             return procCutTurnChargeInit();
         }
 
+#if TARGET_PC
+        // VR Physical Bottle: taking the empty bottle out doesn't swing it
+        // (the base game swings straight away); swing it by hand or with the
+        // button once it's out.
+        if (mEquipItem == dItemNo_EMPTY_BOTTLE_e && dusk::vr::isPhysicalBottleAllowed(this)) {
+            return 0;
+        }
+#endif
+
         int ivar2 = checkItemActionInitStart();
         if (ivar2 != -1) {
             return ivar2;
@@ -12282,6 +12299,53 @@ BOOL daAlink_c::checkItemAction() {
 
         if (!checkFishingRodItem(mEquipItem) || !(mWaterY - current.pos.y > 70.0f)) {
             onResetFlg1(RFLG0_FISHINGROD_USE_ACCEPT);
+
+#if TARGET_PC
+            // VR Physical Bottle: swinging the empty bottle swings it, like
+            // its item button right below.
+            if (checkReadyItem() && mEquipItem == dItemNo_EMPTY_BOTTLE_e &&
+                dusk::vr::isPhysicalBottleMode(this) && dusk::vr::consumePhysicalBottleSwing())
+            {
+                return procBottleSwingInit(NULL, 0);
+            }
+
+            // VR Physical Bottle: the bottle in the hand is brought to the
+            // mouth (drink) or tipped over (pour). Same conditions as the
+            // bottle button (checkNewItemChange()), and only while that
+            // button's slot still holds this bottle.
+            if (mEquipItem != dItemNo_EMPTY_BOTTLE_e && checkBottleItem(mEquipItem) &&
+                dComIfGp_getSelectItem(mSelectItemId) == mEquipItem && dusk::vr::isPhysicalBottleMode(this))
+            {
+                // The cork is pulled with the bottle's button held.
+                dusk::vr::setPhysicalBottleButtonHeld(itemButton());
+                if (dusk::vr::consumePhysicalBottleCorkPop()) {
+                    seStartOnlyReverb(Z2SE_LK_BOTTLE_OPEN);
+                }
+
+                const int vrBottleUse = dusk::vr::consumePhysicalBottleUse();
+                const bool canUse = mLinkAcch.ChkGroundHit() && !checkModeFlg(0x70C52) &&
+                                    !checkNoResetFlg0(FLG0_WATER_IN_MOVE) && !checkModeFlg(0x40000);
+                const u16 bottleItem = mEquipItem;
+                // The cork is already out by hand, so the start animation's
+                // own sounds (the uncork pop) are dropped: resetBasAnime()
+                // detaches its sound track. The next animation (drinking,
+                // pouring) attaches its own as usual.
+                if (canUse && vrBottleUse == 1 && checkDrinkBottleItem(bottleItem)) {
+                    if (procBottleDrinkInit(bottleItem)) {
+                        resetBasAnime();
+                        return 1;
+                    }
+                } else if (canUse && vrBottleUse == 2 && checkOpenBottleItem(bottleItem)) {
+                    if (procBottleOpenInit(bottleItem)) {
+                        // Straight to the uncork: the bottle is already tipped.
+                        mUnderFrameCtrl[0].setFrame(29.0f);
+                        getNowAnmPackUnder(UNDER_0)->setFrame(29.0f);
+                        resetBasAnime();
+                        return 1;
+                    }
+                }
+            }
+#endif
 
             if (checkReadyItem() && (itemTrigger() || (checkBoomerangCatchAnime() && itemButton()))) {
                 int var_r28 = checkItemActionInitStart();
@@ -14667,6 +14731,14 @@ BOOL daAlink_c::setItemModel() {
         return 1;
     }
 
+#if TARGET_PC
+    // VR Physical Bottle: full bottles can be taken out into the hand too.
+    if (checkDrinkBottleItem(mEquipItem) || checkOpenBottleItem(mEquipItem)) {
+        setBottleModel(mEquipItem);
+        return 1;
+    }
+#endif
+
     if (checkHookshotItem(mEquipItem)) {
         setHookshotModel();
         return 1;
@@ -15166,10 +15238,20 @@ int daAlink_c::checkNewItemChange(u8 i_selItemIdx) {
                         return ITEM_PROC_BOTTLE_DRINK;
                     }
                     return ITEM_PROC_FISHING_FOOD;
-                } else if (checkDrinkBottleItem(sel_item)) {
-                    return ITEM_PROC_BOTTLE_DRINK;
-                } else if (checkOpenBottleItem(sel_item)) {
-                    return ITEM_PROC_BOTTLE_OPEN;
+                } else if (checkDrinkBottleItem(sel_item) || checkOpenBottleItem(sel_item)) {
+#if TARGET_PC
+                    // VR Physical Bottle: take the bottle out into the hand like
+                    // the empty one; the drink/pour starts from a gesture
+                    // (checkItemAction()). While it's out, its button only pulls
+                    // the cork (held, with the right hand at the cork).
+                    if (dusk::vr::isPhysicalBottleAllowed(this)) {
+                        if (mEquipItem != sel_item || mSelectItemId != i_selItemIdx) {
+                            return ITEM_PROC_COMMON_CHANGE_ITEM;
+                        }
+                        return ITEM_PROC_NONE;
+                    }
+#endif
+                    return checkDrinkBottleItem(sel_item) ? ITEM_PROC_BOTTLE_DRINK : ITEM_PROC_BOTTLE_OPEN;
                 } else if (checkTradeItem(sel_item)) {
                     return ITEM_PROC_NOT_USE_ITEM;
                 } else if (sel_item == dItemNo_HORSE_FLUTE_e) {

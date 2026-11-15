@@ -16580,3 +16580,109 @@ fishing rod are both laggy and seem to only update 30 times a second."
 - **Manual Reeling hand fix**: the crank now uses the hand NOT holding the rod
   (`vr_link::isFishingRodInLeftHand()`: lure rod && checkFishingRodGrabLeft() -> left, else right),
   so the inventory rod cranks with the LEFT hand.
+
+### "Physical Bottle" (default ON) — round 4 CONFIRMED in-headset 2026-11-15 ("looks great")
+
+`game.vrPhysicalBottle`, VR tab > Combat after Physical Boomerang. User asked for "physical
+bottle usage" and left the design to me. Gates: `vr_link::isPhysicalBottleAllowed()`
+(setting + first person + not riding + not demo mode 42, the scripted drink) and
+`isPhysicalBottleMode()` (allowed + a bottle equipped, not the right-hand "oil bottle not
+yet got" case).
+
+**Round 1 (first test): "it is in my wrist and I can't move".** The bottle was anchored to
+the drawn left HAND joint, which is at the wrist. And the button started the compulsory
+drink event (Link frozen) which then waited for the mouth gesture. Both redesigned:
+
+- **Taking it out**: checkNewItemChange() returns ITEM_PROC_COMMON_CHANGE_ITEM instead of
+  BOTTLE_DRINK/OPEN for drink/open bottles when allowed and not already equipped, so Link
+  holds the full bottle like the empty one (walkable). setItemModel() builds the model for
+  full bottles (setBottleModel(), TARGET_PC). Button again while it's out = the normal
+  animated use. procBottleDrinkInit/OpenInit deleteEquipItem() a bottle that's already the
+  equipped item before keepItemData() (else the old contents would be kept and restored).
+- **Gesture use** (checkItemAction(), next to the swing hook, before the item-button
+  check): `consumePhysicalBottleUse()` 1 = drink -> procBottleDrinkInit(); 2 = pour ->
+  procBottleOpenInit() + under anim to frame 29 (uncork/fairy release next tick). Same
+  ground/mode/water conditions as the button, slot must still hold the item.
+- In the procs the gesture only speeds things up, never blocks: DRINK_START -> DRINK as
+  soon as isPhysicalBottleAtMouth() (frame-50 sway entry done then if skipped); OPEN ->
+  POUR as soon as the cork is out (mItemMode) and isPhysicalBottleTipped(). No B cancel any
+  more (nothing waits).
+- **Placement**: `applyPhysicalBottleMtx()` (refreshTrackedHeldItemMtxLive(), before the
+  generic tracked-offset branch): FIST = left item joint carried onto the tracked hand
+  (computeTrackedItemMtx(raw item jnt, raw hand jnt, s_leftHandMtx)). Model +Y (neck,
+  bottleTop = +25) = grip -Z, X = grip Y, Z = -grip X, origin = fist - neck *
+  `kBottleGripHeightUnits` (8, guess). mpHookTipModel (fairy/worm/larva inside) gets the
+  same matrix. Last matrix kept for the game (`getPhysicalBottleMtx()`): fairy spawn, worm
+  release (procBottleOpen) and the water AT cylinder (setAtCollision). Cork joint
+  (bottleModelCallBack, right item joint) still NOT tracked -- old known gap.
+- **Events stay first person**: bottle uses are compulsory events, which
+  isRealCutsceneRunning() sent to third person. `isPhysicalBottleEventProc()`
+  (PROC_BOTTLE_DRINK/OPEN/SWING/GET, on foot, not demo 42) keeps isFirstPerson() true and
+  makes computeRawEyeAnchor() use the gameplay core anchor. GET also covers the lantern-oil
+  scoop.
+- **Gestures** (`updatePhysicalBottleState()`, tick(), right after the sheath update;
+  tracking space): mouth = HMD + 8cm down + 3cm forward (head frame); bottle mouth = grip +
+  neck * 10cm. At mouth: dist < 11cm (exit 16), neck.y < 0.6 (exit 0.75), neck facing the
+  mouth (dot > 0.2). Tipped: neck.y < -0.3 (exit -0.1), not at mouth. Use request latched
+  0.3s while the gesture holds and no bottle proc runs; light left haptic when it's made.
+  While a bottle is out, swing->B and thrust->R gestures are off (`bottleOwnsGestures`).
+- **Empty bottle swing**: `g_bottleSwing` (left hand, 2.0 m/s, 15cm) latches 0.3s;
+  checkItemAction() runs procBottleSwingInit(NULL, 0). Catch target is still the game's.
+- Untested risks: fist position/grip height; mouth offsets and thresholds; a full bottle as
+  mEquipItem in places vanilla never sees one (swimming, item-change edge cases, Third
+  Person toggled while holding one: then it's just held, the button still uses it).
+
+**Round 2 test: "it just scoops as soon as I press the button" + "the cork doesn't come out" +
+asked for a manual cork pull gated on the bottle button. Built, NOT yet retested.**
+- Empty bottle: the base game swings it right after taking it out (commonChangeItem() sets
+  RFLG0_UNK_80 -> checkItemChangeAutoAction() -> checkItemActionInitStart() -> swing).
+  checkItemChangeAutoAction() now returns 0 for EMPTY_BOTTLE when isPhysicalBottleAllowed().
+  The button while it's out still swings (vanilla itemTrigger path).
+- Manual cork: full bottles come out corked. checkNewItemChange() returns ITEM_PROC_NONE for
+  the held bottle's own slot (no more animated fallback), and checkItemAction() reports
+  itemButton() each tick (`setPhysicalBottleButtonHeld()`, held for 0.12s). VR: with it held,
+  the right grip within 9cm of the bottle's mouth grabs the cork (right tap); pulled past 15cm
+  it's out (`s_bottleUncorked`, strong tap, game plays Z2SE_LK_BOTTLE_OPEN via
+  `consumePhysicalBottleCorkPop()`). Drink/pour requests need it uncorked. State is per
+  mEquipItem value (another bottle/contents = corked again; the drink/open inits re-make the
+  same item's model, so it survives them).
+- Cork model (bottle joint 1): when uncorked or mItemMode != 0, applyPhysicalBottleMtx()
+  overwrites it after calc() with the tracked right fist (right item joint carried onto
+  s_rightHandMtx) * bottleModelCallBack()'s own offset. Otherwise calc() leaves it in the
+  bottle. Assumes joint 1 IS the cork (from the callback; unverified).
+
+**Round 3 test: "a drinkable bottle has no cork and I can't drink it" + "my thumb still goes
+through it, push it a little more the same way". Built, NOT yet retested.**
+- Material 0 (joint 1) IS the cork: procBottleGet() shows it at frame 5 when Link corks a
+  catch (mItemMode 1 -> right hand, back at 15). setBottleModel() hides it for drinkable
+  (and empty/oil) bottles; now shown for drink/open bottles when isPhysicalBottleAllowed().
+- Likely "can't drink" cause besides the missing cork: gesture points didn't match the drawn
+  bottle (mouth assumed 10cm up the grip; the model's mouth is 25 units up from a base 8
+  below the fist, ~17cm+), so reaching for the visible cork missed the 9cm grab zone. Now
+  applyPhysicalBottleMtx() records the drawn bottle mouth relative to the drawn left hand and
+  the drawn right fist (right item joint) relative to the drawn right hand; the gestures
+  carry those into tracking space (/VR_SCALE_FACTOR, -yaw). Cork grab = right FIST to
+  bottle mouth; drink = bottle mouth to the mouth point.
+- Fist push: bottle origin = item-joint fist + `kBottleFistPushUnits` (3) further along the
+  wrist -> item joint line.
+- Diagnostics (remove once confirmed): `[dusk::vr::bottle]` cork grabbed / cork out / drink
+  request / pour request, and "button held|released, cork dist X m" on button changes.
+
+**Round 4 test (screenshots: fingers/thumb inside the bottle body; asked to drop the cork
+sound on pour). Built, NOT yet retested.**
+- Placement now uses the game's own grip: bottle = tracked left fist (item joint) *
+  T(-10,-0.5,-5.5) * XYZrot(174,-47,94), the same offset setItemMatrix() applies (and the
+  pre-feature generic held-item tracking effectively gave). Worked out in bottle space: the
+  vanilla fist is ~10.4 up from the base and ~4.8 OFF the axis (on the bottle's side), neck
+  along the item joint's X. Rounds 1-3 centred an upright bottle on the fist, so its body
+  went through the fingers/thumb. kBottleGripHeightUnits/kBottleFistPushUnits and the grip
+  quaternion are gone; the gestures' neck direction now comes from the drawn bottle's +Y
+  (`s_bottleNeckWorld`, back to tracking space with -yaw).
+- Cork pop on pour/drink: the open (and drink-start) animation's own sound track (bas, set
+  by setSingleAnimeParam -> setBasAnime). Gesture-started uses call resetBasAnime() right
+  after the init; the pour/drink animations attach their own sounds as usual.
+- Side note: Python edits had rewritten CRLF files as LF; restored to CRLF.
+
+**Round 4 CONFIRMED in-headset 2026-11-15 ("looks great"): game-grip placement, manual cork,
+no pop on pour.** `[dusk::vr::bottle]` diagnostics removed. Not specifically reported on yet:
+empty-bottle swing catching, fairy release, worm pour, Physical Bottle with Third Person.

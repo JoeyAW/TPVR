@@ -126,6 +126,7 @@ UserSettings g_userSettings = {
         .vrBowSwapExtraFlipAxis {"game.vrBowSwapExtraFlipAxis", -1},
         .vrPhysicalSlingshot {"game.vrPhysicalSlingshot", true},
         .vrPhysicalBoomerang {"game.vrPhysicalBoomerang", true},
+        .vrPhysicalBottle {"game.vrPhysicalBottle", true},
         .vrPhysicalClimbing {"game.vrPhysicalClimbing", true},
         .vrPhysicalSwimming {"game.vrPhysicalSwimming", true},
         .vrMoveWhileAiming {"game.vrMoveWhileAiming", true},
@@ -474,6 +475,7 @@ void registerSettings() {
     Register(g_userSettings.game.vrBowSwapExtraFlipAxis);
     Register(g_userSettings.game.vrPhysicalSlingshot);
     Register(g_userSettings.game.vrPhysicalBoomerang);
+    Register(g_userSettings.game.vrPhysicalBottle);
     Register(g_userSettings.game.vrPhysicalClimbing);
     Register(g_userSettings.game.vrPhysicalSwimming);
     Register(g_userSettings.game.vrMoveWhileAiming);

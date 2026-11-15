@@ -1285,6 +1285,14 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                             "with your right hand. Releasing the button without throwing "
                             "cancels."
             });
+        config_bool_select(leftPane, rightPane, getSettings().game.vrPhysicalBottle,
+            {
+                .key = "Physical Bottle",
+                .helpText = "Bottles sit in your left hand and tilt with it. After pressing the "
+                            "bottle button, bring it to your mouth and tip it to drink, or tip "
+                            "it upside down to pour it out. B puts it away unused. Swing the "
+                            "empty bottle to catch things (the button still works too)."
+            });
         config_bool_select(leftPane, rightPane, getSettings().game.vrPhysicalClimbing,
             {
                 .key = "Physical Climbing",

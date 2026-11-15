@@ -452,6 +452,29 @@ float getPhysicalSlingshotBandFrame(float frameMax);
 bool isPhysicalBoomerangMode(daAlink_c* link);
 // True once per throw motion.
 bool consumePhysicalBoomerangThrow();
+// Physical bottle (game.vrPhysicalBottle, vr_link_visibility.hpp): bottle in
+// the left hand, upright in the fist. For daAlink_c, once per tick.
+bool isPhysicalBottleMode(daAlink_c* link);
+// Physical bottle could be used right now (first person, on foot): the bottle
+// button takes a full bottle out into the hand instead of using it.
+bool isPhysicalBottleAllowed(daAlink_c* link);
+// Each tick a full bottle is out: whether its item button is held (the cork
+// is pulled with it held).
+void setPhysicalBottleButtonHeld(bool held);
+// True once when the cork comes out (play the sound).
+bool consumePhysicalBottleCorkPop();
+// The held, uncorked bottle's gesture, once: 1 = drink (at the mouth),
+// 2 = pour (tipped over), 0 = nothing.
+int consumePhysicalBottleUse();
+// The bottle's neck is at the mouth and tipped toward it (drink now).
+bool isPhysicalBottleAtMouth();
+// The bottle is tipped neck-down, away from the mouth (pour now).
+bool isPhysicalBottleTipped();
+// True once per swing of the empty bottle.
+bool consumePhysicalBottleSwing();
+// The bottle's base transform as placed in the hand this frame; false if it
+// isn't hand-placed.
+bool getPhysicalBottleMtx(float (*outMtx)[4]);
 // Physical sheathing (game.vrPhysicalSheath): 1 = draw the sword, 2 = put it
 // away, 0 = nothing. Once per gesture.
 int consumePhysicalSheathRequest();

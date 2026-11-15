@@ -161,6 +161,17 @@ vr_combat::SwingDetector g_boomerangThrow = [] {
     return d;
 }();
 
+// Physical Bottle: swinging the empty bottle (left hand). A bit gentler than
+// a sword swing, since you're scooping; untested.
+vr_combat::SwingDetector g_bottleSwing = [] {
+    vr_combat::SwingDetector d;
+    d.triggerSpeed = 2.0f;
+    d.resetSpeed = 0.4f;
+    d.minSwingDistance = 0.15f;
+    d.cooldownSec = 0.0;
+    return d;
+}();
+
 // LEFT hand -> B (attack), wired below -- sword is Link's LEFT hand
 // (section 16 of vr-mod-notes), so a swing of the hand actually holding the
 // sword is the physically-intuitive gesture for this, unlike the deferred
@@ -849,6 +860,42 @@ bool isPhysicalBoomerangMode(daAlink_c* link) {
 
 bool consumePhysicalBoomerangThrow() {
     return isImmersiveVr() && vr_link::consumePhysicalBoomerangThrow();
+}
+
+bool isPhysicalBottleMode(daAlink_c* link) {
+    return isImmersiveVr() && vr_link::isPhysicalBottleMode(link);
+}
+
+bool isPhysicalBottleAllowed(daAlink_c* link) {
+    return isImmersiveVr() && vr_link::isPhysicalBottleAllowed(link);
+}
+
+void setPhysicalBottleButtonHeld(bool held) {
+    if (isImmersiveVr()) vr_link::setPhysicalBottleButtonHeld(held);
+}
+
+bool consumePhysicalBottleCorkPop() {
+    return isImmersiveVr() && vr_link::consumePhysicalBottleCorkPop();
+}
+
+int consumePhysicalBottleUse() {
+    return isImmersiveVr() ? static_cast<int>(vr_link::consumePhysicalBottleUse()) : 0;
+}
+
+bool isPhysicalBottleAtMouth() {
+    return isImmersiveVr() && vr_link::isPhysicalBottleAtMouth();
+}
+
+bool isPhysicalBottleTipped() {
+    return isImmersiveVr() && vr_link::isPhysicalBottleTipped();
+}
+
+bool consumePhysicalBottleSwing() {
+    return isImmersiveVr() && vr_link::consumePhysicalBottleSwing();
+}
+
+bool getPhysicalBottleMtx(float (*outMtx)[4]) {
+    return isImmersiveVr() && vr_link::getPhysicalBottleMtx(outMtx);
 }
 
 int consumePhysicalSheathRequest() {
@@ -2338,6 +2385,36 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     const bool sheathHoldsLeftSqueeze = sheathHoldsGrip && !swapSwordShieldHands;
     const bool sheathHoldsRightSqueeze = sheathHoldsGrip && swapSwordShieldHands;
 
+    // Physical bottle: drink/pour gestures and the empty-bottle swing, all on
+    // the left hand (vr_link::updatePhysicalBottleState()). While a bottle is
+    // out, the swing/thrust gestures below don't press B or R.
+    const vr_combat::SwingEvent bottleSwingEvent = g_bottleSwing.update(
+        {{leftPose.position.x, leftPose.position.y, leftPose.position.z}, static_cast<double>(time) * 1e-9});
+    const bool bottleOwnsGestures = vr_link::updatePhysicalBottleState(
+        !screenMode, hmdPose, leftPose, rightPose, dusk::vr::getSmoothTurnYawRad(), bottleSwingEvent.triggered,
+        static_cast<float>(pacing.dt));
+    if (vr_link::consumeBottleHapticEvent() != 0) {
+        XrHapticActionInfo info{XR_TYPE_HAPTIC_ACTION_INFO};
+        info.action = g_hapticAction;
+        info.subactionPath = g_leftHandPath;
+        XrHapticVibration vib{XR_TYPE_HAPTIC_VIBRATION};
+        vib.duration = 20'000'000;  // ns
+        vib.frequency = XR_FREQUENCY_UNSPECIFIED;
+        vib.amplitude = 0.3f;
+        xrApplyHapticFeedback(g_session->session(), &info, reinterpret_cast<const XrHapticBaseHeader*>(&vib));
+    }
+    // Cork: light tap on the right hand when it takes hold, stronger when it comes out.
+    if (const int corkEvent = vr_link::consumeBottleCorkHapticEvent(); corkEvent != 0) {
+        XrHapticActionInfo info{XR_TYPE_HAPTIC_ACTION_INFO};
+        info.action = g_hapticAction;
+        info.subactionPath = g_rightHandPath;
+        XrHapticVibration vib{XR_TYPE_HAPTIC_VIBRATION};
+        vib.duration = corkEvent == 2 ? 40'000'000 : 15'000'000;  // ns
+        vib.frequency = XR_FREQUENCY_UNSPECIFIED;
+        vib.amplitude = corkEvent == 2 ? 0.6f : 0.25f;
+        xrApplyHapticFeedback(g_session->session(), &info, reinterpret_cast<const XrHapticBaseHeader*>(&vib));
+    }
+
     // FIX (2026-08-13) -- user report: "swinging fast left and right
     // repeatedly is the equivalent of pressing B repeatedly on a
     // controller, and it did not attack repeatedly" -- ruled out (by the
@@ -2372,7 +2449,7 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     static double s_leftSwingButtonHoldRemaining = 0.0;
     if (screenMode) {
         s_leftSwingButtonHoldRemaining = 0.0;
-    } else if (leftSwingEvent.triggered && !boomerangReady) {
+    } else if (leftSwingEvent.triggered && !boomerangReady && !bottleOwnsGestures) {
         s_leftSwingButtonHoldRemaining = kSwingButtonHoldSec;
     } else {
         s_leftSwingButtonHoldRemaining =
@@ -2577,7 +2654,7 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     if (screenMode) {
         s_rightThrustForceReleaseRemaining = 0.0;
         s_rightThrustHoldRemaining = 0.0;
-    } else if (rightThrustEvent.triggered && !boomerangReady) {
+    } else if (rightThrustEvent.triggered && !boomerangReady && !bottleOwnsGestures) {
         s_rightThrustForceReleaseRemaining = kThrustForceReleaseSec;
         s_rightThrustHoldRemaining = 0.0; // restart release phase even if previous pulse's hold was still running
     } else {

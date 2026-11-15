@@ -495,6 +495,10 @@ struct UserSettings {
         // the left controller. Hold the item button, then throw with the
         // right hand; releasing without throwing cancels.
         ConfigVar<bool> vrPhysicalBoomerang;
+        // Physical bottle: the bottle sits in the left hand and tilts with it.
+        // Bring it to your mouth and tip it to drink, tip it over to pour,
+        // swing the empty bottle to catch. B cancels a drink/pour. Default on.
+        ConfigVar<bool> vrPhysicalBottle;
         // Ladders and climbable walls: squeeze to grab, pull the hand down
         // (or sideways on walls) to climb. The stick still works too.
         ConfigVar<bool> vrPhysicalClimbing;

@@ -39,6 +39,7 @@
 #include "JSystem/J3DGraphBase/J3DShape.h"
 #include "f_op/f_op_actor_iter.h" // Physical Grabbing: touch search
 #include "m_Do/m_Do_mtx.h"
+#include "SSystem/SComponent/c_math.h"  // Physical Bottle: cM_deg2s (cork offset)
 #include "f_op/f_op_view.h"
 #include "JSystem/J3DGraphAnimator/J3DModel.h"
 #include "JSystem/J3DGraphAnimator/J3DModelData.h"
@@ -980,6 +981,26 @@ inline bool isHookshotAirborneOrHanging(daAlink_c* link);
 inline bool isHookshotAiming(daAlink_c* link);
 inline bool isRealCutsceneRunning();
 
+// "Physical Bottle" (game.vrPhysicalBottle): drinking, pouring, catching and
+// the "you got X" pose each run as a short compulsory game event, which
+// isRealCutsceneRunning() would otherwise send to third person. On foot only
+// (horse/canoe drinks are their own procs); the scripted drink inside a
+// cutscene (demo mode 42) keeps the normal handling. Doesn't call
+// isFirstPerson() (it is called from there).
+inline bool isPhysicalBottleEventProc(daAlink_c* link) {
+    if (!link || !dusk::getSettings().game.vrPhysicalBottle.getValue()) return false;
+    switch (link->mProcID) {
+    case daAlink_c::PROC_BOTTLE_DRINK:
+    case daAlink_c::PROC_BOTTLE_OPEN:
+    case daAlink_c::PROC_BOTTLE_SWING:
+    case daAlink_c::PROC_BOTTLE_GET:
+        break;
+    default:
+        return false;
+    }
+    return link->getDemoMode() != daPy_demo_c::DEMO_UNK_42_e;
+}
+
 // "Third Person" (game.vrThirdPerson), or "Third Person On Epona"
 // (game.vrThirdPersonOnEpona) while riding her. Every vrThirdPerson check
 // that's about the current view goes through this.
@@ -1043,6 +1064,9 @@ inline bool isFirstPerson(daAlink_c* link) {
         !isHookshotAirborneOrHanging(link) && !isHookshotAiming(link)) return false;
 
     if (!link->checkEventRun()) return true;  // no event at all -- ordinary gameplay
+
+    // Physical Bottle: the bottle's own short event stays first person.
+    if (isPhysicalBottleEventProc(link)) return !link->checkPlayerNoDraw();
 
     dEvt_control_c* event = dComIfGp_getEvent();
     if (!dComIfGp_event_runCheck() || !event) return false;
@@ -3646,8 +3670,346 @@ inline bool consumePhysicalBoomerangThrow() {
     return thrown;
 }
 
+// ---- "Physical Bottle" (game.vrPhysicalBottle) ----
+// The bottle button takes any bottle out into the left hand (the hand the
+// game holds bottles in) like the empty one, so Link can walk around with it
+// (checkNewItemChange(), d_a_alink.cpp). It sits in the tracked fist with the
+// game's own bottle grip and tilts with the controller, instead of following
+// Link's bottle animations.
+// - Cork: a full bottle comes out corked. Hold the bottle button, bring the
+//   right hand to the cork and pull it away: the cork comes out in the right
+//   hand. While a full bottle is out, the button does nothing else.
+// - Drinking (uncorked): bring the neck to the mouth, tipped toward it ->
+//   the game's drink starts (checkItemAction()) and switches to drinking
+//   right away (commonBottleDrink(), d_a_alink_bottle.inc).
+// - Pouring (uncorked; water, fairy, worm): tip it neck-down -> the game's
+//   open/pour starts at its uncork (procBottleOpen()).
+// - Empty bottle: no cork. Taking it out doesn't swing it (the base game
+//   does); a fast left-hand swing, or the button, swings it. The game picks
+//   what it catches, the same as for the button.
+// First person, on foot. Gestures are read in tracking space (metres).
+inline bool isPhysicalBottleAllowed(daAlink_c* link) {
+    if (!link || !dusk::getSettings().game.vrPhysicalBottle.getValue() || !isFirstPerson(link)) return false;
+    if (link->checkReinRide() || link->checkCanoeRide() || link->checkBoardRide()) return false;
+    return link->getDemoMode() != daPy_demo_c::DEMO_UNK_42_e;
+}
+
+inline bool isPhysicalBottleMode(daAlink_c* link) {
+    if (!isPhysicalBottleAllowed(link)) return false;
+    const u16 equip = link->getEquipItem();
+    return link->checkBottleItem(equip) && !link->checkOilBottleItemNotGet(equip);
+}
+
+enum class BottleUse { None = 0, Drink = 1, Pour = 2 };
+
+// First guesses, untested. The lips sit below and a little ahead of the
+// headset's centre eye; the bottle's mouth is this far up the neck from the
+// grip point. "Up" limits are the neck direction's world-up component
+// (1 upright, 0 level, -1 upside down). Exit limits are looser so the states
+// don't flicker at their edges.
+inline constexpr float kBottleNeckM = 0.10f;
+inline constexpr float kBottleMouthDownM = 0.08f;
+inline constexpr float kBottleMouthFwdM = 0.03f;
+inline constexpr float kBottleMouthDist = 0.11f, kBottleMouthDistExit = 0.16f;
+inline constexpr float kBottleDrinkMaxUp = 0.6f, kBottleDrinkMaxUpExit = 0.75f;
+inline constexpr float kBottleDrinkMinFacing = 0.2f;  // neck toward the mouth, not the bottom
+inline constexpr float kBottlePourMaxUp = -0.3f, kBottlePourMaxUpExit = -0.1f;
+// Long enough for the 30Hz tick to see a quick gesture.
+inline constexpr float kBottleGestureLatchSec = 0.15f;
+inline constexpr float kBottleSwingLatchSec = 0.3f;
+inline constexpr float kBottleUseLatchSec = 0.3f;
+// Cork: the right grip within this of the bottle's mouth grabs it (with the
+// bottle button held); pulled this far away, it comes out.
+inline constexpr float kBottleCorkGrabM = 0.09f;
+inline constexpr float kBottleCorkPullM = 0.15f;
+// The game reports the bottle button every tick it can (~33ms).
+inline constexpr float kBottleButtonHoldSec = 0.12f;
+// The bottle model's mouth, up its +Y from its base (procBottleOpen()'s
+// bottleTop).
+inline constexpr float kBottleMouthUnits = 25.0f;
+
+namespace detail {
+inline bool s_bottleAtMouth = false;
+inline bool s_bottleTipped = false;
+inline float s_bottleAtMouthLatchSec = 0.0f;
+inline float s_bottleTippedLatchSec = 0.0f;
+inline float s_bottleSwingLatchSec = 0.0f;
+inline BottleUse s_bottleUse = BottleUse::None;
+inline float s_bottleUseLatchSec = 0.0f;
+inline int s_bottleHapticEvent = 0;  // 1 = drink/pour started
+inline float s_bottleButtonSec = 0.0f;  // bottle button held (reported by the game)
+inline u16 s_bottleCorkItem = 0;        // the item the cork state belongs to
+inline bool s_bottleUncorked = false;
+inline bool s_bottleCorkGripped = false;
+inline bool s_bottleCorkPopped = false;  // for the game's sound, once
+inline int s_bottleCorkHapticEvent = 0;  // right hand: 1 = grabbed the cork, 2 = pulled it out
+// From the last placement, in the world: the bottle's mouth relative to the
+// drawn left hand, and the right fist relative to the drawn right hand. The
+// gestures carry these into tracking space, so they match what's drawn.
+inline cXyz s_bottleMouthFromLeftHand{};
+inline cXyz s_rightFistFromRightHand{};
+inline bool s_bottleVisualOffsetsValid = false;
+inline cXyz s_bottleNeckWorld{};  // the drawn bottle's +Y (neck), world
+inline bool s_bottleGripValid = false;
+inline Mtx s_bottleMtx;  // the bottle's base transform as last placed
+inline bool s_bottleMtxValid = false;
+}  // namespace detail
+
+// Once per real frame from tick(). head/leftGrip in tracking space, yawRad the
+// smooth-turn yaw, swingTriggered the left-hand bottle swing detector's edge.
+// Returns true while the bottle owns left-hand gestures (sword swing -> B and
+// shield bash stay off).
+inline bool updatePhysicalBottleState(bool enabled, const XrPosef& head, const XrPosef& leftGrip,
+                                      const XrPosef& rightGrip, float yawRad, bool swingTriggered, float dt) {
+    using namespace detail;
+    auto tickDown = [dt](float& t) { t = std::max(0.0f, t - dt); };
+    tickDown(s_bottleAtMouthLatchSec);
+    tickDown(s_bottleTippedLatchSec);
+    tickDown(s_bottleSwingLatchSec);
+    tickDown(s_bottleUseLatchSec);
+    tickDown(s_bottleButtonSec);
+    if (s_bottleUseLatchSec <= 0.0f) s_bottleUse = BottleUse::None;
+
+    auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
+    if (!enabled || !isPhysicalBottleMode(link)) {
+        s_bottleAtMouth = s_bottleTipped = false;
+        s_bottleAtMouthLatchSec = s_bottleTippedLatchSec = s_bottleSwingLatchSec = 0.0f;
+        s_bottleUse = BottleUse::None;
+        s_bottleUseLatchSec = 0.0f;
+        s_bottleGripValid = false;
+        s_bottleCorkItem = 0;
+        s_bottleUncorked = s_bottleCorkGripped = false;
+        return false;
+    }
+    s_bottleGripValid = true;
+
+    const XrQuaternionf& g = leftGrip.orientation;
+    // Neck direction: the drawn bottle's, back in tracking space (first frame:
+    // the grip's forward).
+    Vec3f neck = rotateVecByQuat(g.x, g.y, g.z, g.w, Vec3f{0.f, 0.f, -1.f});
+    if (s_bottleVisualOffsetsValid) {
+        const XrVector3f n = dusk::vr::rotateYawXr(
+            XrVector3f{s_bottleNeckWorld.x, s_bottleNeckWorld.y, s_bottleNeckWorld.z}, -yawRad);
+        neck = Vec3f{n.x, n.y, n.z};
+    }
+    const XrQuaternionf& h = head.orientation;
+    const Vec3f headDown = rotateVecByQuat(h.x, h.y, h.z, h.w, Vec3f{0.f, -1.f, 0.f});
+    const Vec3f headFwd = rotateVecByQuat(h.x, h.y, h.z, h.w, Vec3f{0.f, 0.f, -1.f});
+    const Vec3f mouth{head.position.x + headDown.x * kBottleMouthDownM + headFwd.x * kBottleMouthFwdM,
+                      head.position.y + headDown.y * kBottleMouthDownM + headFwd.y * kBottleMouthFwdM,
+                      head.position.z + headDown.z * kBottleMouthDownM + headFwd.z * kBottleMouthFwdM};
+    // The bottle's mouth and the right fist as drawn (world offsets from the
+    // drawn hands, which are the controllers scaled by VR_SCALE_FACTOR and
+    // turned by the smooth-turn yaw -- buildHandMtx()). First frame: a guess.
+    Vec3f tip{leftGrip.position.x + neck.x * kBottleNeckM, leftGrip.position.y + neck.y * kBottleNeckM,
+              leftGrip.position.z + neck.z * kBottleNeckM};
+    Vec3f rightFist{rightGrip.position.x, rightGrip.position.y, rightGrip.position.z};
+    if (s_bottleVisualOffsetsValid) {
+        auto toTracking = [yawRad](const cXyz& w) {
+            return dusk::vr::rotateYawXr(
+                XrVector3f{w.x / VR_SCALE_FACTOR, w.y / VR_SCALE_FACTOR, w.z / VR_SCALE_FACTOR}, -yawRad);
+        };
+        const XrVector3f mo = toTracking(s_bottleMouthFromLeftHand);
+        const XrVector3f fo = toTracking(s_rightFistFromRightHand);
+        tip = Vec3f{leftGrip.position.x + mo.x, leftGrip.position.y + mo.y, leftGrip.position.z + mo.z};
+        rightFist = Vec3f{rightGrip.position.x + fo.x, rightGrip.position.y + fo.y, rightGrip.position.z + fo.z};
+    }
+    const float tx = tip.x - mouth.x, ty = tip.y - mouth.y, tz = tip.z - mouth.z;
+    const float dist = std::sqrt(tx * tx + ty * ty + tz * tz);
+    const float mx = mouth.x - leftGrip.position.x, my = mouth.y - leftGrip.position.y,
+                mz = mouth.z - leftGrip.position.z;
+    const float toMouthLen = std::sqrt(mx * mx + my * my + mz * mz);
+    const float facing = toMouthLen > 0.0001f ? (neck.x * mx + neck.y * my + neck.z * mz) / toMouthLen : 1.0f;
+
+    const bool wasAtMouth = s_bottleAtMouth;
+    s_bottleAtMouth = wasAtMouth ? dist < kBottleMouthDistExit && neck.y < kBottleDrinkMaxUpExit &&
+                                       facing > kBottleDrinkMinFacing - 0.1f
+                                 : dist < kBottleMouthDist && neck.y < kBottleDrinkMaxUp &&
+                                       facing > kBottleDrinkMinFacing;
+    const bool wasTipped = s_bottleTipped;
+    s_bottleTipped = !s_bottleAtMouth && neck.y < (wasTipped ? kBottlePourMaxUpExit : kBottlePourMaxUp);
+    if (s_bottleAtMouth) s_bottleAtMouthLatchSec = kBottleGestureLatchSec;
+    if (s_bottleTipped) s_bottleTippedLatchSec = kBottleGestureLatchSec;
+
+    const u16 proc = link->mProcID;
+    const u16 equip = link->getEquipItem();
+    const bool inUse = proc == daAlink_c::PROC_BOTTLE_DRINK || proc == daAlink_c::PROC_BOTTLE_OPEN ||
+                       proc == daAlink_c::PROC_BOTTLE_SWING || proc == daAlink_c::PROC_BOTTLE_GET;
+    const bool full = daPy_py_c::checkDrinkBottleItem(equip) || daPy_py_c::checkOpenBottleItem(equip);
+
+    // Cork. A different bottle (or contents) comes out corked again. The drink/
+    // pour procs re-make the same item's model, so the state survives them.
+    if (equip != s_bottleCorkItem) {
+        s_bottleCorkItem = equip;
+        s_bottleUncorked = s_bottleCorkGripped = false;
+    }
+    if (full && !s_bottleUncorked && !inUse) {
+        const float cx = rightFist.x - tip.x, cy = rightFist.y - tip.y, cz = rightFist.z - tip.z;
+        const float corkDist = std::sqrt(cx * cx + cy * cy + cz * cz);
+        const bool buttonHeld = s_bottleButtonSec > 0.0f;
+        if (!buttonHeld) {
+            s_bottleCorkGripped = false;
+        } else if (!s_bottleCorkGripped && corkDist < kBottleCorkGrabM) {
+            s_bottleCorkGripped = true;
+            s_bottleCorkHapticEvent = std::max(s_bottleCorkHapticEvent, 1);
+        } else if (s_bottleCorkGripped && corkDist > kBottleCorkPullM) {
+            s_bottleCorkGripped = false;
+            s_bottleUncorked = true;
+            s_bottleCorkPopped = true;
+            s_bottleCorkHapticEvent = 2;
+        }
+    } else {
+        s_bottleCorkGripped = false;
+    }
+
+    // Held and uncorked (not already being used): request the drink/pour while
+    // the gesture holds; the game takes it on its next tick that allows an
+    // item action.
+    BottleUse use = BottleUse::None;
+    if (!inUse && s_bottleUncorked && s_bottleAtMouth && daPy_py_c::checkDrinkBottleItem(equip)) {
+        use = BottleUse::Drink;
+    }
+    if (!inUse && s_bottleUncorked && s_bottleTipped && daPy_py_c::checkOpenBottleItem(equip)) {
+        use = BottleUse::Pour;
+    }
+    if (use != BottleUse::None) {
+        if (s_bottleUse != use) s_bottleHapticEvent = 1;
+        s_bottleUse = use;
+        s_bottleUseLatchSec = kBottleUseLatchSec;
+    }
+
+    if (swingTriggered && equip == dItemNo_EMPTY_BOTTLE_e && !inUse) {
+        s_bottleSwingLatchSec = kBottleSwingLatchSec;
+    }
+    return true;
+}
+
+inline bool isPhysicalBottleAtMouth() {
+    return detail::s_bottleAtMouth || detail::s_bottleAtMouthLatchSec > 0.0f;
+}
+
+inline bool isPhysicalBottleTipped() {
+    return detail::s_bottleTipped || detail::s_bottleTippedLatchSec > 0.0f;
+}
+
+// The game, each tick a full bottle is out: whether its button is held.
+inline void setPhysicalBottleButtonHeld(bool held) {
+    detail::s_bottleButtonSec = held ? kBottleButtonHoldSec : 0.0f;
+}
+
+// True once when the cork comes out (the game plays the sound).
+inline bool consumePhysicalBottleCorkPop() {
+    const bool popped = detail::s_bottleCorkPopped;
+    detail::s_bottleCorkPopped = false;
+    return popped;
+}
+
+// Right hand: 1 = grabbed the cork (light tap), 2 = pulled it out. Once.
+inline int consumeBottleCorkHapticEvent() {
+    const int e = detail::s_bottleCorkHapticEvent;
+    detail::s_bottleCorkHapticEvent = 0;
+    return e;
+}
+
+// The held bottle's drink/pour gesture, once.
+inline BottleUse consumePhysicalBottleUse() {
+    const BottleUse use = detail::s_bottleUse;
+    detail::s_bottleUse = BottleUse::None;
+    detail::s_bottleUseLatchSec = 0.0f;
+    return use;
+}
+
+// True once per swing of the empty bottle.
+inline bool consumePhysicalBottleSwing() {
+    const bool swung = detail::s_bottleSwingLatchSec > 0.0f;
+    detail::s_bottleSwingLatchSec = 0.0f;
+    return swung;
+}
+
+// 1 = a drink/pour gesture was made (light tap), 0 none. Once.
+inline int consumeBottleHapticEvent() {
+    const int e = detail::s_bottleHapticEvent;
+    detail::s_bottleHapticEvent = 0;
+    return e;
+}
+
+// The bottle's base transform as last placed in the hand (for where water
+// pours from, a fairy or worm comes out). False if it isn't hand-placed.
+inline bool getPhysicalBottleMtx(Mtx out) {
+    if (!detail::s_bottleMtxValid) return false;
+    MTXCopy(detail::s_bottleMtx, out);
+    return true;
+}
+
+// Puts the bottle, and whatever's inside it (fairy, worm, bee larva:
+// mpHookTipModel, which setItemMatrix() gives the same matrix), in the left
+// fist. The fist is the left item joint carried onto the tracked hand (the
+// hand joint itself is at the wrist: the bottle sat there in-headset
+// 2026-11-15).
+inline bool applyPhysicalBottleMtx(daAlink_c* link, J3DModel* model) {
+    using namespace detail;
+    if (!s_bottleGripValid || !s_handMtxValid) return false;
+    captureRawBodyJointsOnce(link);
+    const u16 itemJnt = link->getLeftItemJntNo();
+    if (!s_rawBodyModelData || itemJnt >= s_rawBodyAnmNum) return false;
+    Mtx fistMtx;
+    if (!computeTrackedItemMtx(fistMtx, s_rawBodyAnm[itemJnt], s_rawLeftHandJointMtx, s_leftHandMtx)) {
+        return false;
+    }
+    // The game's own bottle grip (setItemMatrix()'s bottle branch) on the
+    // tracked fist: the fist sits on the bottle's side, ~10 up from its base
+    // and ~5 off its axis, the neck along the item joint's X. An upright
+    // bottle centred on the fist (rounds 1-3) put its body through the
+    // fingers or thumb.
+    const cXyz wrist = ikPos(s_leftHandMtx);
+    Mtx& m = s_bottleMtx;
+    mDoMtx_stack_c::copy(fistMtx);
+    mDoMtx_stack_c::transM(-10.0f, -0.5f, -5.5f);
+    mDoMtx_stack_c::XYZrotM(cM_deg2s(174.0f), cM_deg2s(-47.0f), cM_deg2s(94.0f));
+    MTXCopy(mDoMtx_stack_c::get(), m);
+    s_bottleNeckWorld.set(m[0][1], m[1][1], m[2][1]);
+    model->setBaseTRMtx(m);
+    model->calc();
+    s_bottleMtxValid = true;
+    const cXyz mouthLocal(0.0f, kBottleMouthUnits, 0.0f);
+    cXyz mouthWorld;
+    MTXMultVec(m, &mouthLocal, &mouthWorld);
+    s_bottleMouthFromLeftHand = mouthWorld - wrist;
+
+    // Cork (joint 1). Out -- pulled by hand, or by the game's own open
+    // animation (mItemMode, which also makes bottleModelCallBack() move it to
+    // the animated right hand during calc()) -- it goes in the tracked right
+    // fist, with bottleModelCallBack()'s own offset from the item joint.
+    // Otherwise calc() left it in the bottle. The right fist is also where the
+    // cork is grabbed from (updatePhysicalBottleState()).
+    const u16 rightItemJnt = link->getRightItemJntNo();
+    Mtx rightFist;
+    const bool rightFistValid =
+        rightItemJnt < s_rawBodyAnmNum &&
+        computeTrackedItemMtx(rightFist, s_rawBodyAnm[rightItemJnt], s_rawRightHandJointMtx, s_rightHandMtx);
+    if (rightFistValid) {
+        s_rightFistFromRightHand = ikPos(rightFist) - ikPos(s_rightHandMtx);
+        s_bottleVisualOffsetsValid = true;
+    }
+    if ((s_bottleUncorked || link->mItemMode != 0) && model->getModelData()->getJointNum() > 1) {
+        if (rightFistValid) {
+            mDoMtx_stack_c::copy(rightFist);
+            mDoMtx_stack_c::transM(-3.0f, -1.0f, 0.3f);
+            mDoMtx_stack_c::XYZrotM(cM_deg2s(102.0f), cM_deg2s(-0.5f), cM_deg2s(-122.0f));
+            mDoMtx_copy(mDoMtx_stack_c::get(), model->getAnmMtx(1));
+        }
+    }
+    if (J3DModel* inside = link->mpHookTipModel) {
+        inside->setBaseTRMtx(m);
+        inside->calc();
+        markModelJointsLive(inside);
+    }
+    return true;
+}
+
 inline void refreshTrackedHeldItemMtxLive() {
     detail::s_heldItemTrackedThisFrame = false;
+    detail::s_bottleMtxValid = false;
     // particle::clear_live_positions() used to run here, which wiped the
     // marks refreshBootsLive() (inside refreshFullBodyIkLive(), earlier in
     // the frame) had just made. tick() now clears once, before the first
@@ -3685,6 +4047,10 @@ inline void refreshTrackedHeldItemMtxLive() {
                                         detail::s_heldItemRestingValid, detail::s_heldItemRestingPrevMtx,
                                         detail::s_heldItemRestingCurrMtx);
             markModelJointsLive(heldItemModel);
+        } else if (attach == HeldItemAttach::Left && isPhysicalBottleMode(link) &&
+                   applyPhysicalBottleMtx(link, heldItemModel)) {
+            markModelJointsLive(heldItemModel);
+            detail::s_heldItemTrackedThisFrame = true;
         } else if (applyTrackedItemMtxIfAttached(heldItemModel, attached, detail::s_heldItemRawBasis.mtx,
                                                   handJointMtx, trackedHandMtx, mirrorAxis, extraFlipAxis)) {
             markModelJointsLive(heldItemModel);
@@ -6935,7 +7301,9 @@ inline cXyz computeRawEyeAnchor(daAlink_c* link) {
         trackCoreAnchorPosition(link, /*allowRecalibration=*/false);
         return *link->getSubjectEyePos();
     }
-    if (!link->checkEventRun()) {
+    // Physical Bottle's events count as gameplay here: the head-joint anchor
+    // would follow the drink animation tipping Link's head back.
+    if (!link->checkEventRun() || isPhysicalBottleEventProc(link)) {
         // Ordinary gameplay -- root/core-anchored, section 23.
         cXyz eye = computeRawCoreAnchoredEye(link);
         if (link->checkSpinnerRide() || link->checkSpinnerReady()) {

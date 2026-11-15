@@ -140,6 +140,15 @@ void daAlink_c::setBottleModel(u16 i_itemNo) {
         field_0x072c->setFrame(2.0f);
         item_model_data->getMaterialNodePointer(0)->getShape()->hide();
     }
+
+#if TARGET_PC
+    // VR Physical Bottle: drinkable bottles show their cork too (material 0,
+    // on joint 1 -- the shape procBottleGet() shows when Link corks a catch),
+    // since it's pulled out by hand.
+    if ((checkDrinkBottleItem(i_itemNo) || checkOpenBottleItem(i_itemNo)) && dusk::vr::isPhysicalBottleAllowed(this)) {
+        item_model_data->getMaterialNodePointer(0)->getShape()->show();
+    }
+#endif
 }
 
 int daAlink_c::commonBottleDrink(BOOL param_0) {
@@ -157,7 +166,22 @@ int daAlink_c::commonBottleDrink(BOOL param_0) {
     }
 
     if (current_anm == getMainBckData(ANM_BOTTLE_DRINK_START)->m_underID) {
-        if (checkAnmEnd(frameCtrl_p)) {
+        BOOL startDrink = checkAnmEnd(frameCtrl_p);
+#if TARGET_PC
+        // VR Physical Bottle: with the bottle already at the mouth (the drink
+        // was started by bringing it there), skip the raise and drink now.
+        if (!startDrink && !param_0 && mProcID == PROC_BOTTLE_DRINK && dusk::vr::isPhysicalBottleMode(this) &&
+            dusk::vr::isPhysicalBottleAtMouth())
+        {
+            startDrink = TRUE;
+            if (frameCtrl_p->getFrame() < 50.0f) {
+                // Skipped the frame-50 step below: start the liquid's sway.
+                field_0x071c->setFrame(0.0f);
+                mHeldItemModel->getModelData()->entryTexMtxAnimator(field_0x071c);
+            }
+        }
+#endif
+        if (startDrink) {
             if (param_0) {
                 setUpperAnimeBaseMorf(getMainBckData(ANM_BOTTLE_DRINK)->m_upperID, 0.0f);
                 setFacePriAnime(ANM_BOTTLE_DRINK);
@@ -372,6 +396,14 @@ int daAlink_c::procBottleDrinkInit(u16 i_itemNo) {
     field_0x2f98 = 4;
 
     setSingleAnimeParam(ANM_BOTTLE_DRINK_START, &mpHIO->mItem.mBottle.m.mStartDrinkAnm);
+#if TARGET_PC
+    // VR Physical Bottle: this bottle was already out in the hand. Put it away
+    // first so it isn't kept as the item to go back to afterwards (its contents
+    // are about to change).
+    if (mEquipItem == i_itemNo) {
+        deleteEquipItem(FALSE, FALSE);
+    }
+#endif
     keepItemData();
     setBottleModel(i_itemNo);
     dComIfGp_setPlayerStatus1(0, 0x2000);
@@ -407,6 +439,14 @@ int daAlink_c::procBottleOpenInit(u16 i_itemNo) {
     field_0x2f98 = 4;
 
     setSingleAnimeParam(ANM_BOTTLE_OPEN, &mpHIO->mItem.mBottle.m.mOpenBottleAnm);
+#if TARGET_PC
+    // VR Physical Bottle: this bottle was already out in the hand. Put it away
+    // first so it isn't kept as the item to go back to afterwards (its contents
+    // are about to change).
+    if (mEquipItem == i_itemNo) {
+        deleteEquipItem(FALSE, FALSE);
+    }
+#endif
     keepItemData();
     setBottleModel(i_itemNo);
     dComIfGp_setPlayerStatus1(0, 0x4000);
@@ -446,6 +486,17 @@ int daAlink_c::procBottleOpen() {
     static Vec const bottleTop = {0.0f, 25.0f, 0.0f};
     daPy_frameCtrl_c* frameCtrl_p = mUnderFrameCtrl;
 
+    // Where the bottle is: VR Physical Bottle places it in the tracked hand
+    // (the model's own matrix is the animated pose at this point of the tick).
+    MtxP bottleMtx = mHeldItemModel->getBaseTRMtx();
+#if TARGET_PC
+    Mtx vrBottleMtx;
+    const bool vrPhysical = dusk::vr::isPhysicalBottleMode(this);
+    if (vrPhysical && dusk::vr::getPhysicalBottleMtx(vrBottleMtx)) {
+        bottleMtx = vrBottleMtx;
+    }
+#endif
+
     if (mProcVar2.field_0x300c == 0) {
         simpleAnmPlay(field_0x0718);
     } else if (mProcVar2.field_0x300c == 2) {
@@ -458,7 +509,18 @@ int daAlink_c::procBottleOpen() {
     }
 
     if (checkUnderMove0BckNoArc(ANM_BOTTLE_OPEN)) {
-        if (checkAnmEnd(frameCtrl_p)) {
+        BOOL startPour = checkAnmEnd(frameCtrl_p);
+#if TARGET_PC
+        // VR Physical Bottle (not fairies, which fly out with the cork): with
+        // the bottle tipped over, pour as soon as the cork is out (mItemMode,
+        // set at frame 30 below) instead of at the end of the open animation.
+        if (!startPour && vrPhysical && mEquipItem != dItemNo_FAIRY_e && mItemMode != 0 &&
+            dusk::vr::isPhysicalBottleTipped())
+        {
+            startPour = TRUE;
+        }
+#endif
+        if (startPour) {
             if (mEquipItem == dItemNo_FAIRY_e) {
                 setSingleAnimeBaseMorf(ANM_BOTTLE_FAIRY, -1.0f);
             } else {
@@ -479,7 +541,7 @@ int daAlink_c::procBottleOpen() {
 
             if (mEquipItem == dItemNo_FAIRY_e) {
                 cXyz fairyPos;
-                mDoMtx_multVec(mHeldItemModel->getBaseTRMtx(), &bottleTop, &fairyPos);
+                mDoMtx_multVec(bottleMtx, &bottleTop, &fairyPos);
 
                 if (makeFairy(&fairyPos, 0)) {
                     onModeFlg(0x8000000);
@@ -513,7 +575,7 @@ int daAlink_c::procBottleOpen() {
             if (insect_p != NULL) {
                 mpHookTipModel = NULL;
                 mProcVar0.field_0x3008 = 1;
-                mDoMtx_multVec(mHeldItemModel->getBaseTRMtx(), &bottleTop, &insect_p->current.pos);
+                mDoMtx_multVec(bottleMtx, &bottleTop, &insect_p->current.pos);
                 fopAcM_OnStatus(insect_p, 0x800);
 
                 if (mProcVar1.field_0x300a != 0) {

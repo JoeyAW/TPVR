@@ -79,6 +79,8 @@ public:
 
     bool handle_nav_event(Rml::Event& event);
 
+    Rml::ElementDocument* rml_document() const { return mDocument; }
+
 protected:
     virtual bool handle_nav_command(Rml::Event& event, NavCommand cmd);
 

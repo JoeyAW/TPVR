@@ -122,6 +122,11 @@ bool is_prelaunch_open() noexcept;
 bool is_prelaunch_top() noexcept;
 bool game_obscured_below(const Document& doc) noexcept;
 Document* top_document() noexcept;
+// Scrolls the top window's reading pane (the scrollable pane that doesn't have
+// focus, e.g. a settings entry's description) by deltaDp density-independent
+// pixels, positive = down. For controllers that have no other way to scroll
+// it (VR: the right stick). False if there's nothing to scroll.
+bool scroll_reading_pane(float deltaDp) noexcept;
 
 std::filesystem::path resource_path(const std::filesystem::path& filename) noexcept;
 std::string escape(std::string_view str) noexcept;

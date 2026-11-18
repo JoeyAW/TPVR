@@ -2387,6 +2387,20 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         s_menuWasVisibleLastRealFrame = menuVisible;
     }
     updateVrMenuGamepadPlayerIndex();
+    // Right stick (up/down) scrolls the menu's reading pane -- a settings
+    // entry's description, e.g. VR GESTURE INSTRUCTIONS -- which a VR
+    // controller otherwise can't scroll. Not menu navigation (the left stick).
+    if (menuVisible) {
+        constexpr float kScrollDeadzone = 0.2f;
+        constexpr float kScrollDpPerSec = 900.f;  // at full deflection
+        const float y = rightStick.y;
+        if (std::abs(y) > kScrollDeadzone) {
+            const float t = (std::abs(y) - kScrollDeadzone) / (1.f - kScrollDeadzone);
+            // Stick up = scroll toward the top.
+            dusk::ui::scroll_reading_pane((y > 0.f ? -1.f : 1.f) * t * kScrollDpPerSec *
+                                          pacing.dt);
+        }
+    }
     // RE-ENABLED 2026-08-18 to test vr_menu_gamepad.hpp's v8 navigation
     // redesign (dominant-axis selection + a pulse gate fully decoupled
     // from neutralizeVrMenuGamepadState() -- see that header's "Left-stick

@@ -1420,6 +1420,39 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                 pane.add_text("Open the Dusklight menu: hold the right trigger and the left Menu "
                               "button (or click the right stick) together for 1 second.");
             });
+        // Gesture how-to. Longer than the pane, so in VR the right stick
+        // scrolls it (dusk::ui::scroll_reading_pane(), fed from vr_main.cpp).
+        leftPane.register_control(
+            leftPane.add_group_button({.text = "VR GESTURE INSTRUCTIONS"}),
+            rightPane, [](Pane& pane) {
+                pane.clear();
+                static const char* const kGestures[][2] = {
+                    {"Sword draw",
+                     "Reach up to your shoulder with your sword hand until you feel a rumble, then "
+                     "press grip to draw the sword, press it again to sheathe it"},
+                    {"Grab object (rocks, pumpkins, cats, etc.)",
+                     "Reach down and touch the object, then squeeze the corresponding grip button "
+                     "to grab it. Throw it by swinging the controller and releasing grip"},
+                    {"Swimming", "Physically push yourself away from the water using any swimming method"},
+                    {"Climbing",
+                     "Walk onto a ladder or climbable surface, then press grip to grab onto it and "
+                     "pull yourself up, down, left or right"},
+                    {"Bow",
+                     "Equip the Bow and hold the same button to pull out an arrow, then nock it, "
+                     "pull back, aim, and release to fire"},
+                    {"Slingshot",
+                     "Equip the Slingshot and grab the string, then pull back, aim, and release to fire"},
+                    {"Gale Boomerang and Dominion Rod",
+                     "Aim with the opposite hand and swing the hand holding the item to throw/fire"},
+                    {"Bottles",
+                     "Equip the bottle, pull the cork out, and either physically drink the contents, "
+                     "pour them out, or scoop something with an empty bottle"},
+                };
+                pane.add_text("Use the right stick to scroll.");
+                for (const auto& gesture : kGestures) {
+                    pane.add_rml(Rml::String("<b>") + gesture[0] + ":</b><br/>" + gesture[1]);
+                }
+            });
 
         leftPane.add_section("Inputs");
         // Remapping only applies to real gamepads and the keyboard; VR motion

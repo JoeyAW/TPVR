@@ -16758,3 +16758,16 @@ Two fixes built -- both CONFIRMED in-headset 2026-11-17 ("works"):**
 - "Turns a little" when pulling back: NOT changed. Most likely the designed two-point aim
   (detail_applyTwoPointAim(), fades the bow from the bow hand's pointing to the draw-hand ->
   grip line over 10..25 units of draw), asked the user; no further report after the fixes.
+
+### "VR GESTURE INSTRUCTIONS" settings entry + right-stick scrolling of the reading pane — built 2026-11-17, NOT yet tested in-headset
+
+- VR tab > VR Controls, under "VR Controller Layout": a group button whose right pane lists
+  the gestures (text from the user's "Sword draw.txt", bold headings via add_rml `<b>`).
+- A VR controller had no way to scroll a right pane longer than the window. New
+  `dusk::ui::scroll_reading_pane(deltaDp)` (ui.cpp): top document's last visible, scrollable
+  `pane` element that doesn't contain the focus element; SetScrollTop clamped. Needed
+  `Document::rml_document()` (public accessor for mDocument). vr_main.cpp tick(), right after
+  updateVrMenuGamepadPlayerIndex(): while any document is visible, right stick Y beyond 0.2
+  scrolls at up to 900 dp/s (stick up = toward the top). Left stick navigation unchanged.
+  Works for every settings entry's description, not just this one. VR only (real gamepads'
+  right stick still does nothing in menus).

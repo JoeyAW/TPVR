@@ -469,6 +469,39 @@ Document* top_document() noexcept {
     return nullptr;
 }
 
+bool scroll_reading_pane(float deltaDp) noexcept {
+    Document* doc = top_document();
+    if (doc == nullptr || !doc->visible() || deltaDp == 0.0f) {
+        return false;
+    }
+    Rml::ElementDocument* rmlDoc = doc->rml_document();
+    if (rmlDoc == nullptr) {
+        return false;
+    }
+    Rml::Context* context = rmlDoc->GetContext();
+    Rml::Element* focus = context != nullptr ? context->GetFocusElement() : nullptr;
+    const float dpRatio = context != nullptr ? context->GetDensityIndependentPixelRatio() : 1.0f;
+
+    Rml::ElementList panes;
+    rmlDoc->GetElementsByTagName(panes, "pane");
+    for (auto it = panes.rbegin(); it != panes.rend(); ++it) {
+        Rml::Element* pane = *it;
+        if (!pane->IsVisible(true)) {
+            continue;
+        }
+        if (focus != nullptr && (pane == focus || pane->Contains(focus))) {
+            continue;
+        }
+        const float maxScroll = pane->GetScrollHeight() - pane->GetClientHeight();
+        if (maxScroll <= 0.5f) {
+            continue;
+        }
+        pane->SetScrollTop(std::clamp(pane->GetScrollTop() + deltaDp * dpRatio, 0.0f, maxScroll));
+        return true;
+    }
+    return false;
+}
+
 void update() noexcept {
     ZoneScopedN("Dusk UI update");
     mods::queue::update();

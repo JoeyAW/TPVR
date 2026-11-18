@@ -2926,7 +2926,11 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         // C-stick would keep the VR stick's snaps disarmed and vice versa.
         // A real gamepad's C-stick still only fishes while fishing.
         const float realCStickX = fishingRightStick ? 0.f : mDoCPd_c::getSubStickX(PAD_1);
-        const float turnStickX = std::clamp(vrTurnStickX + realCStickX, -1.f, 1.f);
+        // No turning while the Dusklight menu is open: its right stick
+        // scrolls the reading pane instead (scroll_reading_pane()). Still fed
+        // through as zero so snap turn re-arms rather than firing on close.
+        const float turnStickX =
+            menuVisible ? 0.f : std::clamp(vrTurnStickX + realCStickX, -1.f, 1.f);
         const auto& turnSettings = dusk::getSettings().game;
         if (turnSettings.vrSnapTurn.getValue()) {
             dusk::vr::updateSnapTurn(turnStickX,

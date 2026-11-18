@@ -16771,3 +16771,6 @@ Two fixes built -- both CONFIRMED in-headset 2026-11-17 ("works"):**
   scrolls at up to 900 dp/s (stick up = toward the top). Left stick navigation unchanged.
   Works for every settings entry's description, not just this one. VR only (real gamepads'
   right stick still does nothing in menus).
+- Follow-up (same day, user request): no turning while the menu is open. tick()'s turn
+  block feeds turnStickX = 0 when menuVisible (VR right stick AND a real C-stick), still
+  calling updateSnapTurn/updateSmoothTurn so snap turn re-arms instead of firing on close.

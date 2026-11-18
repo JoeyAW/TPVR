@@ -322,17 +322,8 @@ void applyVrBodyYawOffset(J3DModel* bodyModel, s16 freshHeadYawS);
 // camera/hands-style extrapolation to the body's non-physically-
 // continuous simulated position) WITHOUT fixing the original 180°-facing
 // symptom at all. NOT currently called from anywhere -- kept defined for
-// reference only. Use logVrBodyRotationDiagLive() below for live
-// instrumentation instead.
+// reference only.
 void refreshVrBodyOffsetsLive(s16 freshHeadYawS);
-
-// Pure, read-only diagnostic instrumentation -- see
-// vr_link::logVrBodyRotationDiagLive()'s own comment. Logs
-// [dusk::vr::bodyrotdiag] from a genuinely live per-real-frame call site
-// without touching rendering at all (unlike refreshVrBodyOffsetsLive()
-// above, currently unused). This IS what's actually wired into
-// vr_main.cpp's tick() right now.
-void logVrBodyRotationDiagLive(s16 freshHeadYawS);
 
 // The current VR smooth-turn yaw offset (vr_smooth_turn.hpp), in radians --
 // 0 outside VR or before the right thumbstick has been used to turn.
@@ -428,9 +419,6 @@ bool isLeftHandedBow(daAlink_c* link);
 // Physical bow: aim yaw/pitch along the tracked bow's arrow line (same units
 // as getControllerAimAngles()). False -> aim with the controller instead.
 bool getPhysicalBowAimAngles(s16* outYawS, s16* outPitchS);
-// Diagnostic: logs every material name of `model` once per tag, as
-// "[dusk::vr::<tag>] <index> <name>".
-void logModelMaterialNamesOnce(J3DModel* model, const char* tag);
 // Frame of the bow's draw animation (BARELORD) matching the current pull.
 float getPhysicalBowStringFrame(float frameMax);
 // Physical slingshot (game.vrPhysicalSlingshot): slingshot in the left hand,

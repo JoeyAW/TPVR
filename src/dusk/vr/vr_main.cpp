@@ -711,10 +711,6 @@ void refreshVrBodyOffsetsLive(s16 freshHeadYawS) {
     vr_link::refreshVrBodyOffsetsLive(freshHeadYawS);
 }
 
-void logVrBodyRotationDiagLive(s16 freshHeadYawS) {
-    vr_link::logVrBodyRotationDiagLive(freshHeadYawS);
-}
-
 float getSmoothTurnYawRad() {
     return dusk::vr::g_smoothTurnYawRad;
 }
@@ -831,19 +827,6 @@ bool isLeftHandedBow(daAlink_c* link) {
 
 bool getPhysicalBowAimAngles(s16* outYawS, s16* outPitchS) {
     return isImmersiveVr() && vr_link::getPhysicalBowAimAngles(outYawS, outPitchS);
-}
-
-void logModelMaterialNamesOnce(J3DModel* model, const char* tag) {
-    static bool s_logged = false;  // only one caller so far
-    if (s_logged || !model) return;
-    s_logged = true;
-    J3DModelData* data = model->getModelData();
-    JUTNameTab* names = data->getMaterialName();
-    for (u16 i = 0; i < data->getMaterialNum(); ++i) {
-        char buf[128];
-        std::snprintf(buf, sizeof(buf), "[dusk::vr::%s] %u %s\n", tag, i, names ? names->getName(i) : "?");
-        duskVrLog(buf);
-    }
 }
 
 float getPhysicalBowStringFrame(float frameMax) {
@@ -1622,47 +1605,7 @@ struct TickReentrancyGuard {
 };
 }  // namespace
 
-// TEMP DIAGNOSTIC (Quest perf, 2026-09-20 -- remove once the dips are
-// understood): per-frame phase timing, logged only on a slow frame (total
-// > kPerfDipThresholdMs, i.e. a real dip at 72Hz) plus one baseline line
-// every kPerfBaselineInterval frames so "normal" is on record too. Phases:
-//   setup       = tick() entry -> swapchain image acquired (includes
-//                 xrWaitFrame's pacing wait -- big here = runtime pacing us)
-//   renderEnc   = both eyes' scene traversal + GX/Dawn command recording
-//   gapToSubmit = tick() return -> submitFrame() entry (m_Do_main.cpp's
-//                 aurora_end_frame() + anything else it runs in between)
-//   sync        = aurora::gfx::synchronize() (waits for the render worker)
-//   submit      = rest of submitFrame() (GPU copy handoff, xrEndFrame)
-// Also carries this frame's sim-tick count (a frame that runs 2 sim ticks is
-// doing double game logic) and the VR cull counters from J3DUClipper.cpp.
-extern "C" unsigned int g_duskVRCullTested;
-extern "C" unsigned int g_duskVRCullRejected;
 namespace {
-using PerfClock = std::chrono::steady_clock;
-PerfClock::time_point g_perfTickStart;
-PerfClock::time_point g_perfAfterAcquire;
-PerfClock::time_point g_perfTickEnd;
-int g_perfNumSimTicks = 0;
-// Sub-phases (ms): setup split + pre-eye-loop HUD/minimap capture + per-eye
-// traversal/painter/endEye (summed across both eyes).
-double g_perfWaitFrameMs = 0, g_perfSwapWaitMs = 0, g_perfPreLoopMs = 0;
-double g_perfEyeIterMs = 0, g_perfEyePainterMs = 0, g_perfEyeEndMs = 0, g_perfEyeBeginMs = 0;
-PerfClock::time_point g_perfMark;
-// Mid-section laps (ms) between xrBeginFrame and the swapchain acquire:
-// 0=locate spaces (+xrSyncActions), 1=action reads, 2=menu gamepad/swing/pad,
-// 3=updateFrame + refreshTracked*Live, 4=xrLocateViews + configViews.
-double g_perfMid[8] = {};
-PerfClock::time_point g_perfMidMark;
-inline void perfLap(int i) {
-    const PerfClock::time_point now = PerfClock::now();
-    g_perfMid[i] = std::chrono::duration<double, std::milli>(now - g_perfMidMark).count();
-    g_perfMidMark = now;
-}
-constexpr double kPerfDipThresholdMs = 22.0;
-constexpr int kPerfBaselineInterval = 600;
-inline double perfMs(PerfClock::time_point a, PerfClock::time_point b) {
-    return std::chrono::duration<double, std::milli>(b - a).count();
-}
 
 #if DUSK_VR_XR_GRAPHICS_VULKAN
 // ---------------------------------------------------------------------------
@@ -1979,14 +1922,6 @@ static aurora::gfx::ResolvedTargets renderScreenModeGamePass(uint32_t width, uin
 }
 
 void tick(const dusk::game_clock::FrameTiming& pacing) {
-    g_perfTickStart = PerfClock::now();
-    g_perfAfterAcquire = g_perfTickStart;
-    g_perfTickEnd = g_perfTickStart;
-    g_perfNumSimTicks = pacing.numSimTicks;
-    g_perfWaitFrameMs = g_perfSwapWaitMs = g_perfPreLoopMs = 0;
-    g_perfEyeIterMs = g_perfEyePainterMs = g_perfEyeEndMs = g_perfEyeBeginMs = 0;
-    for (double& v : g_perfMid) v = 0;
-    g_perfMidMark = g_perfTickStart;
     static bool s_tickInProgress = false;
     TickReentrancyGuard reentrancyGuard(s_tickInProgress);
     if (reentrancyGuard.alreadyRunning()) {
@@ -2065,7 +2000,6 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     // can resume it (see the STOPPING/READY cases below); only genuine
     // teardown (EXITING/LOSS_PENDING) clears g_session so isActive() goes
     // false and the caller falls back permanently to the flatscreen path.
-    perfLap(7);  // tick() entry -> just before the xrPollEvent loop
     for (;;) {
         XrEventDataBuffer event{XR_TYPE_EVENT_DATA_BUFFER};
         if (xrPollEvent(g_xrInstance, &event) != XR_SUCCESS) {
@@ -2138,7 +2072,6 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     // --- wait for the runtime to tell us the predicted display time for this frame ---
     XrFrameWaitInfo waitInfo{XR_TYPE_FRAME_WAIT_INFO};
     XrFrameState frameState{XR_TYPE_FRAME_STATE};
-    g_perfMark = PerfClock::now();
     if (XR_FAILED(xrWaitFrame(g_session->session(), &waitInfo, &frameState))) {
         logTickReasonOnChange("xrWaitFrame-failed");
         duskVrLog("[dusk::vr::tick] FAILED: xrWaitFrame\n");
@@ -2157,8 +2090,6 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         dusk::getSettings().game.vrGammaCompensationSteamVr.getValue());
 
     XrFrameBeginInfo beginInfo{XR_TYPE_FRAME_BEGIN_INFO};
-    g_perfWaitFrameMs = perfMs(g_perfMark, PerfClock::now());
-    g_perfMidMark = PerfClock::now();
     if (XR_FAILED(xrBeginFrame(g_session->session(), &beginInfo))) {
         logTickReasonOnChange("xrBeginFrame-failed");
         duskVrLog("[dusk::vr::tick] FAILED: xrBeginFrame\n");
@@ -2220,7 +2151,6 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     // possible right after startup) isn't fatal here: locateSpace() already
     // has no special handling for a stale/untracked pose, same as it's
     // always had for g_viewSpace.
-    perfLap(5);  // xrBeginFrame (+ shouldRender/isViewReady checks) -- the runtime's pacing wait lands here
     if (g_handActionSet != XR_NULL_HANDLE) {
         XrActiveActionSet activeSet{g_handActionSet, XR_NULL_PATH};
         XrActionsSyncInfo syncInfo{XR_TYPE_ACTIONS_SYNC_INFO};
@@ -2228,15 +2158,12 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         syncInfo.activeActionSets = &activeSet;
         xrSyncActions(g_session->session(), &syncInfo);
     }
-    perfLap(1);  // xrSyncActions alone
 
     const XrPosef hmdPose = locateSpace(g_viewSpace, base, time);
-    perfLap(6);  // HMD (VIEW space) locate alone
     const XrPosef rightPose = locateSpace(g_rightGripSpace, base, time);
     const XrPosef leftPose = locateSpace(g_leftGripSpace, base, time);
     const XrPosef rightAimPose = locateSpace(g_rightAimSpace, base, time);
     const XrPosef leftAimPose = locateSpace(g_leftAimSpace, base, time);
-    perfLap(0);  // the four controller-space locates
 
     // --- gameplay controller input (buttons/axes -> PADStatus) ---
     // NEW (2026-08-03, per explicit user request "set up the quest 3
@@ -3567,7 +3494,6 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     // --- Link head hide + hand matrix mapping ---
     vr_link::FrameInput frameInput{hmdPose, rightPose, leftPose, rightAimPose, leftAimPose,
                                     dusk::vr::getSmoothTurnYawRad()};
-    perfLap(2);
     vr_link::updateFrame(frameInput);
 
     // ACTUAL FIX for section 20's persistent hand-lag bug (2026-08-09) --
@@ -3651,20 +3577,6 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         dusk::vr::refreshTrackedHandDrawMtxLive(link->getHandModel());
     }
 
-    // ROUND 7/8, "Attach Body Rotation to Headset" saga: applyVrBodyPositionOffset()/
-    // applyVrBodyYawOffset() were found to have the identical dead-call-site
-    // bug the hand-lag fix above already proved (same d_a_alink.cpp draw()/
-    // isEyePassOpen() call site) -- round 7 tried making them genuinely live
-    // here (refreshVrBodyOffsetsLive()), which caused two real regressions
-    // (a 30Hz stutter, a position overshoot) WITHOUT fixing the original
-    // 180°-facing symptom, and was reverted same day. This call is
-    // deliberately DIAGNOSTIC-ONLY now -- see
-    // vr_link::logVrBodyRotationDiagLive()'s and
-    // vr_link::refreshVrBodyOffsetsLive()'s own comments
-    // (vr_link_visibility.hpp) for the full writeup before re-attempting a
-    // live fix here.
-    dusk::vr::logVrBodyRotationDiagLive(dusk::vr::getHeadMoveAngleS());
-
     // Particles/emitters re-placed live this frame (boot magnet zap, sword
     // charge glow, lantern flame) are marked by the refreshes below; clear
     // last frame's marks once, before any of them run.
@@ -3739,7 +3651,6 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     // refreshTrackedHookshotMtxLive()'s own comment).
     dusk::vr::refreshTrackedHookshotMtxLive();
     }
-    perfLap(3);
 
     // World-space point both eyes anchor their view matrix to this frame --
     // see vr_link::getVrCameraEyeAnchor()'s comment. Computed once (not per
@@ -3821,8 +3732,6 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     // exactly "compositor sees the app, gets nothing" with zero evidence
     // anywhere. Added purely to see whether that's what's happening; not a
     // behavior change if these are succeeding.
-    perfLap(4);
-    g_perfMark = PerfClock::now();
     const XrResult acquireResult = xrAcquireSwapchainImage(g_session->swapchain(), &acquireInfo, &swapchainIndex);
     if (XR_FAILED(acquireResult)) {
         char msg[128];
@@ -3853,9 +3762,6 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         xrEndFrame(g_session->session(), &endInfo);
         return;
     }
-    g_perfAfterAcquire = PerfClock::now();
-    g_perfSwapWaitMs = perfMs(g_perfMark, g_perfAfterAcquire);
-    g_perfMark = g_perfAfterAcquire;
 
     // GPU-direct swapchain copy (usesGpuDirectSwapchainCopy() -- see
     // Session::sameDeviceAsAurora_'s comment): open access to this frame's
@@ -4085,8 +3991,6 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         const bool directRender = g_session->sharedImageRenderTarget(&directTarget);
 
         g_duskVRCurrentEyeIndex = 0;
-        g_perfPreLoopMs = perfMs(g_perfMark, PerfClock::now());
-        PerfClock::time_point perfT0 = PerfClock::now();
         // VR object shadows. mDoGph_Painter() renders the shadow maps inside
         // the eye pass, where a nested framebuffer isn't allowed, so in VR
         // they're rendered here, before the pass opens. The shadow list
@@ -4114,15 +4018,9 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
             vr_render::beginStereoPass(stereoParams, directRender ? &directTarget : nullptr);
         }
         g_duskVREyePassOpen = true;
-        PerfClock::time_point perfT1 = PerfClock::now();
-        g_perfEyeBeginMs += perfMs(perfT0, perfT1);
 
         fpcM_DrawIterater((fpcM_DrawIteraterFunc)fpcM_Draw);
-        PerfClock::time_point perfT2 = PerfClock::now();
-        g_perfEyeIterMs += perfMs(perfT1, perfT2);
         cAPIGph_Painter();
-        PerfClock::time_point perfT3 = PerfClock::now();
-        g_perfEyePainterMs += perfMs(perfT2, perfT3);
 
         if (auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer())) {
             cXyz aimDotPos;
@@ -4138,13 +4036,11 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
                                           vr_render::g_menuBillboardAspectHeightOverWidth);
         }
 
-        PerfClock::time_point perfT4 = PerfClock::now();
         aurora::gfx::ResolvedTargets targets =
             vr_render::endStereoPass(directRender ? &directTarget : nullptr, spaceWarpFrame);
         g_duskVREyePassOpen = false;
         g_vrShadowsActive = false;
         g_vrShadowRegistrationLocked = false;
-        g_perfEyeEndMs += perfMs(perfT4, PerfClock::now());
 
 #if DUSK_VR_XR_GRAPHICS_VULKAN
         // Space warp: reproject this frame's depth into motion vectors
@@ -4229,26 +4125,14 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         // dComIfGd_getView() (see vr_stereo_render.hpp) is guaranteed
         // non-null at this point.
         g_duskVRCurrentEyeIndex = eye;
-        if (eye == 0) {
-            g_perfPreLoopMs = perfMs(g_perfMark, PerfClock::now());
-        }
-        PerfClock::time_point perfEyeT0 = PerfClock::now();
         vr_render::beginEye(eyeParams);
         g_duskVREyePassOpen = true;
-        PerfClock::time_point perfEyeT1 = PerfClock::now();
-        g_perfEyeBeginMs += perfMs(perfEyeT0, perfEyeT1);
 
         if (screenMode) {
-            const auto screenDrawStart = PerfClock::now();
             vr_render::drawScreenModeBillboard(static_cast<int>(eye));
-            g_perfEyePainterMs += perfMs(screenDrawStart, PerfClock::now());
         } else {
         fpcM_DrawIterater((fpcM_DrawIteraterFunc)fpcM_Draw);
-        PerfClock::time_point perfEyeT2 = PerfClock::now();
-        g_perfEyeIterMs += perfMs(perfEyeT1, perfEyeT2);
         cAPIGph_Painter();
-        PerfClock::time_point perfEyeT3 = PerfClock::now();
-        g_perfEyePainterMs += perfMs(perfEyeT2, perfEyeT3);
 
         // World-space aim-point marker ("physical crosshair") -- drawn
         // after the world/HUD (cAPIGph_Painter() above) so it's properly
@@ -4301,10 +4185,8 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         // vr_render::HandPayload payload{ eye == 0 ? leftPose : rightPose };
         // aurora::gfx::push_custom_draw(g_handDrawState.typeId, &payload, sizeof(payload));
 
-        PerfClock::time_point perfEyeT4 = PerfClock::now();
         aurora::gfx::ResolvedTargets targets = vr_render::endEye();
         g_duskVREyePassOpen = false;
-        g_perfEyeEndMs += perfMs(perfEyeT4, PerfClock::now());
 
         // Desktop mirror: eye 0 only, and only when this eye actually
         // resolved this frame (targets.colorTexture null means a foreign-
@@ -4477,7 +4359,6 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     g_pendingSubmit.base = base;
     g_pendingSubmit.viewCount = viewCount;
     g_hasPendingFrameSubmit = true;
-    g_perfTickEnd = PerfClock::now();
 }
 
 // NEW this session: the other half of what used to be tick()'s tail end,
@@ -4500,7 +4381,6 @@ void submitFrame() {
         return;
     }
     g_hasPendingFrameSubmit = false;
-    const PerfClock::time_point perfSubmitStart = PerfClock::now();
 
     // ROOT-CAUSED this session: aurora_end_frame() only ENQUEUES this
     // frame's work onto Aurora's render worker thread (render_worker::
@@ -4521,7 +4401,6 @@ void submitFrame() {
     // it returns here, this frame's copy is guaranteed to have actually
     // executed and been submitted -- safe to MapAsync after that.
     aurora::gfx::synchronize();
-    const PerfClock::time_point perfAfterSync = PerfClock::now();
 
     for (const auto& eye : g_pendingSubmit.eyes) {
         // NEW this session (VR_MOD_HANDOFF_10 follow-up, option (c)): skip
@@ -4637,40 +4516,6 @@ void submitFrame() {
     // so just reset them to keep the counters from growing all session.
     (void)dusk::interp::material::take_replay_stats();
 
-    // TEMP DIAGNOSTIC -- see the comment block above tick(). Log on a dip,
-    // plus a periodic baseline. Cull counters are read+reset here too.
-    {
-        const PerfClock::time_point perfEnd = PerfClock::now();
-        const double setupMs = perfMs(g_perfTickStart, g_perfAfterAcquire);
-        const double renderEncMs = perfMs(g_perfAfterAcquire, g_perfTickEnd);
-        const double gapMs = perfMs(g_perfTickEnd, perfSubmitStart);
-        const double syncMs = perfMs(perfSubmitStart, perfAfterSync);
-        const double submitMs = perfMs(perfAfterSync, perfEnd);
-        const double totalMs = perfMs(g_perfTickStart, perfEnd);
-        const unsigned int cullTested = g_duskVRCullTested;
-        const unsigned int cullRejected = g_duskVRCullRejected;
-        g_duskVRCullTested = 0;
-        g_duskVRCullRejected = 0;
-        static int s_perfFrame = 0;
-        ++s_perfFrame;
-        const bool dip = totalMs > kPerfDipThresholdMs;
-        if (dip || (s_perfFrame % kPerfBaselineInterval) == 0) {
-            const aurora::gfx::WorkerFrameStats ws = aurora::gfx::worker_frame_stats();
-            char msg[500];
-            duskVrSnprintf(msg, sizeof(msg),
-                "[dusk::vr::perf] %s total=%.1f setup=%.1f(waitFrame=%.1f swapWait=%.1f "
-                "beginFrame=%.1f syncActions=%.1f hmd=%.1f ctrl=%.1f mid=%.1f/%.1f/%.1f) "
-                "renderEnc=%.1f(preLoop=%.1f begin=%.1f iter=%.1f painter=%.1f end=%.1f) "
-                "gap=%.1f sync=%.1f submit=%.1f sim=%d cull=%u/%u "
-                "worker(enc=%.1f finish=%.1f submit=%.1f wall=%.1f draws=%u merged=%u passes=%u maxPassDraws=%u)\n",
-                dip ? "DIP" : "base", totalMs, setupMs, g_perfWaitFrameMs, g_perfSwapWaitMs,
-                g_perfMid[5], g_perfMid[1], g_perfMid[6], g_perfMid[0], g_perfMid[2], g_perfMid[3], g_perfMid[4],
-                renderEncMs, g_perfPreLoopMs, g_perfEyeBeginMs, g_perfEyeIterMs, g_perfEyePainterMs,
-                g_perfEyeEndMs, gapMs, syncMs, submitMs, g_perfNumSimTicks, cullRejected, cullTested,
-                ws.encodeMs, ws.finishMs, ws.submitMs, ws.wallMs, ws.drawCalls, ws.mergedDrawCalls, ws.renderPasses, ws.maxPassDraws);
-            duskVrLog(msg);
-        }
-    }
 }
 
 }  // namespace dusk::vr

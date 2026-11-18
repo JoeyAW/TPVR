@@ -8,12 +8,6 @@
 #include "d/actor/d_a_obj_groundwater.h"
 #include "d/d_com_inf_game.h"
 #include "m_Do/m_Do_graphic.h"
-#ifdef TARGET_PC
-#if defined(_WIN32)
-#include <windows.h>
-#endif
-#include "dusk/vr/vr_debug_log.hpp"  // dusk::vr::duskVrLog/duskVrSnprintf -- portable OutputDebugStringA/_snprintf_s stand-ins
-#endif
 
 #if TARGET_PC
 #include "dusk/interp/material.h"
@@ -272,26 +266,6 @@ void daGrdWater_c::modeLevelDownB() {
 }
 
 int daGrdWater_c::Draw() {
-#ifdef TARGET_PC
-    // TEMP DIAGNOSTIC (VR water-black investigation, round 2): the fovy/
-    // aspect fix didn't resolve it, so confirm basic facts before guessing
-    // again: is this actor's Draw() even reached in VR, does the reflection
-    // branch run, and what does the lighting/tev setup actually produce.
-    {
-        static bool loggedVR = false;
-        static bool loggedFlat = false;
-        bool inVR = dusk::vr::isRenderingToHeadset();
-        bool* flag = inVR ? &loggedVR : &loggedFlat;
-        if (!*flag) {
-            *flag = true;
-            char msg[256];
-            dusk::vr::duskVrSnprintf(msg, sizeof(msg),
-                        "[dusk::grdwater] Draw() VR=%d pos=(%.1f,%.1f,%.1f)\n",
-                        inVR ? 1 : 0, current.pos.x, current.pos.y, current.pos.z);
-            dusk::vr::duskVrLog(msg);
-        }
-    }
-#endif
     g_env_light.settingTevStruct(0x10, &current.pos, &tevStr);
     g_env_light.setLightTevColorType_MAJI(mModel2, &tevStr);
     g_env_light.setLightTevColorType_MAJI(mModel1, &tevStr);
@@ -326,27 +300,6 @@ int daGrdWater_c::Draw() {
     dComIfGd_setList();
     J3DMaterial* material = modelData2->getMaterialNodePointer(0);
     dComIfGd_setListInvisisble();
-#ifdef TARGET_PC
-    {
-        static bool loggedVR = false;
-        static bool loggedFlat = false;
-        bool inVR = dusk::vr::isRenderingToHeadset();
-        bool* flag = inVR ? &loggedVR : &loggedFlat;
-        if (!*flag) {
-            *flag = true;
-            char msg[300];
-            dusk::vr::duskVrSnprintf(msg, sizeof(msg),
-                        "[dusk::grdwater] VR=%d hasTexMtx0=%d TevColor=(%d,%d,%d,%d) "
-                        "AmbCol=(%d,%d,%d,%d) TevKColor=(%d,%d,%d,%d) mLightInf=(%d,%d,%d,%d)\n",
-                        inVR ? 1 : 0, material->getTexGenBlock()->getTexMtx(0) != NULL ? 1 : 0,
-                        tevStr.TevColor.r, tevStr.TevColor.g, tevStr.TevColor.b, tevStr.TevColor.a,
-                        tevStr.AmbCol.r, tevStr.AmbCol.g, tevStr.AmbCol.b, tevStr.AmbCol.a,
-                        tevStr.TevKColor.r, tevStr.TevKColor.g, tevStr.TevKColor.b, tevStr.TevKColor.a,
-                        tevStr.mLightInf.r, tevStr.mLightInf.g, tevStr.mLightInf.b, tevStr.mLightInf.a);
-            dusk::vr::duskVrLog(msg);
-        }
-    }
-#endif
     if (material->getTexGenBlock()->getTexMtx(0) != NULL) {
         J3DTexMtxInfo* mtxInfo = &material->getTexGenBlock()->getTexMtx(0)->getTexMtxInfo();
         if (mtxInfo != NULL) {

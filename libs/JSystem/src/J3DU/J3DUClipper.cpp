@@ -30,20 +30,6 @@ static inline bool duskVrSkipCulling() {
     return g_duskVRRenderingToHeadset && !g_duskVREyePassOpen && !g_duskVRScreenModePassOpen;
 }
 
-// TEMP DIAGNOSTIC (Quest perf item #1 verification, 2026-09-20 -- remove once
-// the culling win is confirmed or ruled out): counts clip() tests and
-// rejections while a VR eye pass is open. Read and reset once per frame by
-// vr_main.cpp's tick(), reported in its [dusk::vr::perf] line.
-extern "C" unsigned int g_duskVRCullTested = 0;
-extern "C" unsigned int g_duskVRCullRejected = 0;
-static inline int duskVrCountCull(int result) {
-    if (g_duskVRRenderingToHeadset && (g_duskVREyePassOpen || g_duskVRScreenModePassOpen)) {
-        ++g_duskVRCullTested;
-        if (result) ++g_duskVRCullRejected;
-    }
-    return result;
-}
-
 void J3DUClipper::init() {
     mNear = 1.0f;
     mFar = 100000.0f;
@@ -69,7 +55,7 @@ void J3DUClipper::calcViewFrustum() {
 }
 
 int J3DUClipper::clip(f32 const (*param_0)[4], Vec param_1, f32 param_2) const {
-    return duskVrCountCull(clipSphereImpl(param_0, param_1, param_2));
+    return clipSphereImpl(param_0, param_1, param_2);
 }
 
 int J3DUClipper::clipSphereImpl(f32 const (*param_0)[4], Vec param_1, f32 param_2) const {
@@ -108,7 +94,7 @@ int J3DUClipper::clipSphereImpl(f32 const (*param_0)[4], Vec param_1, f32 param_
 
 
 int J3DUClipper::clip(f32 const (*param_1)[4], Vec* param_2, Vec* param_3) const {
-    return duskVrCountCull(clipBoxImpl(param_1, param_2, param_3));
+    return clipBoxImpl(param_1, param_2, param_3);
 }
 
 int J3DUClipper::clipBoxImpl(f32 const (*param_1)[4], Vec* param_2, Vec* param_3) const {

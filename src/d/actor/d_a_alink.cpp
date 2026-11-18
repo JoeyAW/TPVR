@@ -19703,14 +19703,12 @@ void daAlink_c::setDrawHand() {
     // VR "Left-Handed Bow": the bow is in the left hand and the arrow in the
     // right, so each hand shows the other hand's pose. Left poses are
     // materials 0-4, right 5-10; mapped by matching pairs the game itself uses
-    // together (0/5 grip, 1/6 open, 3/9 grab, 4/10 ledge grip). Check with the
-    // one-shot [dusk::vr::handmats] name dump if a pose looks wrong.
+    // together (0/5 grip, 1/6 open, 3/9 grab, 4/10 ledge grip).
     // Physical Boomerang swaps the same way: its grip pose goes to the right hand.
     // So does the Physical Dominion Rod when it's in the right hand.
     const bool vrRodRightHand = dusk::vr::isPhysicalCopyRodRightHand(this);
     if ((dusk::vr::isLeftHandedBow(this) || dusk::vr::isPhysicalBoomerangMode(this) || vrRodRightHand) &&
         var_r30 != 0xFB && var_r29 != 0xFB) {
-        dusk::vr::logModelMaterialNamesOnce(mpLinkHandModel, "handmats");
         static const u8 kRightToLeft[] = {0, 1, 2, 2, 3, 4};      // right 5..10 -> left
         static const u8 kLeftToRight[] = {5, 6, 7, 9, 10};        // left 0..4 -> right
         const u8 left = var_r30;

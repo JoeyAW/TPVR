@@ -28,10 +28,11 @@ Twilight Princess PC port ("dusklight") with an in-progress VR mod.
   too old). Linux uses the same Vulkan XR path as Quest
   (`DUSK_VR_XR_GRAPHICS_VULKAN`); Android-only pieces are gated by
   `DUSK_VR_PLATFORM_ANDROID`. VR logs (`duskVrLog`) go to stderr on Linux.
-  `.gitmodules` points `extern/aurora` at encounter/aurora, but the pinned
-  `aurora-vr` commit only exists on JoeyAW/aurora — override locally with
-  `git config submodule.extern/aurora.url https://github.com/JoeyAW/aurora.git`
-  before `git submodule update --init`.
+  `.gitmodules` points `extern/aurora` at JoeyAW/aurora-vr (branch
+  `aurora-vr`, fixed 2026-11-17; it used to point at encounter/aurora, which
+  doesn't have the VR commits), so a plain `git submodule update --init`
+  works. New aurora commits must be pushed to that branch before the
+  superproject pins them, or fresh clones can't check them out.
 
 For the VR-rendering debug loop (targeted `OutputDebugStringA` logging,
 RenderDoc GPU captures) and the full VR mod status/history — root causes,

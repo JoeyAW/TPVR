@@ -4480,13 +4480,6 @@ inline void detail_findDrawAnimJoint(daAlink_c* link, J3DModel* model, J3DAnmTra
             out.drawnLocal = drawn;
         }
     }
-    if (out.joint >= 0) {
-        char buf[160];
-        JUTNameTab* names = data->getJointName();
-        std::snprintf(buf, sizeof(buf), "[dusk::vr::%s] joint %d (%s) travels %.1f units", tag, out.joint,
-                      names ? names->getName(static_cast<u16>(out.joint)) : "?", best);
-        dusk::vr::duskVrLog(buf);
-    }
 }
 
 // Where the arrow's tail sits in the draw hand: the left item joint, in the
@@ -7988,72 +7981,12 @@ inline void applyVrBodyPositionOffset(J3DModel* bodyModel) {
 // shape_angle.y" would be an arbitrary, meaningless delta there; applying
 // it would visibly fight e.g. Iron Boots' wall-normal orientation. Called
 // once per eye, right alongside applyVrBodyPositionOffset() above.
-// TEMP DIAGNOSTIC 2026-09-09 -- added after the round-5 rotation-math fix
-// (left-multiply instead of right-multiply, see the big comment above)
-// was tested and reported STILL broken, with a much more specific
-// symptom this time: "when standing still, the body is in the right
-// place, but when I rotate it the body seems offset. By the time I
-// rotate a full 180 degrees behind me the body is in front of me. It
-// quickly snaps back... when I walk forward. When walking backward the
-// body comes out in front of me." That's a POSITIONAL symptom tied to
-// rotation angle, not a pure facing-direction bug -- doesn't match
-// anything the round-5 fix (which only ever touches the 3x3 rotation
-// block, explicitly leaving translation untouched) should be able to
-// cause on its own. Leading candidate theories, neither confirmed:
-// (a) computeRawCoreAnchoredEye()'s 6in forward-nudge uses
-// current.angle.y (the MOVEMENT-facing angle), which per checkInputOnR()
-// only updates while the stick is actively held -- if it's staying
-// frozen while the player turns their head with the stick idle, this
-// nudge shouldn't be able to sweep at all, but that assumption has never
-// actually been checked with real data; (b) something else entirely
-// (mBodyAngle, a torso-twist term, or an interaction with
-// getVrBodyPositionOffset()'s own extrapolation) is the actual source.
-// Logs everything needed to settle this in one capture: real head yaw,
-// current shape_angle.y/current.angle.y, current.pos, whether the stick
-// is held, and the body position-offset delta (should be exactly zero
-// while genuinely standing still -- if it isn't, that's the smoking gun).
-// Throttled to ~2/sec normally, plus an unconditional log on any frame
-// where the position offset exceeds a "shouldn't happen while standing
-// still" threshold, to catch the exact moment things go wrong without
-// needing a huge paste. Remove once this is root-caused.
-inline void logBodyRotationDiagOnce(daAlink_c* link, s16 freshHeadYawS, s16 delta) {
-    static int s_frameCounter = 0;
-    const cXyz posOffset = getVrBodyPositionOffset(link);
-    const float offsetMagSq = posOffset.x * posOffset.x + posOffset.y * posOffset.y +
-                               posOffset.z * posOffset.z;
-    const bool bigOffset = offsetMagSq > (5.0f * 5.0f);  // >5 units (~2in) is already
-                                                          // suspicious while standing still
-    ++s_frameCounter;
-    // Tightened 2026-09-10 (round 8) from every 45 frames (~2/sec) to
-    // every 10 (~7-9/sec at typical VR framerates) -- a 180 degree turn
-    // over 1-2 seconds needs finer time resolution to actually correlate
-    // the exact moment things look wrong with the logged values, rather
-    // than getting only 2-4 samples across the whole turn.
-    if (!bigOffset && (s_frameCounter % 10) != 0) return;
-
-    const cXyz freshEye = detail::computeRawEyeAnchor(link);
-    const cXyz smoothedEye = getVrCameraEyeAnchor(freshEye);
-    char buf[400];
-    std::snprintf(
-        buf, sizeof(buf),
-        "[dusk::vr::bodyrotdiag] headYaw=%d shapeY=%d currAngleY=%d delta=%d "
-        "stickHeld=%d currPos=(%.1f,%.1f,%.1f) posOffset=(%.2f,%.2f,%.2f) "
-        "freshEye=(%.1f,%.1f,%.1f) smoothEye=(%.1f,%.1f,%.1f)%s\n",
-        (int)freshHeadYawS, (int)link->shape_angle.y, (int)link->current.angle.y, (int)delta,
-        link->checkInputOnR() ? 1 : 0, link->current.pos.x, link->current.pos.y,
-        link->current.pos.z, posOffset.x, posOffset.y, posOffset.z, freshEye.x, freshEye.y,
-        freshEye.z, smoothedEye.x, smoothedEye.y, smoothedEye.z,
-        bigOffset ? " <-- BIG OFFSET WHILE THIS RAN" : "");
-    dusk::vr::duskVrLog(buf);
-}
-
 inline void applyVrBodyYawOffset(J3DModel* bodyModel, s16 freshHeadYawS) {
     if (!bodyModel) return;
     auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
     if (!isVrForcingBodyYawToHeadset(link)) return;
 
     const s16 delta = (s16)(freshHeadYawS - link->shape_angle.y);
-    logBodyRotationDiagOnce(link, freshHeadYawS, delta);
     if (delta == 0) return;
 
     Mtx& base = bodyModel->getBaseTRMtx();
@@ -8183,10 +8116,8 @@ inline void applyVrBodyYawOffset(J3DModel* bodyModel, s16 freshHeadYawS) {
 //    tried and empirically failed to fix the target symptom while causing
 //    two new ones.
 //
-// Consequently: NOT currently called from anywhere (the call site that
-// used to invoke this from vr_main.cpp's tick() now calls
-// logVrBodyRotationDiagLive() instead -- pure instrumentation, no
-// rendering side effects) -- kept defined, unused, in case a future,
+// Consequently: NOT currently called from anywhere -- kept defined, unused,
+// in case a future,
 // smarter version of this same idea (e.g. correcting position WITHOUT
 // extrapolation, or finding a way to propagate a root correction without
 // disabling animation blending) is worth revisiting. The old
@@ -8204,24 +8135,6 @@ inline void refreshVrBodyOffsetsLive(s16 freshHeadYawS) {
     applyVrBodyPositionOffset(bodyModel);
     applyVrBodyYawOffset(bodyModel, freshHeadYawS);
     markModelJointsLive(bodyModel);
-}
-
-// Pure, read-only instrumentation -- calls logBodyRotationDiagOnce() from
-// the same genuinely-live per-real-frame call site refreshVrBodyOffsetsLive()
-// uses, WITHOUT applying either correction or marking anything live, so a
-// real capture of headYaw/shapeY/currAngleY/posOffset/eye-anchor values can
-// finally be gathered during an actual 180° turn without either of round
-// 8's regressions (stutter, position overshoot) muddying what's observed.
-// This is the ONLY thing currently wired into vr_main.cpp's tick() from
-// this whole investigation -- rendering itself is back to the pre-round-7
-// (dead-code) state, i.e. whatever execute()'s tick-rate shape_angle.y
-// override + plain frame_interp blending naturally produce.
-inline void logVrBodyRotationDiagLive(s16 freshHeadYawS) {
-    auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
-    if (!link) return;
-    if (!isVrForcingBodyYawToHeadset(link)) return;
-    const s16 delta = (s16)(freshHeadYawS - link->shape_angle.y);
-    logBodyRotationDiagOnce(link, freshHeadYawS, delta);
 }
 
 inline void restoreVisibility() {

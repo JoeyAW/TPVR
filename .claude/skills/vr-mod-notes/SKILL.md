@@ -16774,3 +16774,37 @@ Two fixes built -- both CONFIRMED in-headset 2026-11-17 ("works"):**
 - Follow-up (same day, user request): no turning while the menu is open. tick()'s turn
   block feeds turnStickX = 0 when menuVisible (VR right stick AND a real C-stick), still
   calling updateSnapTurn/updateSmoothTurn so snap turn re-arms instead of firing on close.
+
+### Credits music fading out after a few seconds — NOT VR, upstream bug; upstream fix applied 2026-11-17, NOT yet tested
+
+User report: credits music plays a few seconds, then fades out, rest of the credits silent.
+Cause: Z2SceneMgr::setSceneName() fades out every playing stream on a scene change EXCEPT
+type 0x71 (streams meant to carry across scenes, like the credits music, which spans several
+stages). Upstream's "JAudio doc/naming pass" (67eea1599a) replaced the literal 0x71 with
+SOUND_TYPEID_STREAM (= 0x70), flipping it; the credits stream died at the first scene cut.
+Fixed upstream in e58ddbdb8d (#2560, 2026-09-21, -> SOUND_TYPEID_STREAM_ALT), which this branch
+didn't have; applied the identical one-line change (file now matches that commit's blob
+09d5df1013), so a future upstream merge applies cleanly. Upstream's
+StreamReplacementSlot::get_type_id() (bst.cpp, mod stream replacements) still maps
+stop_on_scene_change -> 0x71, which after the fix means "keep"; left alone (upstream code,
+mods only).
+
+### Pre-release cleanup (2026-11-17): diagnostics removed, aurora submodule URL fixed — build clean
+
+User request. Removed (all investigation-only logging, nothing behavioral):
+- `[dusk::vr::perf]` per-frame phase timing in vr_main.cpp (perfLap()/g_perf*/PerfClock,
+  logged on every >22ms frame + every 600 frames) and the J3DUClipper cull counters that fed
+  it (duskVrCountCull(), g_duskVRCullTested/Rejected). aurora's worker_frame_stats() left in
+  the submodule (unused now). Restore from git history if per-phase timing is needed again.
+- `[dusk::vr::bodyrotdiag]` (logBodyRotationDiagOnce/logVrBodyRotationDiagLive + the per-frame
+  call in tick(); only ran with Attach Body Rotation To Head on).
+- `[dusk::particle]` once-per-id spawn logging in dPa_control_c::set()/setSimple() (also a
+  std::set lookup per spawn).
+- `[dusk::grdwater]` Draw() logs (+ its windows.h/vr_debug_log include).
+- `[dusk::vr::handmats]` (logModelMaterialNamesOnce()) and the bow string / slingshot joint
+  finder's one-line log (detail_findDrawAnimJoint(); joint finding itself unchanged).
+- The D3D12 swapchain CreateSharedHandle PROBE (probeSwapchainImageShareable()).
+Kept: startup/session messages, failure logs, tick-reason-change log, space warp debug logs.
+`.gitmodules`: extern/aurora -> https://github.com/JoeyAW/aurora-vr.git, branch = aurora-vr
+(was encounter/aurora, which lacks the VR commits); `git submodule sync` run. Pinned
+918a7705 = origin aurora-vr tip. CLAUDE.md note updated.

@@ -868,50 +868,8 @@ public:
     // fence's last-signaled value before Dawn touches the texture --
     // otherwise falls back to unsynchronized access rather than failing the
     // frame outright.
-    // DIAGNOSTIC (temporary, remove once answered): tests whether XR
-    // swapchain image resources can actually be shared cross-device at all,
-    // before committing to rewriting importSwapchainImage() around
-    // SharedTextureMemoryDXGISharedHandle. CreateSharedHandle() only
-    // succeeds on a resource allocated with D3D12_HEAP_FLAG_SHARED -- the
-    // OpenXR runtime allocates swapchain images, not us, so it's a real
-    // open question whether it did that. This calls the exact same D3D12
-    // entry point the real import path would need, on a real swapchain
-    // image, and just logs the HRESULT -- it doesn't touch Dawn at all, so
-    // a failure here can't be confused with a Dawn/feature problem.
-    void probeSwapchainImageShareable() {
-        static bool probed = false;
-        if (probed || swapchainImages_.empty()) {
-            return;
-        }
-        probed = true;
-
-        Microsoft::WRL::ComPtr<ID3D12Resource> resource = swapchainImages_[0].texture;
-        HANDLE handle = nullptr;
-        HRESULT hr = xrDevice_->CreateSharedHandle(resource.Get(), nullptr, GENERIC_ALL, nullptr, &handle);
-
-        char msg[256];
-        if (SUCCEEDED(hr)) {
-            _snprintf_s(msg, _TRUNCATE,
-                        "[dusk::vr] PROBE: swapchain image IS shareable "
-                        "(CreateSharedHandle succeeded, hr=0x%08lX) -- "
-                        "SharedTextureMemoryDXGISharedHandle path is viable\n",
-                        static_cast<long>(hr));
-            CloseHandle(handle);
-        } else {
-            _snprintf_s(msg, _TRUNCATE,
-                        "[dusk::vr] PROBE: swapchain image is NOT shareable "
-                        "(CreateSharedHandle FAILED, hr=0x%08lX) -- runtime "
-                        "did not allocate this with D3D12_HEAP_FLAG_SHARED, "
-                        "need a different strategy (e.g. explicit copy)\n",
-                        static_cast<long>(hr));
-        }
-        OutputDebugStringA(msg);
-    }
-
     wgpu::Texture importSwapchainImage(const wgpu::Device& device, uint32_t index, uint32_t width,
                                         uint32_t height, wgpu::TextureFormat format) {
-        probeSwapchainImageShareable();
-
         ensureFenceSync(device);
 
         dawn::native::d3d12::SharedTextureMemoryD3D12ResourceDescriptor d3dDesc;

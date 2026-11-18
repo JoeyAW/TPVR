@@ -1285,6 +1285,14 @@ SettingsWindow::SettingsWindow(bool prelaunch) : mPrelaunch(prelaunch) {
                             "with your right hand. Releasing the button without throwing "
                             "cancels."
             });
+        config_bool_select(leftPane, rightPane, getSettings().game.vrPhysicalDominionRod,
+            {
+                .key = "Physical Dominion Rod",
+                .helpText = "Holds the Dominion Rod in your sword hand and aims it with your "
+                            "other hand. With the rod out, point your other controller and swing "
+                            "the rod to send out the orb. Hold the rod's button first to see the "
+                            "aim. While you control a statue, swing the rod to make it act."
+            });
         config_bool_select(leftPane, rightPane, getSettings().game.vrPhysicalBottle,
             {
                 .key = "Physical Bottle",

@@ -16686,3 +16686,75 @@ sound on pour). Built, NOT yet retested.**
 **Round 4 CONFIRMED in-headset 2026-11-15 ("looks great"): game-grip placement, manual cork,
 no pop on pour.** `[dusk::vr::bottle]` diagnostics removed. Not specifically reported on yet:
 empty-bottle swing catching, fairy release, worm pour, Physical Bottle with Third Person.
+
+### "Physical Dominion Rod" (default ON) — CONFIRMED WORKING IN-HEADSET 2026-11-17
+
+User request: rod in the sword hand, aim with the left, swing the rod hand to activate.
+`game.vrPhysicalDominionRod`, VR tab > Combat after Physical Boomerang. Gate
+`vr_link::isPhysicalCopyRodMode()`: setting + first person + COPY_ROD equipped.
+- Hand: the game holds the rod on mLeftItemJntNo (the sword's joint), so it's already in
+  the sword hand (left) by default. With Swap Sword/Shield Hands,
+  `refreshTrackedHeldItemMtxLive()` puts it on the right tracked hand with the SWORD's swap
+  mirror/extra flip/offset (`isPhysicalCopyRodRightHand()`), and setDrawHand() swaps the
+  hand poses like the boomerang (left 2 -> right 5 grip guard included). The orb follows via
+  the existing `refreshCopyRodBallLive()` (reads mHeldItemModel).
+- Aim: the controller NOT holding the rod (getVrAimHandLeft() returns
+  isPhysicalCopyRodRightHand()), so the aim dot follows that hand too.
+- Throw (round 2, 2026-11-17, user request: "swing it immediately"): while the rod is out
+  (`isPhysicalCopyRodSwingable()`: orb on the rod and not mid-throw, or a statue under
+  control), a swing of the sword hand (`leftSwingEvent`, follows the swap) latches 0.1s.
+  From idle, checkItemAction()'s trigger branch takes the swing as an item press ->
+  checkNextActionCopyRod() brings up the ready pose and `setPhysicalCopyRodThrowPending()`;
+  `checkUpperItemActionCopyRod()` then throws (pending valid 5 sim ticks), starting the
+  throw animation at 5.5 (orb leaves at 6.5). Holding the button still aims first (aim dot);
+  a swing throws, releasing without one cancels. mFastShotTime zeroed in
+  `checkNextActionCopyRod()`. daCrod_c's launch (param 2) takes its angles from the aiming
+  controller (`getPhysicalCopyRodThrowAngles()`), since a swing from idle throws before
+  Link's body has turned to the aim.
+- Statue control: the same swing, with mCopyRodAcKeep set, goes through checkItemAction()
+  to procCopyRodSwingInit().
+- While the rod is out, the swing doesn't press B (would draw the sword); while ready, the
+  shield thrust doesn't press R.
+- Aim dot while just holding the rod (round 3, 2026-11-17, round 2 confirmed "Works"): `getVrAimDotPos()` (vr_main.cpp, both crosshair draw sites) falls back, when the game has no aim point, to the aiming hand + controller aim dir * getCopyRodBallDisMax(): rod mode, orb on the rod, not mid-throw, checkCopyRodTopUse(), no event, hand tracking not suspended. Built, NOT yet tested.
+- Round 1's pre-swing aim freeze (rod and aim in the same hand) was removed in round 2:
+  the hands can no longer coincide.
+Not handled / untested: orb still launches from the game's chest-height origin (now along the
+aiming controller), not from the rod tip; a swing without aiming has no lock, so the
+search range is the unlocked one (max - 500); the mirrored right-hand grip reuses the sword's axes (may look
+off for the rod); no haptic on throw.
+
+### Projectiles launch from the held item (orb, charged arrows, slingshot seed) — CONFIRMED WORKING IN-HEADSET 2026-11-17
+
+User request: orb out of the top of the rod, arrow out of the bow, seed out of the slingshot.
+- Dominion Rod orb: daCrod_c's launch (param 2) built its start from Link's root
+  (getRootPosP() + shootInitLocalPos, chest height). Now `getPhysicalCopyRodTipPos()`:
+  `refreshCopyRodBallLive()` records the orb's tracked position on the rod tip each frame
+  (valid 2 sim ticks); launch uses it. At launch tick the game's own rod pose is untracked,
+  hence the stored value rather than getCopyRodMtx().
+- Arrows: normal shots (setShoot, param 1) already left from setKeepMatrix() (the nocked /
+  in-hand arrow). FULLY CHARGED shots (setChargeShoot, param 2) went through
+  checkBowCameraArrowPosP(): a fixed point at Link's chest. arrowShooting() now keeps the
+  keep-matrix position when `isArrowShotFromTrackedHand()` (VR, first person, hands
+  tracked) and not Hawkeye; direction still the aim angles (= the bow line with Physical Bow).
+- Slingshot (physical): the stone (makeSlingStone(mHeldItemRootPos)) left from the pouch in
+  the drawing hand. Now from the band's rest point between the posts (`s_slingGripPos`,
+  kept at release like the pouch was); it's on the pouch -> posts aim line, so the
+  direction is unchanged. Non-physical slingshot unchanged (stone from getLeftItemMatrix()).
+
+**Follow-up (2026-11-17): user confirmed charged arrows + slingshot seed launch from the item ("Both work").
+Two fixes built -- both CONFIRMED in-headset 2026-11-17 ("works"):**
+- Orb flew back to the game's hand (getBoomerangCatchPos(), field_0x3534 from the untracked
+  body pose). daCrod_c's return (param 5) now targets `getPhysicalCopyRodTipPos()`. The tip
+  is now recorded EVERY frame the rod is tracked, from the rod itself
+  (`daCrod_c::getRodTipPos()`: getCopyRodMtx() * l_localRodPos), at the top of
+  `refreshCopyRodBallLive()` -- before, it was only recorded while the orb sat on the rod, so
+  it went stale during the flight.
+- "Bow fires if I pull too far": Physical Sheathing. With the draw hand on the sword side
+  (e.g. Left-Handed Bow + swapped hands: right hand draws AND is the sword hand) and the bow
+  on X (right grip), drawing back to the shoulder entered the sheath zone, which takes that
+  grip's button away -> the game saw a release -> shot. Cause by code reading, not
+  reproduced. `isPhysicalSheathMode()` is now off while checkBowAnime() (bow/slingshot),
+  checkBoomerangReadyAnime() or checkCopyRodReadyAnime().
+- "Turns a little" when pulling back: NOT changed. Most likely the designed two-point aim
+  (detail_applyTwoPointAim(), fades the bow from the bow hand's pointing to the draw-hand ->
+  grip line over 10..25 units of draw), asked the user; no further report after the fixes.

@@ -495,6 +495,12 @@ struct UserSettings {
         // the left controller. Hold the item button, then throw with the
         // right hand; releasing without throwing cancels.
         ConfigVar<bool> vrPhysicalBoomerang;
+        // Physical Dominion Rod: the rod in the sword hand (right with Swap
+        // Sword/Shield Hands), aimed with the other controller. With the rod
+        // out, swinging the rod hand throws the orb (holding the item button
+        // first shows the aim). With a statue under control, a swing commands
+        // it (same as pressing the item button).
+        ConfigVar<bool> vrPhysicalDominionRod;
         // Physical bottle: the bottle sits in the left hand and tilts with it.
         // Bring it to your mouth and tip it to drink, tip it over to pour,
         // swing the empty bottle to catch. B cancels a drink/pour. Default on.

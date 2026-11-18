@@ -10,6 +10,9 @@
 #include "d/actor/d_a_alink.h"
 #include "d/actor/d_a_cstaF.h"
 #include "d/actor/d_a_cstatue.h"
+#if TARGET_PC
+#include "dusk/vr/vr_main.hpp"
+#endif
 
 #define RES_CROD_BALL_BMD 0x22
 #define RES_CROD_BALL_BRK 0x40
@@ -254,11 +257,27 @@ int daCrod_c::execute() {
             fopAcM_SetParam(this, 3);
             current.angle.x = -player->getBodyAngleX();
             current.angle.y = player->shape_angle.y + player->getBodyAngleY();
+#if TARGET_PC
+            // VR Physical Dominion Rod: straight from the aiming controller.
+            // A swing from the idle pose throws before Link's body has turned
+            // to the aim.
+            {
+                s16 vrPitch, vrYaw;
+                if (dusk::vr::getPhysicalCopyRodThrowAngles(player, &vrPitch, &vrYaw)) {
+                    current.angle.x = -vrPitch;
+                    current.angle.y = vrYaw;
+                }
+            }
+#endif
             speedF = player->getCopyRodBallSpeed();
 
             mDoMtx_stack_c::transS(*player->getRootPosP());
             mDoMtx_stack_c::ZXYrotM(-current.angle.x, current.angle.y, 0);
             mDoMtx_stack_c::multVec(&shootInitLocalPos, &current.pos);
+#if TARGET_PC
+            // VR Physical Dominion Rod: out of the top of the rod in hand.
+            dusk::vr::getPhysicalCopyRodTipPos(player, current.pos.x, current.pos.y, current.pos.z);
+#endif
             field_0x734 = current.pos;
             field_0x731 = 0;
         } else if (fopAcM_GetParam(this) == 4) {
@@ -278,7 +297,12 @@ int daCrod_c::execute() {
         }
 
         if (fopAcM_GetParam(this) == 5) {
-            sp50 = player->getBoomerangCatchPos() - current.pos;
+            cXyz returnPos = player->getBoomerangCatchPos();
+#if TARGET_PC
+            // VR Physical Dominion Rod: fly back to the tip of the rod in hand.
+            dusk::vr::getPhysicalCopyRodTipPos(player, returnPos.x, returnPos.y, returnPos.z);
+#endif
+            sp50 = returnPos - current.pos;
 
             if (sp50.abs2() < speedF * speedF) {
                 mCameraActorKeep.clearData();
@@ -360,6 +384,15 @@ static int daCrod_Execute(daCrod_c* i_this) {
 }
 
 #if TARGET_PC
+bool daCrod_c::getRodTipPos(cXyz* out) {
+    daAlink_c* player = daAlink_getAlinkActorClass();
+    if (player == NULL || player->getCopyRodMtx() == NULL) {
+        return false;
+    }
+    mDoMtx_multVec(player->getCopyRodMtx(), &l_localRodPos, out);
+    return true;
+}
+
 bool daCrod_c::applyRodAttachedTransform() {
     const u32 param = fopAcM_GetParam(this);
     if (param != 0 && param != 1) {

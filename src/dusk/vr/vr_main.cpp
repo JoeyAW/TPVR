@@ -862,6 +862,47 @@ bool consumePhysicalBoomerangThrow() {
     return isImmersiveVr() && vr_link::consumePhysicalBoomerangThrow();
 }
 
+bool isPhysicalCopyRodMode(daAlink_c* link) {
+    return isImmersiveVr() && vr_link::isPhysicalCopyRodMode(link);
+}
+
+bool isPhysicalCopyRodRightHand(daAlink_c* link) {
+    return isImmersiveVr() && vr_link::isPhysicalCopyRodRightHand(link);
+}
+
+bool consumePhysicalCopyRodSwing() {
+    return isImmersiveVr() && vr_link::consumePhysicalCopyRodSwing();
+}
+
+void setPhysicalCopyRodThrowPending() {
+    vr_link::setPhysicalCopyRodThrowPending();
+}
+
+bool consumePhysicalCopyRodThrowPending() {
+    return isImmersiveVr() && vr_link::consumePhysicalCopyRodThrowPending();
+}
+
+bool getPhysicalCopyRodTipPos(daAlink_c* link, float& outX, float& outY, float& outZ) {
+    cXyz pos;
+    if (!isImmersiveVr() || !vr_link::isPhysicalCopyRodMode(link) || !vr_link::getPhysicalCopyRodTipPos(pos)) {
+        return false;
+    }
+    outX = pos.x;
+    outY = pos.y;
+    outZ = pos.z;
+    return true;
+}
+
+bool isArrowShotFromTrackedHand(daAlink_c* link) {
+    return isImmersiveVr() && vr_link::isFirstPerson(link) && !vr_link::isHandTrackingSuspended(link);
+}
+
+bool getPhysicalCopyRodThrowAngles(daAlink_c* link, s16* outPitchS, s16* outYawS) {
+    if (!isImmersiveVr() || !vr_link::isPhysicalCopyRodMode(link)) return false;
+    getControllerAimAnglesForHand(link->getVrAimHandLeft(), outYawS, outPitchS);
+    return true;
+}
+
 bool isPhysicalBottleMode(daAlink_c* link) {
     return isImmersiveVr() && vr_link::isPhysicalBottleMode(link);
 }
@@ -969,6 +1010,38 @@ void getControllerAimAngles(s16* outYawS, s16* outPitchS) {
 void getControllerAimAnglesForHand(bool leftHand, s16* outYawS, s16* outPitchS) {
     *outYawS = leftHand ? g_controllerAimLeftYawS : g_controllerAimYawS;
     *outPitchS = leftHand ? g_controllerAimLeftPitchS : g_controllerAimPitchS;
+}
+
+// Where the world-space aim dot goes this frame, or false for no dot.
+// Normally the game's own aim point (mSight, while aiming). Physical Dominion
+// Rod: also while the rod is just held with the orb on it, since a swing
+// throws from there; the game has no aim point then (Link's body only turns
+// to the aim while aiming), so the dot sits along the aiming controller at
+// the orb's range -- the same line the orb launches along
+// (getPhysicalCopyRodThrowAngles()).
+static bool getVrAimDotPos(daAlink_c* link, cXyz& out) {
+    if (dusk::getSettings().game.vrHideAimCrosshair.getValue()) return false;
+    if (link->getAimSightVisible()) {
+        out = vr_link::getLiveAimSightPos(link);
+        return true;
+    }
+    if (!vr_link::isPhysicalCopyRodMode(link) || !vr_link::detail::s_handMtxValid ||
+        vr_link::isHandTrackingSuspended(link) || dComIfGp_event_runCheck()) {
+        return false;
+    }
+    if (link->getCopyRodActor() != nullptr || link->mItemAcKeep.getActor() == nullptr ||
+        link->checkCopyRodThrowAnime() || !link->checkCopyRodTopUse()) {
+        return false;
+    }
+    const bool left = link->getVrAimHandLeft();
+    MtxP hand = left ? vr_link::detail::s_leftHandMtx : vr_link::detail::s_rightHandMtx;
+    s16 yawS, pitchS;
+    getControllerAimAnglesForHand(left, &yawS, &pitchS);
+    const f32 cosPitch = cM_scos(pitchS);
+    const cXyz dir(cosPitch * cM_ssin(yawS), -cM_ssin(pitchS), cosPitch * cM_scos(yawS));
+    const cXyz start(hand[0][3], hand[1][3], hand[2][3]);
+    out = start + dir * link->getCopyRodBallDisMax();
+    return true;
 }
 
 bool beginMirrorShowsHiddenModels() {
@@ -2375,6 +2448,12 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     // While the physical boomerang is ready, hand motions mean throw/aim, so
     // the sword-swing and shield-bash gestures below stay out of the way.
     const bool boomerangReady = !screenMode && vr_link::isPhysicalBoomerangReady();
+    // Physical Dominion Rod: while the rod is out, a swing of the rod (sword)
+    // hand throws the orb (or commands the statue under control); meanwhile
+    // it doesn't press B (which would draw the sword).
+    const bool copyRodReady = !screenMode && vr_link::isPhysicalCopyRodReady();
+    const bool copyRodOwnsSwing = !screenMode && vr_link::isPhysicalCopyRodSwingable();
+    vr_link::updatePhysicalCopyRodSwing(copyRodOwnsSwing && leftSwingEvent.triggered, pacing.dt);
 
     // Physical sheathing: the sword hand's grip at its shoulder draws or puts
     // away the sword (vr_link::updatePhysicalSheathState()). Meanwhile that
@@ -2449,7 +2528,7 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     static double s_leftSwingButtonHoldRemaining = 0.0;
     if (screenMode) {
         s_leftSwingButtonHoldRemaining = 0.0;
-    } else if (leftSwingEvent.triggered && !boomerangReady && !bottleOwnsGestures) {
+    } else if (leftSwingEvent.triggered && !boomerangReady && !bottleOwnsGestures && !copyRodOwnsSwing) {
         s_leftSwingButtonHoldRemaining = kSwingButtonHoldSec;
     } else {
         s_leftSwingButtonHoldRemaining =
@@ -2654,7 +2733,7 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
     if (screenMode) {
         s_rightThrustForceReleaseRemaining = 0.0;
         s_rightThrustHoldRemaining = 0.0;
-    } else if (rightThrustEvent.triggered && !boomerangReady && !bottleOwnsGestures) {
+    } else if (rightThrustEvent.triggered && !boomerangReady && !bottleOwnsGestures && !copyRodReady) {
         s_rightThrustForceReleaseRemaining = kThrustForceReleaseSec;
         s_rightThrustHoldRemaining = 0.0; // restart release phase even if previous pulse's hold was still running
     } else {
@@ -4028,8 +4107,9 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         g_perfEyePainterMs += perfMs(perfT2, perfT3);
 
         if (auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer())) {
-            if (link->getAimSightVisible() && !dusk::getSettings().game.vrHideAimCrosshair.getValue()) {
-                vr_render::drawAimCrosshair(vr_link::getLiveAimSightPos(link));
+            cXyz aimDotPos;
+            if (getVrAimDotPos(link, aimDotPos)) {
+                vr_render::drawAimCrosshair(aimDotPos);
             }
         }
         if (menuVisible) {
@@ -4160,8 +4240,9 @@ void tick(const dusk::game_clock::FrameTiming& pacing) {
         // boomerang 2D reticle -- see drawAimCrosshair()'s own comment
         // (vr_stereo_render.hpp) for the full "all items" scoping.
         if (auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer())) {
-            if (link->getAimSightVisible() && !dusk::getSettings().game.vrHideAimCrosshair.getValue()) {
-                vr_render::drawAimCrosshair(vr_link::getLiveAimSightPos(link));
+            cXyz aimDotPos;
+            if (getVrAimDotPos(link, aimDotPos)) {
+                vr_render::drawAimCrosshair(aimDotPos);
             }
         }
 

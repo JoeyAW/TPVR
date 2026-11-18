@@ -12347,7 +12347,21 @@ BOOL daAlink_c::checkItemAction() {
             }
 #endif
 
-            if (checkReadyItem() && (itemTrigger() || (checkBoomerangCatchAnime() && itemButton()))) {
+            bool itemStart = itemTrigger() || (checkBoomerangCatchAnime() && itemButton());
+#if TARGET_PC
+            // VR Physical Dominion Rod: swinging the rod hand acts like
+            // pressing the rod's button: commands the statue under control,
+            // or brings the rod up to throw, which then throws straight away
+            // (checkUpperItemActionCopyRod()).
+            if (!itemStart && checkReadyItem() && mEquipItem == dItemNo_COPY_ROD_e &&
+                dusk::vr::isPhysicalCopyRodMode(this) && dusk::vr::consumePhysicalCopyRodSwing()) {
+                itemStart = true;
+                if (mCopyRodAcKeep.getActor() == NULL) {
+                    dusk::vr::setPhysicalCopyRodThrowPending();
+                }
+            }
+#endif
+            if (checkReadyItem() && itemStart) {
                 int var_r28 = checkItemActionInitStart();
                 if (var_r28 != -1) {
                     return var_r28;
@@ -19692,7 +19706,9 @@ void daAlink_c::setDrawHand() {
     // together (0/5 grip, 1/6 open, 3/9 grab, 4/10 ledge grip). Check with the
     // one-shot [dusk::vr::handmats] name dump if a pose looks wrong.
     // Physical Boomerang swaps the same way: its grip pose goes to the right hand.
-    if ((dusk::vr::isLeftHandedBow(this) || dusk::vr::isPhysicalBoomerangMode(this)) &&
+    // So does the Physical Dominion Rod when it's in the right hand.
+    const bool vrRodRightHand = dusk::vr::isPhysicalCopyRodRightHand(this);
+    if ((dusk::vr::isLeftHandedBow(this) || dusk::vr::isPhysicalBoomerangMode(this) || vrRodRightHand) &&
         var_r30 != 0xFB && var_r29 != 0xFB) {
         dusk::vr::logModelMaterialNamesOnce(mpLinkHandModel, "handmats");
         static const u8 kRightToLeft[] = {0, 1, 2, 2, 3, 4};      // right 5..10 -> left
@@ -19703,7 +19719,7 @@ void daAlink_c::setDrawHand() {
         var_r29 = (left <= 4) ? kLeftToRight[left] : left;
         // The guessed 2->7 pair is a loose open hand (screenshot, 2026-11-03);
         // the boomerang needs the closed grip.
-        if (left == 2 && dusk::vr::isPhysicalBoomerangMode(this)) {
+        if (left == 2 && (dusk::vr::isPhysicalBoomerangMode(this) || vrRodRightHand)) {
             var_r29 = 5;
         }
     }

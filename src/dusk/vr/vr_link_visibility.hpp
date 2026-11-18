@@ -3670,6 +3670,83 @@ inline bool consumePhysicalBoomerangThrow() {
     return thrown;
 }
 
+// "Physical Dominion Rod" (game.vrPhysicalDominionRod): the rod in the sword
+// hand, aimed with the other controller (getVrAimHandLeft()). While the rod is
+// out, swinging the rod hand throws the orb (no button needed; holding the
+// button still shows the aim first), and commands a statue that's under
+// control (in place of the item button press).
+// The game holds the rod on Link's left item joint, the sword's joint, so it
+// is already in the sword hand unless the sword/shield hands are swapped;
+// then refreshTrackedHeldItemMtxLive() moves it to the right hand with the
+// sword's swap mirror.
+inline bool isPhysicalCopyRodMode(daAlink_c* link) {
+    return link && dusk::getSettings().game.vrPhysicalDominionRod.getValue() && isFirstPerson(link) &&
+           link->getEquipItem() == dItemNo_COPY_ROD_e;
+}
+
+inline bool isPhysicalCopyRodRightHand(daAlink_c* link) {
+    return isPhysicalCopyRodMode(link) && dusk::getSettings().game.vrSwapSwordShieldHands.getValue();
+}
+
+namespace detail {
+// Long enough for the game's next 30Hz tick to see the swing.
+inline constexpr float kCopyRodSwingLatchSec = 0.1f;
+inline float s_copyRodSwingLatchSec = 0.0f;
+// Sim ticks a swing from the idle pose may wait for the ready pose to come up.
+inline constexpr uint64_t kCopyRodThrowPendingTicks = 5;
+inline bool s_copyRodThrowPending = false;
+inline uint64_t s_copyRodThrowPendingTick = 0;
+}  // namespace detail
+
+// Holding the item button, with the orb ready to throw.
+inline bool isPhysicalCopyRodReady() {
+    auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
+    return isPhysicalCopyRodMode(link) && link->checkCopyRodReadyAnime() && link->getCopyRodActor() == nullptr;
+}
+
+// The orb is on a statue (or other controllable actor) Link controls.
+inline bool isPhysicalCopyRodControlling() {
+    auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
+    return isPhysicalCopyRodMode(link) && link->getCopyRodActor() != nullptr &&
+           link->getCopyRodControllActor() != nullptr;
+}
+
+// A swing would do something: the orb is on the rod (not mid-throw), or a
+// statue is under control.
+inline bool isPhysicalCopyRodSwingable() {
+    auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
+    if (!isPhysicalCopyRodMode(link)) return false;
+    if (link->getCopyRodActor() != nullptr) return isPhysicalCopyRodControlling();
+    return link->mItemAcKeep.getActor() != nullptr && !link->checkCopyRodThrowAnime();
+}
+
+inline void setPhysicalCopyRodThrowPending() {
+    detail::s_copyRodThrowPending = true;
+    detail::s_copyRodThrowPendingTick = dusk::interp::sim_tick_seq();
+}
+
+inline bool consumePhysicalCopyRodThrowPending() {
+    const bool pending = detail::s_copyRodThrowPending &&
+                         dusk::interp::sim_tick_seq() - detail::s_copyRodThrowPendingTick <=
+                             detail::kCopyRodThrowPendingTicks;
+    detail::s_copyRodThrowPending = false;
+    return pending;
+}
+
+inline void updatePhysicalCopyRodSwing(bool swungThisFrame, float dt) {
+    if (swungThisFrame) {
+        detail::s_copyRodSwingLatchSec = detail::kCopyRodSwingLatchSec;
+    } else if (detail::s_copyRodSwingLatchSec > 0.0f) {
+        detail::s_copyRodSwingLatchSec -= dt;
+    }
+}
+
+inline bool consumePhysicalCopyRodSwing() {
+    const bool swung = detail::s_copyRodSwingLatchSec > 0.0f;
+    detail::s_copyRodSwingLatchSec = 0.0f;
+    return swung;
+}
+
 // ---- "Physical Bottle" (game.vrPhysicalBottle) ----
 // The bottle button takes any bottle out into the left hand (the hand the
 // game holds bottles in) like the empty one, so Link can walk around with it
@@ -4041,6 +4118,19 @@ inline void refreshTrackedHeldItemMtxLive() {
             mirrorAxis = dusk::getSettings().game.vrBowSwapMirrorAxis.getValue();
             extraFlipAxis = dusk::getSettings().game.vrBowSwapExtraFlipAxis.getValue();
         }
+        // Physical Dominion Rod with swapped sword/shield hands: the rod goes
+        // where the sword goes, the right hand, through the sword's own swap
+        // mirror and offset (both items sit on Link's left item joint).
+        float offsetX = 0.0f, offsetY = 0.0f, offsetZ = 0.0f;
+        if (attach == HeldItemAttach::Left && isPhysicalCopyRodRightHand(link)) {
+            const auto& game = dusk::getSettings().game;
+            trackedHandMtx = detail::s_rightHandMtx;
+            mirrorAxis = game.vrSwapSwordGripMirrorAxis.getValue();
+            extraFlipAxis = game.vrSwapSwordExtraFlipAxis.getValue();
+            offsetX = game.vrSwapSwordGripOffsetX.getValue();
+            offsetY = game.vrSwapSwordGripOffsetY.getValue();
+            offsetZ = game.vrSwapSwordGripOffsetZ.getValue();
+        }
         if (attached && isHandTrackingSuspended(link)) {
             // Show Roll Animations: follow the animated hand instead.
             refreshRestingPoseSmoothed(heldItemModel, detail::s_heldItemRestingTick,
@@ -4052,7 +4142,8 @@ inline void refreshTrackedHeldItemMtxLive() {
             markModelJointsLive(heldItemModel);
             detail::s_heldItemTrackedThisFrame = true;
         } else if (applyTrackedItemMtxIfAttached(heldItemModel, attached, detail::s_heldItemRawBasis.mtx,
-                                                  handJointMtx, trackedHandMtx, mirrorAxis, extraFlipAxis)) {
+                                                  handJointMtx, trackedHandMtx, mirrorAxis, extraFlipAxis,
+                                                  offsetX, offsetY, offsetZ)) {
             markModelJointsLive(heldItemModel);
             detail::s_heldItemTrackedThisFrame = true;
         }
@@ -4196,9 +4287,26 @@ inline void refreshTrackedHeldItemMtxLive() {
 // before refreshTrackedHeldItemMtxLive() moved the rod to the tracked hand. So
 // with the rod tracked, the orb floated where the resting rod would be. Re-place
 // it every frame from the tracked rod. Run after refreshTrackedHeldItemMtxLive().
+namespace detail {
+// The tracked rod tip (where the orb sits on it), recorded every frame the rod
+// is tracked. daCrod_c launches from and flies back to it
+// (getPhysicalCopyRodTipPos()): at sim-tick time the game's own rod pose is
+// the untracked one.
+inline bool s_copyRodTipValid = false;
+inline cXyz s_copyRodTipPos;
+inline uint64_t s_copyRodTipTick = 0;
+}  // namespace detail
+
 inline void refreshCopyRodBallLive() {
     auto* link = static_cast<daAlink_c*>(dComIfGp_getLinkPlayer());
-    if (!link || !detail::s_heldItemTrackedThisFrame) return;
+    if (!link || !detail::s_heldItemTrackedThisFrame || link->getEquipItem() != dItemNo_COPY_ROD_e) {
+        detail::s_copyRodTipValid = false;
+        return;
+    }
+    if (daCrod_c::getRodTipPos(&detail::s_copyRodTipPos)) {
+        detail::s_copyRodTipTick = dusk::interp::sim_tick_seq();
+        detail::s_copyRodTipValid = true;
+    }
     // While held, the orb actor lives in the generic held-item slot
     // (mItemAcKeep); mCopyRodAcKeep is only filled once it's thrown.
     fopAc_ac_c* actor = link->mItemAcKeep.getActor();
@@ -4210,6 +4318,15 @@ inline void refreshCopyRodBallLive() {
     if (!rod->mpBallModel || !rod->applyRodAttachedTransform()) return;
     rod->mpBallModel->calc();
     markModelJointsLive(rod->mpBallModel);
+}
+
+// The tracked rod tip, if it was placed within the last couple of sim ticks.
+inline bool getPhysicalCopyRodTipPos(cXyz& out) {
+    if (!detail::s_copyRodTipValid || dusk::interp::sim_tick_seq() - detail::s_copyRodTipTick > 2) {
+        return false;
+    }
+    out = detail::s_copyRodTipPos;
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -4819,10 +4936,14 @@ inline float s_slingDrawnLatchSec = 0.0f;
 inline float s_slingPullUnits = 0.0f;
 inline bool s_slingPouchValid = false;
 inline cXyz s_slingPouchPos;
-// Where the pouch was when the button was let go. The stone is made on the
-// tick after the release, when nothing is loaded any more.
+// Where the stone leaves from: the band's rest point between the posts on the
+// slingshot (s_slingGripPos, updated while loaded), kept when the button is
+// let go. The stone is made on the tick after the release, when nothing is
+// loaded any more. The aim line runs pouch -> posts, so this is on it.
 inline float s_slingShotPosSec = 0.0f;
 inline cXyz s_slingShotPos;
+inline bool s_slingGripValid = false;
+inline cXyz s_slingGripPos;
 inline DrawAnimJoint s_slingPouch;  // PRELORD
 // The pouch at rest between the posts: the joint PSHOOT moves furthest, at
 // its last frame. Kept in the left (slingshot) hand's frame, refreshed each
@@ -4858,8 +4979,8 @@ inline bool isPhysicalSlingshotDrawn() {
 // Where the stone should leave from: the pouch while loaded, or where it was
 // let go just now. False -> the game's own position.
 inline bool getPhysicalSlingshotShotPos(cXyz& out) {
-    if (detail::s_slingNocked && detail::s_slingPouchValid) {
-        out = detail::s_slingPouchPos;
+    if (detail::s_slingNocked && detail::s_slingGripValid) {
+        out = detail::s_slingGripPos;
         return true;
     }
     if (detail::s_slingShotPosSec > 0.0f) {
@@ -4891,12 +5012,13 @@ inline void updatePhysicalSlingshotState(const Vec3f& leftAimForward, float dt) 
                       (link->checkBowReloadAnime() || link->checkBowChargeWaitAnime()) && link->itemButton() &&
                       dir.abs() > 0.001f;
     if (!held) {
-        if (detail::s_slingNocked && detail::s_slingPouchValid) {
-            detail::s_slingShotPos = detail::s_slingPouchPos;
+        if (detail::s_slingNocked && detail::s_slingGripValid) {
+            detail::s_slingShotPos = detail::s_slingGripPos;
             detail::s_slingShotPosSec = kSlingShotPosHoldSec;
         }
         detail::s_slingNocked = false;
         detail::s_slingPouchValid = false;
+        detail::s_slingGripValid = false;
         detail::s_slingPullUnits = 0.0f;
         detail::s_slingDrawSoundEvent = false;
         detail::s_slingDrawSoundArmed = true;
@@ -4942,6 +5064,8 @@ inline void updatePhysicalSlingshotState(const Vec3f& leftAimForward, float dt) 
     const cXyz pouch = grip - dir * pull;
     detail::s_slingPouchPos = pouch;
     detail::s_slingPouchValid = true;
+    detail::s_slingGripPos = grip;
+    detail::s_slingGripValid = true;
 
     // Lock the hand to the pouch (only moves it past full pull or while the
     // two-point aim is still fading in).
@@ -5183,9 +5307,13 @@ inline int consumeClimbGrabEvent() {
 // the left hand, X on the right). daAlink_c::checkItemChangeFromButton() acts
 // on the request, so the game decides whether Link can draw right now, the
 // same as for the B button.
+// Off while a bow, slingshot, boomerang or Dominion Rod is up (item button
+// held): drawing back near the sword shoulder took that grip's button away,
+// which let go of the item -- an arrow fired when pulled too far back.
 inline bool isPhysicalSheathMode(daAlink_c* link) {
     return link && dusk::getSettings().game.vrPhysicalSheath.getValue() && isFirstPerson(link) &&
-           daPy_py_c::checkSwordGet() && !isPhysicalClimbActive();
+           daPy_py_c::checkSwordGet() && !isPhysicalClimbActive() && !link->checkBowAnime() &&
+           !link->checkBoomerangReadyAnime() && !link->checkCopyRodReadyAnime();
 }
 
 enum class SheathRequest { None = 0, Draw = 1, Sheathe = 2 };

@@ -36,6 +36,8 @@ public:
     // when the rod is moved every frame (tracked hand). Only while the orb sits
     // on the rod (param 0/1). Returns false otherwise.
     bool applyRodAttachedTransform();
+    // Where the orb sits on the rod, from the rod model's current pose.
+    static bool getRodTipPos(cXyz* out);
 #endif
 
     static fopAc_ac_c* makeIronBallDummy(fopAc_ac_c* p_actor) {

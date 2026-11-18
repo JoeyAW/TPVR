@@ -513,6 +513,10 @@ u32 daAlink_c::checkSpinnerRide() const {
 // VR: which controller aims the current item (see setBodyAngleToCamera()).
 // Also used to keep the aim dot on that hand between sim ticks.
 bool daAlink_c::getVrAimHandLeft() {
+    // Physical Dominion Rod: aim with the hand not holding the rod.
+    if (mEquipItem == dItemNo_COPY_ROD_e && dusk::vr::isPhysicalCopyRodMode(this)) {
+        return dusk::vr::isPhysicalCopyRodRightHand(this);
+    }
     if (mEquipItem == dItemNo_HOOKSHOT_e || mEquipItem == dItemNo_COPY_ROD_e) {
         return true;
     }

@@ -197,6 +197,38 @@ BOOL daAlink_c::checkUpperItemActionCopyRod() {
         mItemVar0.field_0x3018--;
     }
 
+#if TARGET_PC
+    // VR Physical Dominion Rod: swinging the rod hand throws, not releasing
+    // the button. A swing from the idle pose got here through the ready pose
+    // (checkItemAction()) and throws as soon as it's up.
+    if (dusk::vr::isPhysicalCopyRodMode(this)) {
+        if (checkReadyItem() && checkCopyRodReadyAnime()) {
+            const bool pendingThrow = dusk::vr::consumePhysicalCopyRodThrowPending();
+            if (dusk::vr::consumePhysicalCopyRodSwing() || pendingThrow) {
+                setUpperAnimeParam(0x53, UPPER_2, &mpHIO->mItem.mBoomerang.m.mThrowAnm);
+                mSearchBallScale = getCopyRodBallDisMax();
+                if (!mSight.getLockFlg()) {
+                    mSearchBallScale -= 500.0f;
+                }
+                // The orb leaves when the animation passes frame 6.5. Start
+                // one step short of it so it goes with the swing (same as the
+                // Physical Boomerang's 4.5 for its 5.5).
+                mUpperFrameCtrl[2].setFrame(5.5f);
+                getNowAnmPackUpper(UPPER_2)->setFrame(5.5f);
+                return true;
+            }
+            if (!itemButton()) {
+                // Released without swinging: same as the cancel button.
+                seStartSystem(Z2SE_SY_ITEM_USE_CANCEL);
+                resetUpperAnime(UPPER_2, 3.0f);
+                checkWaitAction();
+                return true;
+            }
+        }
+        return cancelUpperItemReadyAnime(0);
+    }
+#endif
+
     if (checkReadyItem() && !itemButton() && checkCopyRodReadyAnime()) {
         setUpperAnimeParam(0x53, UPPER_2, &mpHIO->mItem.mBoomerang.m.mThrowAnm);
         mSearchBallScale = getCopyRodBallDisMax();
@@ -236,6 +268,13 @@ int daAlink_c::checkNextActionCopyRod() {
     if (!checkCopyRodAnime()) {
         setCopyRodReadyAnime();
         setFastShotTimer();
+#if TARGET_PC
+        // VR Physical Dominion Rod: aim from the start, so a quick swing goes
+        // where the left controller points rather than where Link faces.
+        if (dusk::vr::isPhysicalCopyRodMode(this)) {
+            mFastShotTime = 0;
+        }
+#endif
 
         if (!checkAttentionLock()) {
             field_0x2fe4 = shape_angle.y;

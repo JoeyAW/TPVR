@@ -278,6 +278,13 @@ void daArrow_c::arrowShooting() {
     } else if (dComIfGp_checkPlayerStatus0(0, 0x200000) || fopAcM_GetParam(this) == 2)  {
         cXyz* pos = link->checkBowCameraArrowPosP(&shape_angle.x, &shape_angle.y);
         if (pos != NULL) {
+#if TARGET_PC
+            // VR: a charged shot keeps the position setKeepMatrix() gave it
+            // (the arrow on the bow / in hand), like a normal shot; only its
+            // direction comes from the aim. Hawkeye still shoots from the
+            // zoomed view.
+            if (dComIfGp_checkPlayerStatus0(0, 0x200000) || !dusk::vr::isArrowShotFromTrackedHand(link))
+#endif
             current.pos = *pos;
             
             if (link->checkMagneBootsOn()) {

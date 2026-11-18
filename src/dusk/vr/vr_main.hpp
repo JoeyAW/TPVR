@@ -452,6 +452,26 @@ float getPhysicalSlingshotBandFrame(float frameMax);
 bool isPhysicalBoomerangMode(daAlink_c* link);
 // True once per throw motion.
 bool consumePhysicalBoomerangThrow();
+// Physical Dominion Rod (game.vrPhysicalDominionRod): rod in the sword hand,
+// aimed with the left controller, used by swinging the rod hand.
+bool isPhysicalCopyRodMode(daAlink_c* link);
+// The rod sits in the right hand (sword/shield hands swapped).
+bool isPhysicalCopyRodRightHand(daAlink_c* link);
+// True once per rod swing.
+bool consumePhysicalCopyRodSwing();
+// A swing took the rod from its idle pose into the ready pose: throw as soon
+// as that pose is up (within a few sim ticks).
+void setPhysicalCopyRodThrowPending();
+bool consumePhysicalCopyRodThrowPending();
+// The orb's launch direction: where the aiming controller (the hand not holding
+// the rod) points, as Link's body pitch / world yaw. False when not in this mode.
+bool getPhysicalCopyRodThrowAngles(daAlink_c* link, s16* outPitchS, s16* outYawS);
+// The orb's launch point: the tracked rod tip. False when not in this mode.
+bool getPhysicalCopyRodTipPos(daAlink_c* link, float& outX, float& outY, float& outZ);
+// First person with tracked hands: a fully charged arrow leaves from the arrow
+// in hand / on the bow, like a normal shot, instead of the game's fixed point
+// in front of Link's chest (daArrow_c::arrowShooting()).
+bool isArrowShotFromTrackedHand(daAlink_c* link);
 // Physical bottle (game.vrPhysicalBottle, vr_link_visibility.hpp): bottle in
 // the left hand, upright in the fist. For daAlink_c, once per tick.
 bool isPhysicalBottleMode(daAlink_c* link);

@@ -61,9 +61,7 @@ I do not condone the usage of AI for writing, "art", deepfakes, and music (espec
 
 With that being said, for a task like this, I believe it is acceptable to create a project that does not currently exist by writing the code using AI as long as you actually take the time to refine the experience and do not harm other people's repos or code in the process. In this case, I simply forked Dusklight and modified it in a separate instance over the course of multiple weeks, without pestering the devs with possible spaghetti-code pull requests. I wrote this statement and edited the README in my own words, and I made the logo using Paint.NET despite having very little graphic design experience. I have not and do not plan to ever use or create AI-generated assets, only code.
 
-I have seen many recent projects spring up in the same vein: vibecoded VR ports of existing games. Everybody is entitled to their own opinion, and different backgrounds will lead people to take different stances. However, I believe that you can either take this VR port of the original game and enjoy it for what it is, regardless of AI or not, or you can simply ignore it and play the game in flatscreen—it's still a fantastic experience.
-
-And yes—I used an em-dash there. You can type it with on your keyboard with Alt+0151. Thanks ChatGPT for ruining informal basic writing.
+I have seen many recent projects spring up in the same vein: vibecoded VR ports of existing games. Everybody is entitled to their own opinion, and different backgrounds will lead people to take different stances. However, I believe that you can either take this VR port of the original game and enjoy it for what it is, regardless of AI or not, or you can simply ignore it and play the game in flatscreen. It's still a fantastic experience.
 </details>
 
 # Credits

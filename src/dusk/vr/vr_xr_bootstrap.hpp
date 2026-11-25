@@ -381,10 +381,11 @@ inline Bootstrap initialize() {
 
     const char* requiredExtensions[] = {
         XR_KHR_D3D12_ENABLE_EXTENSION_NAME,
+        "XR_VALVE_frame_controller_interaction",
     };
 
     XrInstanceCreateInfo instanceInfo{XR_TYPE_INSTANCE_CREATE_INFO};
-    instanceInfo.enabledExtensionCount = 1;
+    instanceInfo.enabledExtensionCount = 2;
     instanceInfo.enabledExtensionNames = requiredExtensions;
     std::strncpy(instanceInfo.applicationInfo.applicationName, "Dusklight VR",
                  XR_MAX_APPLICATION_NAME_SIZE - 1);
